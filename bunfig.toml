@@ -1,0 +1,5 @@
+# Resolve the @belal-elsabbagh-apex scope from GitHub Packages (private).
+# Token comes from the NODE_AUTH_TOKEN env var (a GitHub PAT with read:packages,
+# or the GITHUB_TOKEN in CI). Same scope config the consumer repos use.
+[install.scopes]
+"@belal-elsabbagh-apex" = { url = "https://npm.pkg.github.com", token = "$NODE_AUTH_TOKEN" }

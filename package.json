@@ -1,0 +1,48 @@
+{
+  "name": "@belal-elsabbagh-apex/copilot-mcp",
+  "version": "1.2.0",
+  "type": "module",
+  "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
+  "author": "Belal Elsabbagh",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/belal-elsabbagh-apex/copilot-mcp.git"
+  },
+  "main": "dist/server.js",
+  "bin": {
+    "copilot-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "config.example.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "build": "bun build src/server.ts --target node --format esm --packages external --outfile dist/server.js && chmod +x dist/server.js",
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src",
+    "format": "biome format --write src",
+    "prepack": "bun run build",
+    "prepublishOnly": "bun run typecheck && bun run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  }
+}
