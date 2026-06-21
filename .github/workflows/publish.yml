@@ -1,11 +1,13 @@
 name: Publish (private GitHub Packages)
 
 # Publishes @belal-elsabbagh-apex/copilot-mcp to this repo's GitHub Packages
-# registry whenever a GitHub Release is published, or on manual dispatch.
-# The package stays PRIVATE (inherits the repo's visibility / publishConfig.access).
+# registry on every version tag push (vX.Y.Z), or on manual dispatch. Keyed off the
+# tag (not `release: published`) because a GITHUB_TOKEN-created release does not
+# trigger workflows. The package stays PRIVATE (publishConfig.access=restricted).
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 jobs:

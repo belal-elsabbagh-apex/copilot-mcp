@@ -79,7 +79,18 @@ the split legacy files.
 
 ## Publishing
 
-Publishing runs in CI: cut a GitHub Release (or trigger the **Publish** workflow
-manually). The workflow uses the repo's `GITHUB_TOKEN` with `packages: write` and runs
-`bun publish --access restricted`, keeping the package private. To bump, edit `version`
-in `package.json` before releasing.
+Publishing is tag-driven. Bump `version` in `package.json`, commit, then push a matching
+`vX.Y.Z` tag:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+That one tag push fans out to two workflows (both keyed off the tag, because a
+`GITHUB_TOKEN`-created release does not trigger other workflows):
+
+- **Release on tag** (`release.yml`) — creates a GitHub Release with auto-generated notes.
+- **Publish** (`publish.yml`) — typechecks, builds, and runs `bun publish --access
+  restricted` using the repo's `GITHUB_TOKEN` (`packages: write`), keeping the package
+  private. Also runnable manually via **workflow_dispatch**.

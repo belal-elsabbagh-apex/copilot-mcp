@@ -1,0 +1,25 @@
+name: Release on tag
+
+# Push a tag like v1.2.0 -> create a GitHub Release with auto-generated notes.
+# The publish workflow keys off the SAME tag push (a GITHUB_TOKEN-created release
+# does NOT trigger other workflows), so publishing happens in parallel.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
