@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { Env, UipathConfig } from "./config.js";
 import { getUipath, resolveCreds } from "./config.js";
 import { type BeOrder, fetchOrder, makeClient, pad } from "./copilot-client.js";
+import { prop, stringProp } from "./util.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error).
 function toMDY(input: string | null | undefined): string {
@@ -23,9 +24,12 @@ function toMDY(input: string | null | undefined): string {
   return "";
 }
 
-const decodeJwtId = (t: string | undefined): string | null => {
+const decodeJwtId = (t: string | undefined): string | number | null => {
   try {
-    return JSON.parse(Buffer.from((t ?? "").split(".")[1] ?? "", "base64").toString()).id ?? null;
+    const seg = (t ?? "").split(".")[1] ?? "";
+    const payload: unknown = JSON.parse(Buffer.from(seg, "base64").toString());
+    const id = prop(payload, "id");
+    return typeof id === "string" || typeof id === "number" ? id : null;
   } catch {
     return null;
   }
@@ -93,15 +97,15 @@ export async function buildQueueItem(
     json: { email: envCfg.email, password: envCfg.password },
   });
   if (lr.status >= 400) throw new Error(`login failed ${lr.status}: ${lr.text.slice(0, 200)}`);
-  const token = (lr.data as { token?: string } | null)?.token;
+  const token = stringProp(lr.data, "token");
   const physicianId = decodeJwtId(token);
 
   const o = await fetchOrder(client, orderUid);
   const notes: string[] = [];
 
-  const form = o.referralFormJSON ?? {};
-  const from = (form.from ?? {}) as Record<string, unknown>;
-  const to = (form.to ?? {}) as Record<string, unknown>;
+  const form: NonNullable<BeOrder["referralFormJSON"]> = o.referralFormJSON ?? {};
+  const from: Record<string, unknown> = form.from ?? {};
+  const to: Record<string, unknown> = form.to ?? {};
   const fac = o.referredFacility ?? {};
   const cpts = o.CPTCodes ?? [];
   const icds = o.ICDCodes ?? [];

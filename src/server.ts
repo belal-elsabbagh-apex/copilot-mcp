@@ -23,6 +23,7 @@ import { resolveCreds } from "./config.js";
 import { login, makeClient, ORDER_MODE, verify } from "./copilot-client.js";
 import { type MirrorResult, mirrorOne } from "./mirror.js";
 import { buildQueueItem } from "./queue-item.js";
+import { envelopeRows, stringProp } from "./util.js";
 
 // CRITICAL: progress is logged via console.log. MCP stdio uses STDOUT for the
 // JSON-RPC protocol, so any stray stdout corrupts it. Route all console.* to stderr.
@@ -51,10 +52,7 @@ interface OrderRow {
   ICDCodes?: unknown[];
   CPTCodes?: unknown[];
 }
-const ordersOf = (data: unknown): OrderRow[] => {
-  const rows = (data as { data?: unknown } | null)?.data;
-  return Array.isArray(rows) ? (rows as OrderRow[]) : [];
-};
+const ordersOf = (data: unknown): OrderRow[] => envelopeRows(data) as OrderRow[];
 
 // A prod order clones to forReview only if it has facility + type + orderNames.
 // Returns the candidate summary, or null if it would get stuck 'incomplete'.
@@ -230,7 +228,7 @@ server.registerTool(
       const results = [];
       for (const uid of uids) {
         const r = await pre.req("DELETE", `/api/v1/orders/${uid}`);
-        const msg = (r.data as { msg?: string } | null)?.msg ?? r.text.slice(0, 80);
+        const msg = stringProp(r.data, "msg") ?? r.text.slice(0, 80);
         results.push({ uid, status: r.status, ok: r.status < 400, msg });
       }
       return ok({

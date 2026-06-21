@@ -14,6 +14,7 @@ import { getOverrides, type OrderOverride } from "./config.js";
 import {
   type BeFacility,
   type BeOrder,
+  type BeSpeciality,
   type HttpClient,
   login,
   makeClient,
@@ -22,6 +23,7 @@ import {
   toMDY,
   verify,
 } from "./copilot-client.js";
+import { envelopeRows, prop, stringProp } from "./util.js";
 
 export interface MirrorResult {
   prodUid: string;
@@ -150,17 +152,9 @@ async function resolvePreprodFacility(
   }
   // Defensive: the endpoint may return {data:[...]}, a bare array, or (on error) a
   // non-iterable object/string. Only iterate a real array — otherwise no remap.
-  const d = r.data as { data?: unknown } | unknown[] | null;
-  const spd: Array<{ specialityUid?: string; referredFacilities?: BeFacility[] }> = Array.isArray(
-    (d as { data?: unknown } | null)?.data,
-  )
-    ? ((d as { data: unknown[] }).data as Array<{
-        specialityUid?: string;
-        referredFacilities?: BeFacility[];
-      }>)
-    : Array.isArray(d)
-      ? (d as Array<{ specialityUid?: string; referredFacilities?: BeFacility[] }>)
-      : [];
+  // Endpoint returns either { data: [...] } or a bare [...]; both -> the speciality list.
+  const raw = r.data;
+  const spd = (Array.isArray(raw) ? raw : envelopeRows(raw)) as BeSpeciality[];
   for (const s of spd) {
     for (const f of s.referredFacilities ?? []) {
       const fnpi = f.NPI ?? f.npi;
@@ -212,7 +206,7 @@ export async function mirrorOne(
   const draftRes = await pre.req("POST", "/api/v1/orders");
   if (draftRes.status >= 400)
     throw new Error(`create draft failed ${draftRes.status}: ${draftRes.text.slice(0, 300)}`);
-  const newUid = (draftRes.data as { order?: { orderUid?: string } }).order?.orderUid;
+  const newUid = stringProp(prop(draftRes.data, "order"), "orderUid");
   if (!newUid) throw new Error(`create draft returned no orderUid: ${draftRes.text.slice(0, 200)}`);
   console.log(`  new draft: ${newUid}`);
   const put = mkPut(pre, newUid);
@@ -377,8 +371,7 @@ async function fetchProd(c: HttpClient, uid: string): Promise<BeOrder> {
     },
   });
   if (r.status >= 400) throw new Error(`extract failed ${r.status}: ${r.text.slice(0, 300)}`);
-  const arr = (r.data as { data?: unknown } | null)?.data;
-  const o = Array.isArray(arr) ? (arr[0] as BeOrder | undefined) : undefined;
+  const o = envelopeRows(r.data)[0] as BeOrder | undefined;
   if (!o) throw new Error(`prod order ${uid} not found`);
   return o;
 }

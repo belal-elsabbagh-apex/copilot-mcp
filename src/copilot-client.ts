@@ -4,6 +4,8 @@
 // the legacy `.planning/copy_order_prod_to_preprod.mjs` harness. The order mirror
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
+import { envelopeRows } from "./util.js";
+
 // orderMode sent on every /orders/filter call (orders + pcp notes).
 export const ORDER_MODE = '["orders_only_mode","pcp_notes_mode"]';
 
@@ -147,10 +149,8 @@ export async function login(c: HttpClient, email: string, password: string): Pro
 }
 
 // Pull a single order row out of an /orders/filter response (defensive about shape).
-const firstOrder = (data: unknown): BeOrder | undefined => {
-  const rows = (data as { data?: unknown } | null)?.data;
-  return Array.isArray(rows) ? (rows[0] as BeOrder | undefined) : undefined;
-};
+const firstOrder = (data: unknown): BeOrder | undefined =>
+  envelopeRows(data)[0] as BeOrder | undefined;
 
 // /orders/filter for one uid; throws if the order isn't found in this env.
 export async function fetchOrder(c: HttpClient, uid: string): Promise<BeOrder> {
