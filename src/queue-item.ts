@@ -11,7 +11,7 @@ import { type BeOrder, fetchOrder, makeClient, pad } from "./copilot-client.js";
 import { prop, stringProp } from "./util.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error).
-function toMDY(input: string | null | undefined): string {
+export function toMDY(input: string | null | undefined): string {
   if (!input) return "";
   const s = String(input).trim();
   const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
@@ -24,7 +24,7 @@ function toMDY(input: string | null | undefined): string {
   return "";
 }
 
-const decodeJwtId = (t: string | undefined): string | number | null => {
+export const decodeJwtId = (t: string | undefined): string | number | null => {
   try {
     const seg = (t ?? "").split(".")[1] ?? "";
     const payload: unknown = JSON.parse(Buffer.from(seg, "base64").toString());
@@ -36,7 +36,7 @@ const decodeJwtId = (t: string | undefined): string | number | null => {
 };
 
 // "Last, First M" -> { last:"LAST", first:"FIRST" } (first token after comma, uppercased)
-function splitName(full: string | undefined): { last: string; first: string } {
+export function splitName(full: string | undefined): { last: string; first: string } {
   const s = String(full ?? "").trim();
   const ci = s.indexOf(",");
   if (ci < 0) return { last: s.toUpperCase(), first: "" };

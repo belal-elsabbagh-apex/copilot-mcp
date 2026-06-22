@@ -95,7 +95,9 @@ export interface ResolvedCreds {
 
 // ---- Loading -------------------------------------------------------------
 
-const CONFIG_PATH =
+// Resolved lazily (per loadConfig call) so the env var is honored even if it is set
+// after this module is first evaluated — notably under the test runner.
+const configPath = (): string =>
   process.env["COPILOT_MCP_CONFIG"] ?? new URL("../config.local.json", import.meta.url).pathname;
 // Split legacy config lives in COPILOT_MCP_LOCAL_DIR (falls back to a `.local` dir
 // next to the package for in-tree/dev use).
@@ -145,18 +147,19 @@ let _config: Config | undefined;
 // pair. Validation errors name the exact field + path so misconfig is obvious.
 export function loadConfig(): Config {
   if (_config) return _config;
+  const cfgPath = configPath();
   let parsed: unknown;
   let source: string;
   try {
-    parsed = readJson(CONFIG_PATH, "config");
-    source = CONFIG_PATH;
+    parsed = readJson(cfgPath, "config");
+    source = cfgPath;
   } catch (e) {
     if (!(e instanceof ConfigMissing)) throw e;
     try {
       parsed = loadLegacy();
       source = `legacy split config (${LEGACY_CREDS} + ${LEGACY_UIPATH})`;
       console.warn(
-        `copilot-mcp: ${CONFIG_PATH} not found; using ${source}. Migrate to a single config — see config.example.json.`,
+        `copilot-mcp: ${cfgPath} not found; using ${source}. Migrate to a single config — see config.example.json.`,
       );
     } catch (e2) {
       if (e2 instanceof ConfigMissing) {
@@ -176,6 +179,11 @@ export function loadConfig(): Config {
   }
   _config = result.data;
   return _config;
+}
+
+// Clear the memoized config. Intended for tests that swap COPILOT_MCP_CONFIG.
+export function resetConfigCache(): void {
+  _config = undefined;
 }
 
 export const getUipath = (): UipathConfig => loadConfig().uipath;

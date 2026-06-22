@@ -14,7 +14,9 @@
 //
 // See the copilot + copilot-order-mirror skills for the full flow and quirks.
 
+import { realpathSync } from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -25,11 +27,19 @@ import { type MirrorResult, mirrorOne } from "./mirror.js";
 import { buildQueueItem } from "./queue-item.js";
 import { envelopeRows, stringProp } from "./util.js";
 
-// CRITICAL: progress is logged via console.log. MCP stdio uses STDOUT for the
-// JSON-RPC protocol, so any stray stdout corrupts it. Route all console.* to stderr.
-console.log = (...a: unknown[]) => process.stderr.write(`${a.map(String).join(" ")}\n`);
+// CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
+// write corrupts it. We therefore never let console.log/info/warn reach stdout:
+//   - progress (console.log/info) is silent by default and only surfaces on stderr
+//     when verbose is on (LOG_LEVEL=debug|info|warn|trace, or COPILOT_MCP_DEBUG set);
+//   - warnings (console.warn) and errors (native console.error) always go to stderr.
+const toStderr = (...a: unknown[]) => process.stderr.write(`${a.map(String).join(" ")}\n`);
+const VERBOSE =
+  !!process.env["COPILOT_MCP_DEBUG"] ||
+  ["debug", "info", "warn", "trace"].includes((process.env["LOG_LEVEL"] ?? "").toLowerCase());
+const swallow = () => {};
+console.log = VERBOSE ? toStderr : swallow;
 console.info = console.log;
-console.warn = console.log;
+console.warn = toStderr;
 
 const ok = (obj: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }],
@@ -74,7 +84,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
   };
 };
 
-const server = new McpServer({ name: "copilot", version: "1.2.0" });
+export const server = new McpServer({ name: "copilot", version: "1.2.0" });
 
 // ---- clone_order ---------------------------------------------------------
 server.registerTool(
@@ -379,5 +389,21 @@ server.registerTool(
   },
 );
 
-await server.connect(new StdioServerTransport());
-console.log("copilot MCP server ready (stdio)");
+// Only open the stdio transport when this module is the process entrypoint —
+// importing it (e.g. from the test suite) must not consume stdin. We compare the
+// invoked script to this module, resolving symlinks so the `copilot-mcp` bin
+// (a symlink into node_modules/.bin) still matches dist/server.js.
+function isEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  await server.connect(new StdioServerTransport());
+  console.log("copilot MCP server ready (stdio)");
+}
