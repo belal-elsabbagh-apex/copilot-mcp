@@ -33,12 +33,26 @@ order JSON; defaults to the OS temp dir).
 ## Local development
 
 ```bash
-bun install
+bun install          # also installs the lefthook pre-commit hook (via `prepare`)
 bun run typecheck
+bun run lint         # biome check
+bun test             # bun's built-in test runner (src/*.test.ts)
 bun run build        # bundle src -> dist/server.js (node-runnable, what npx/bunx execute)
 bun run start        # run from source via bun (no build needed)
 bun run dev          # watch mode
 ```
+
+### Exercising the tools
+
+`bun run inspect` launches the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
+against the server from source — a UI to list and call the tools without a host. Point it
+at a config first (e.g. `COPILOT_MCP_CONFIG=… bun run inspect`).
+
+Logging is silent by default so it never corrupts the stdio JSON-RPC stream. Set
+`LOG_LEVEL=debug` (or `COPILOT_MCP_DEBUG=1`) to route progress logs to **stderr**.
+
+A `pre-commit` hook (lefthook) runs `biome check` + `typecheck` on commit; CI
+(`.github/workflows/ci.yml`) runs typecheck/lint/build/test on every PR and push to `main`.
 
 ## Installing from GitHub Packages (private)
 
