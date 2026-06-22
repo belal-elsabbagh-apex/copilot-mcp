@@ -52,6 +52,13 @@ const UipathSchema = z
       .object({ prod: z.string().min(1).optional(), pre_prod: z.string().min(1).optional() })
       .partial()
       .optional(),
+    // Numeric UiPath folder ids (OrganizationUnitId) per env. Used by the queue
+    // endpoints, which the tenant addresses by org-unit id rather than folder path.
+    // Optional — defaults come from reference.ts (prod 231517 / pre_prod 434039).
+    folderIdByEnv: z
+      .object({ prod: z.string().min(1).optional(), pre_prod: z.string().min(1).optional() })
+      .partial()
+      .optional(),
     // Extra fields used ONLY by build_queue_item (optional for analyze-only setups):
     noteBucket: z.string().min(1).optional(),
     queueUrl: z.string().min(1).optional(),
