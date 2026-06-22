@@ -24,7 +24,24 @@ import { analyzeOrderExecution } from "./analyze.js";
 import { resolveCreds } from "./config.js";
 import { login, makeClient, ORDER_MODE, verify } from "./copilot-client.js";
 import { type MirrorResult, mirrorOne } from "./mirror.js";
+import { listQueue, pullQueueItem } from "./queue.js";
 import { buildQueueItem } from "./queue-item.js";
+import {
+  ORDER_LIFECYCLE,
+  PORTALS,
+  QUEUE_ITEM_SCHEMA,
+  RESULT_CONTRACT,
+  SAFETY_RULES,
+  UIPATH_FOLDERS,
+} from "./reference.js";
+import { findStuckOrders } from "./sweep.js";
+import {
+  fetchJobLogs,
+  fetchJobVideoUrl,
+  jobDeepLink,
+  listRecentJobs,
+  resolveFolder,
+} from "./uipath.js";
 import { envelopeRows, stringProp } from "./util.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
@@ -383,6 +400,327 @@ server.registerTool(
         }
       }
       return ok(out);
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- Resources (static reference data) -----------------------------------
+// Read-only, bundled knowledge ported from ../RPAPlaywright/optum (see reference.ts).
+// Live data (queues/jobs/orders) is exposed via tools below, not resources.
+const jsonResource = (
+  name: string,
+  uri: string,
+  title: string,
+  description: string,
+  data: unknown,
+): void => {
+  server.registerResource(
+    name,
+    uri,
+    { title, description, mimeType: "application/json" },
+    async (u) => ({
+      contents: [
+        { uri: u.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) },
+      ],
+    }),
+  );
+};
+
+jsonResource(
+  "portals",
+  "copilot://reference/portals",
+  "Portal registry",
+  "Auth-submit portals: queue name -> queue def ids, account, platform family, build artifact, volume.",
+  PORTALS,
+);
+jsonResource(
+  "uipath-folders",
+  "copilot://reference/uipath-folders",
+  "UiPath folders by env",
+  "Per-env UiPath folder name, OrganizationUnitId, FolderKey, and whether it fires real BE calls.",
+  UIPATH_FOLDERS,
+);
+jsonResource(
+  "queue-item-schema",
+  "copilot://schema/queue-item",
+  "Queue item (SpecificContent) schema",
+  "Base SpecificContent fields shared across portal auth-submit queue items.",
+  QUEUE_ITEM_SCHEMA,
+);
+jsonResource(
+  "result-contract",
+  "copilot://schema/result-contract",
+  "result.json output contract",
+  "The result.json contract every portal automation writes and UiPath reads.",
+  RESULT_CONTRACT,
+);
+jsonResource(
+  "order-lifecycle",
+  "copilot://reference/order-lifecycle",
+  "Copilot order lifecycle",
+  "Order statuses (drafted -> forReview -> inProgress) and tolerated error codes.",
+  ORDER_LIFECYCLE,
+);
+jsonResource(
+  "safety-rules",
+  "copilot://reference/safety-rules",
+  "Safety rules",
+  "Invariants that keep test/dev activity from touching prod (IsApproved=false, dry-run gate, ...).",
+  SAFETY_RULES,
+);
+
+// ---- pull_queue_item -----------------------------------------------------
+server.registerTool(
+  "pull_queue_item",
+  {
+    title: "Pull a UiPath queue item as a test payload",
+    description:
+      "Fetch a single UiPath queue item (by Orchestrator URL or transaction id) and return its " +
+      "SpecificContent as a ready-to-run test payload, mapped to its portal. READ-ONLY. " +
+      "IsApproved is ALWAYS forced false so a test run can never submit a real auth. If no env is " +
+      "given it is derived from the URL's fid (else defaults to pre_prod). Returns " +
+      "{item, env, queueName, portal, specificContent, suggestedFilename}.",
+    inputSchema: {
+      url: z
+        .string()
+        .url()
+        .optional()
+        .describe("Orchestrator queue-item URL (copy from the UI; fid + txn id are parsed out)"),
+      txnId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Transaction/item id (use instead of url)"),
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .describe("Folder/env override; defaults from the URL fid, else pre_prod"),
+      folderId: z
+        .string()
+        .optional()
+        .describe("Numeric folder id (OrganizationUnitId) override when no url is given"),
+    },
+  },
+  async ({ url, txnId, env, folderId }) => {
+    try {
+      const args = url
+        ? ({ source: "url", url } as const)
+        : ({
+            source: "txn",
+            txnId: txnId ?? 0,
+            env: env ?? "pre_prod",
+            folderId: folderId ?? "",
+          } as const);
+      return ok(await pullQueueItem(args));
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- list_queue_items ----------------------------------------------------
+server.registerTool(
+  "list_queue_items",
+  {
+    title: "Browse a UiPath queue",
+    description:
+      "List items in a portal's UiPath queue for triage, newest first. Resolve by queueName " +
+      "(prod queue ids only — pass queueDefId for dev) or an explicit queueDefId, optionally " +
+      "filtered by status. READ-ONLY, PHI-light projection (id/status/reference + member id/name). " +
+      "Returns {env, queueName, queueDefinitionId, count, items[]}.",
+    inputSchema: {
+      queueName: z
+        .string()
+        .optional()
+        .describe("Portal/queue name, e.g. 'PMG', 'MOLINA' (resolves to its prod queue def id)"),
+      queueDefId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Explicit QueueDefinitionId (required for dev-clone queues)"),
+      queueKind: z
+        .enum(["submit", "sync"])
+        .optional()
+        .describe("Which queue for the named portal (default submit)"),
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .default("prod")
+        .describe("Folder/env (queueName ids are prod; use queueDefId for pre_prod)"),
+      status: z
+        .enum(["New", "InProgress", "Failed", "Successful", "Retried", "Abandoned", "Deleted"])
+        .optional()
+        .describe("Optional UiPath queue-item status filter"),
+      top: z.number().int().min(1).max(200).optional().default(50).describe("Max items to return"),
+    },
+  },
+  async ({ queueName, queueDefId, queueKind, env, status, top }) => {
+    try {
+      return ok(
+        await listQueue({
+          queueName: queueName ?? "",
+          queueDefId: queueDefId ?? 0,
+          queueKind: queueKind ?? "submit",
+          env,
+          status: status ?? "",
+          top,
+        }),
+      );
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- list_jobs -----------------------------------------------------------
+server.registerTool(
+  "list_jobs",
+  {
+    title: "List recent UiPath Orchestrator jobs",
+    description:
+      "List the most recent Orchestrator jobs in a folder (newest first), without order " +
+      "correlation. READ-ONLY. Returns {env, folder, count, jobs:[{id,key,state,creationTime,deepLink}]}.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .default("prod")
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone'"),
+      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      since: z.string().optional().describe("ISO date lower bound on CreationTime"),
+      top: z.number().int().min(1).max(500).optional().default(50).describe("Max jobs to return"),
+    },
+  },
+  async ({ env, folder, since, top }) => {
+    try {
+      const resolved = resolveFolder(env, folder);
+      const jobs = await listRecentJobs(since, top, resolved);
+      return ok({
+        env,
+        folder: resolved,
+        count: jobs.length,
+        jobs: jobs.map((j) => ({
+          id: j.Id,
+          key: j.Key,
+          state: j.State,
+          creationTime: j.CreationTime,
+          deepLink: j.Key ? jobDeepLink(j.Key) : "",
+        })),
+      });
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- get_job_logs --------------------------------------------------------
+server.registerTool(
+  "get_job_logs",
+  {
+    title: "Get a UiPath job's robot logs",
+    description:
+      "Fetch robot execution logs (oldest first, capped 200) for a single job by its GUID Key, " +
+      "optionally with the video-recording URL. READ-ONLY. Returns {jobKey, folder, logs[], videoUrl?}.",
+    inputSchema: {
+      jobKey: z
+        .string()
+        .min(1)
+        .describe("The job's GUID Key (from analyze_order_execution / list_jobs)"),
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .default("prod")
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone'"),
+      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      includeVideo: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Also fetch the job's video-recording URL (extra round-trip)"),
+    },
+  },
+  async ({ jobKey, env, folder, includeVideo }) => {
+    try {
+      const resolved = resolveFolder(env, folder);
+      const logs = await fetchJobLogs(jobKey, resolved);
+      const out: Record<string, unknown> = { jobKey, folder: resolved, logs };
+      if (includeVideo) out["videoUrl"] = await fetchJobVideoUrl(jobKey, resolved);
+      return ok(out);
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- find_stuck_orders ---------------------------------------------------
+server.registerTool(
+  "find_stuck_orders",
+  {
+    title: "Find stuck Copilot orders",
+    description:
+      "Scan recent orders in an env and flag the ones sitting in a non-terminal ('stuck') status " +
+      "(default inProgress/incomplete/pending). Optionally correlate each to its UiPath job(s) for a " +
+      "coarse verdict (no-job / job-faulted / job-running / job-successful-order-stuck). READ-ONLY. " +
+      "Returns {env, scanned, statuses, found, stuck:[{orderUid,status,ageHours,uipath?}]}.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).optional().default("prod").describe("Which env to scan"),
+      profile: z
+        .enum(["ossm", "kafri"])
+        .optional()
+        .describe("Credential profile / account; omit for default"),
+      scanPages: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .default(8)
+        .describe("Pages of 50 recent orders to scan"),
+      statuses: z
+        .array(z.string())
+        .optional()
+        .describe("Override the 'stuck' status set (default inProgress/incomplete/pending)"),
+      olderThanHours: z
+        .number()
+        .min(0)
+        .optional()
+        .describe(
+          "Only flag orders at least this many hours old (needs a parseable date on the row)",
+        ),
+      crossCheckUipath: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Correlate each stuck order to its UiPath job(s) for a verdict"),
+      since: z.string().optional().describe("ISO lower bound for the UiPath job search"),
+      top: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .default(50)
+        .describe("Max jobs to consider per order in the cross-check"),
+    },
+  },
+  async ({ env, profile, scanPages, statuses, olderThanHours, crossCheckUipath, since, top }) => {
+    try {
+      return ok(
+        await findStuckOrders({
+          env,
+          profile: profile ?? null,
+          scanPages,
+          statuses,
+          olderThanHours,
+          crossCheckUipath,
+          since,
+          top,
+        }),
+      );
     } catch (e) {
       return err(toMessage(e));
     }

@@ -18,6 +18,11 @@ const EXPECTED = [
   "delete_preprod_order",
   "build_queue_item",
   "analyze_order_execution",
+  "pull_queue_item",
+  "list_queue_items",
+  "list_jobs",
+  "get_job_logs",
+  "find_stuck_orders",
 ] as const;
 
 describe("server tool registration", () => {
