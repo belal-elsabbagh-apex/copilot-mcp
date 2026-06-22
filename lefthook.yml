@@ -1,0 +1,11 @@
+# Git hooks (installed via `lefthook install`, run automatically by the `prepare`
+# npm script on `bun install`). Keeps broken code from being committed.
+pre-commit:
+  parallel: true
+  jobs:
+    - name: biome
+      glob: "*.ts"
+      run: bunx biome check --no-errors-on-unmatched {staged_files}
+    - name: typecheck
+      # tsc has no partial mode — checking the whole project is fast enough here.
+      run: bun run typecheck
