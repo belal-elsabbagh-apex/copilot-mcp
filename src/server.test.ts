@@ -36,6 +36,8 @@ const EXPECTED = [
   "list_jobs",
   "get_job_logs",
   "find_stuck_orders",
+  "diff_settings",
+  "list_setting_sections",
 ] as const;
 
 describe("server tool registration", () => {
@@ -85,6 +87,8 @@ describe("tool input schemas accept representative payloads", () => {
     delete_preprod_order: { valid: { uids: ["abcdefgh"] }, invalid: { uids: [] } },
     build_queue_item: { valid: { orderUid: "abcdefgh" }, invalid: { orderUid: "short" } },
     analyze_order_execution: { valid: { orderUid: "abcdefgh" } },
+    diff_settings: { valid: { groups: ["orders"] }, invalid: { profile: "nope" } },
+    list_setting_sections: { valid: { group: "orders" }, invalid: { group: 123 } },
   };
 
   for (const [name, c] of Object.entries(cases)) {

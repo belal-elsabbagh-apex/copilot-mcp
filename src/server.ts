@@ -11,6 +11,8 @@
 //   - delete_preprod_order     delete pre-prod order(s)
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
+//   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
+//   - list_setting_sections    list the settings sections/groups diff_settings can compare (read-only, no network)
 //
 // See the copilot + copilot-order-mirror skills for the full flow and quirks.
 
@@ -34,6 +36,7 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./reference.js";
+import { diffSettings, listSettingSections } from "./settings.js";
 import { findStuckOrders } from "./sweep.js";
 import {
   fetchJobLogs,
@@ -781,6 +784,106 @@ server.registerTool(
           top,
         }),
       );
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- diff_settings -------------------------------------------------------
+server.registerTool(
+  "diff_settings",
+  {
+    title: "Diff Copilot settings prod vs pre-prod",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Compare an account's EHR Copilot settings between its PROD and PRE-PROD tenants. " +
+      "Logs into both envs, fetches every settings section (file manager, outbound orders + types, " +
+      "locations/groups/regions, payers, document routing/reviewing rules, eligibility, rendering " +
+      "providers, and — crawled from each order type's specialities — specialties + referred " +
+      "providers/facilities), and returns a normalized diff. READ-ONLY — never writes to either env. " +
+      "Env-specific noise (UIDs, timestamps, dummy emails, CDN hosts) is stripped, and list " +
+      "sections are matched by a semantic key (name) rather than UID, so only real drift shows. " +
+      "Unchanged sections are omitted unless includeUnchanged=true. Scope with groups (top-level, " +
+      "e.g. ['orders']) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
+      "to discover valid groups/keys. Returns " +
+      "{account, prodBase, preProdBase, sectionsCompared, sectionsWithDiffs, sections:[...]}.",
+    inputSchema: {
+      profile: z
+        .enum(["ossm", "kafri"])
+        .optional()
+        .describe("Credential profile / account; omit for default"),
+      groups: z
+        .array(z.string())
+        .optional()
+        .describe("Top-level groups to diff (e.g. ['orders','providers']); omit for all"),
+      sections: z
+        .array(z.string())
+        .optional()
+        .describe("Subset of section keys to diff (e.g. ['orders-outbound']); omit for all"),
+      emr: z
+        .string()
+        .optional()
+        .describe("EMR type (e.g. 'NEXTGEN') to also diff emrDetailsSettings; account-specific"),
+      includeUnchanged: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include sections that are identical across envs (default: only differences)"),
+    },
+  },
+  async ({ profile, groups, sections, emr, includeUnchanged }) => {
+    try {
+      return ok(
+        await diffSettings({
+          profile: profile ?? null,
+          ...(groups ? { groups } : {}),
+          ...(sections ? { sections } : {}),
+          ...(emr ? { emr } : {}),
+          includeUnchanged,
+        }),
+      );
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- list_setting_sections ----------------------------------------------
+server.registerTool(
+  "list_setting_sections",
+  {
+    title: "List settings sections diff_settings can compare",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false, // pure catalog read — no external service
+    },
+    description:
+      "List the settings sections diff_settings can compare: each section's key, label, " +
+      "top-level group, kind (object/list), and whether it is 'derived' (crawled from order " +
+      "types — heavier). Use this to discover what to pass to diff_settings' groups/sections " +
+      "params. READ-ONLY, no network (reads the static catalog). Returns {groups, sections:[...]}.",
+    inputSchema: {
+      group: z
+        .string()
+        .optional()
+        .describe("Only list sections in this top-level group (e.g. 'orders')"),
+      emr: z
+        .string()
+        .optional()
+        .describe("Include the opt-in emr-details section for this EMR type"),
+    },
+  },
+  ({ group, emr }) => {
+    try {
+      return ok(listSettingSections({ ...(group ? { group } : {}), ...(emr ? { emr } : {}) }));
     } catch (e) {
       return err(toMessage(e));
     }

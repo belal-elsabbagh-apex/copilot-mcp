@@ -13,6 +13,8 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 | `delete_preprod_order` | Delete order(s) from PRE-PROD (never touches prod). |
 | `build_queue_item` | Build a UiPath AddQueueItem request (payload + curl) from an order. BUILD ONLY — `IsApproved` is always `false`. |
 | `analyze_order_execution` | Trace an order to its UiPath Orchestrator job(s) and diagnose the run. READ-ONLY. |
+| `diff_settings` | Diff an account's `/api/v1/settings/*` between prod and pre-prod (UID/timestamp noise stripped, lists matched by name). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). READ-ONLY. |
+| `list_setting_sections` | List the settings sections/groups `diff_settings` can compare (keys, labels, groups, kind). Use it to discover what to scope by. READ-ONLY, no network. |
 
 ## Configuration
 
