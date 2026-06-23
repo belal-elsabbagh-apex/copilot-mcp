@@ -195,6 +195,17 @@ export function resetConfigCache(): void {
 
 export const getUipath = (): UipathConfig => loadConfig().uipath;
 
+// Names of the credential profiles defined in the config (copilot.profiles). Used to
+// drive prompt autocompletion; never throws (returns [] when the config is absent or
+// has no profiles) so it is safe to call from tool/prompt wiring and completions.
+export function listProfiles(): string[] {
+  try {
+    return Object.keys(loadConfig().copilot.profiles ?? {});
+  } catch {
+    return [];
+  }
+}
+
 export const getOverrides = (): Record<string, OrderOverride> => loadConfig().overrides ?? {};
 
 // Resolve a credential pair: a named profile (copilot.profiles[name]) or the

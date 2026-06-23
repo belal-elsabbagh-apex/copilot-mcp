@@ -22,7 +22,7 @@
 import { realpathSync } from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { analyzeOrderExecution } from "./analyze.js";
@@ -30,11 +30,14 @@ import { resolveCreds } from "./config.js";
 import { login, makeClient, ORDER_MODE, verify } from "./copilot-client.js";
 import { runDoctor } from "./doctor.js";
 import { type MirrorResult, mirrorOne } from "./mirror.js";
+import { mcpLog, registerLogging, reportProgress } from "./notify.js";
+import { registerPrompts } from "./prompts.js";
 import { listQueue, pullQueueItem } from "./queue.js";
 import { buildQueueItem } from "./queue-item.js";
 import {
   ORDER_LIFECYCLE,
   PORTALS,
+  type PortalEntry,
   QUEUE_ITEM_SCHEMA,
   RESULT_CONTRACT,
   SAFETY_RULES,
@@ -108,7 +111,17 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
   };
 };
 
-export const server = new McpServer({ name: "copilot", version: "1.4.0" });
+export const server = new McpServer(
+  { name: "copilot", version: "1.5.0" },
+  // `logging` must be declared explicitly for notifications/message + logging/setLevel
+  // to be advertised; tools/resources/prompts/completions are auto-negotiated by McpServer.
+  { capabilities: { logging: {} } },
+);
+
+// Wire the logging/setLevel handler and register the workflow prompts. Tool/resource
+// registration follows below in this module.
+registerLogging(server);
+registerPrompts(server);
 
 // ---- clone_order ---------------------------------------------------------
 server.registerTool(
@@ -143,18 +156,26 @@ server.registerTool(
         ),
     },
   },
-  async ({ uids, profile, submit }) => {
+  async ({ uids, profile, submit }, extra) => {
     try {
       const creds = resolveCreds(profile ?? null);
       const results: MirrorResult[] = [];
       const errors: { prodUid: string; error: string }[] = [];
-      for (const uid of uids) {
+      mcpLog(server, "info", `cloning ${uids.length} order(s)`, { submit: !!submit });
+      for (let i = 0; i < uids.length; i++) {
+        const uid = uids[i] as string;
+        reportProgress(extra, i, uids.length, `cloning ${uid}`);
         try {
-          results.push(await mirrorOne(uid, { submit: !!submit, creds }));
+          const r = await mirrorOne(uid, { submit: !!submit, creds });
+          results.push(r);
+          mcpLog(server, "info", `cloned ${uid} -> ${r.newUid}`, { status: r.verify?.status });
         } catch (e) {
-          errors.push({ prodUid: uid, error: toMessage(e) });
+          const error = toMessage(e);
+          errors.push({ prodUid: uid, error });
+          mcpLog(server, "error", `clone failed for ${uid}`, { error });
         }
       }
+      reportProgress(extra, uids.length, uids.length, "done");
       return ok({
         profile: profile ?? "(default)",
         submit: !!submit,
@@ -281,7 +302,13 @@ server.registerTool(
       for (const uid of uids) {
         const r = await pre.req("DELETE", `/api/v1/orders/${uid}`);
         const msg = stringProp(r.data, "msg") ?? r.text.slice(0, 80);
-        results.push({ uid, status: r.status, ok: r.status < 400, msg });
+        const okDelete = r.status < 400;
+        // Audit trail: surface every destructive delete to the client log.
+        mcpLog(server, "warning", `deleted pre-prod order ${uid}`, {
+          status: r.status,
+          ok: okDelete,
+        });
+        results.push({ uid, status: r.status, ok: okDelete, msg });
       }
       return ok({
         profile: profile ?? "(default)",
@@ -404,18 +431,13 @@ server.registerTool(
         .describe("Credential profile for enrichOrderState; omit for default"),
     },
   },
-  async ({
-    orderUid,
-    env,
-    folder,
-    since,
-    top,
-    includeLogs,
-    includeVideo,
-    enrichOrderState,
-    profile,
-  }) => {
+  async (
+    { orderUid, env, folder, since, top, includeLogs, includeVideo, enrichOrderState, profile },
+    extra,
+  ) => {
     try {
+      mcpLog(server, "debug", `analyzing order ${orderUid}`, { env });
+      reportProgress(extra, 0, 2, "tracing UiPath job");
       const out: Record<string, unknown> = {
         ...(await analyzeOrderExecution(orderUid, {
           env,
@@ -426,6 +448,7 @@ server.registerTool(
           includeVideo,
         })),
       };
+      reportProgress(extra, 1, 2, enrichOrderState ? "enriching order state" : "done");
       if (enrichOrderState) {
         try {
           const envCreds = resolveCreds(profile ?? null)[env];
@@ -436,6 +459,7 @@ server.registerTool(
           out["currentOrderState"] = { error: toMessage(e) };
         }
       }
+      reportProgress(extra, 2, 2, "done");
       return ok(out);
     } catch (e) {
       return err(toMessage(e));
@@ -506,6 +530,47 @@ jsonResource(
   "Safety rules",
   "Invariants that keep test/dev activity from touching prod (IsApproved=false, dry-run gate, ...).",
   SAFETY_RULES,
+);
+
+// ---- Resource template: per-portal lookup --------------------------------
+// Parameterized companion to the static `portals` resource: read one portal by
+// queue name or alias. Demonstrates an MCP resource template + variable completion.
+const findPortal = (name: string): PortalEntry | undefined => {
+  const n = name.trim().toUpperCase();
+  return PORTALS.find((p) => p.key === n || p.aliases.includes(n));
+};
+server.registerResource(
+  "portal",
+  new ResourceTemplate("copilot://reference/portal/{name}", {
+    list: async () => ({
+      resources: PORTALS.map((p) => ({
+        name: p.key,
+        uri: `copilot://reference/portal/${encodeURIComponent(p.key)}`,
+        mimeType: "application/json",
+        description: `${p.family} portal for account ${p.account || "(unknown)"}`,
+      })),
+    }),
+    complete: {
+      name: async (value) => {
+        const v = value.trim().toUpperCase();
+        return PORTALS.map((p) => p.key).filter((k) => k.startsWith(v));
+      },
+    },
+  }),
+  {
+    title: "Portal by queue name",
+    description:
+      "Look up a single portal (queue ids, account, family, build artifact) by its queue name or alias.",
+    mimeType: "application/json",
+  },
+  async (uri, { name }) => {
+    const key = Array.isArray(name) ? name[0] : name;
+    const portal = key ? findPortal(key) : undefined;
+    const text = portal
+      ? JSON.stringify(portal, null, 2)
+      : JSON.stringify({ error: `unknown portal: ${key ?? ""}` }, null, 2);
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text }] };
+  },
 );
 
 // ---- pull_queue_item -----------------------------------------------------
