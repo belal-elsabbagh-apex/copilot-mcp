@@ -8,7 +8,20 @@ import { server } from "./server.js";
 // without standing up the stdio transport.
 interface RegisteredTool {
   inputSchema?: { safeParse(value: unknown): { success: boolean } };
+  title?: string;
+  description?: string;
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
+
+// Tools that mutate state (everything else is read-only).
+const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order"]);
+// Tools that touch no external service (pure/local). All others set openWorldHint=true.
+const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections"]);
 const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
   ._registeredTools;
 
@@ -33,6 +46,34 @@ describe("server tool registration", () => {
   test("every tool exposes an input schema", () => {
     for (const name of EXPECTED) {
       expect(registered[name]?.inputSchema).toBeDefined();
+    }
+  });
+
+  test("every tool declares the full set of four annotation hints", () => {
+    for (const name of EXPECTED) {
+      const t = registered[name];
+      expect(t?.title, `${name} title`).toBeTruthy();
+      expect((t?.description?.length ?? 0) > 30, `${name} description`).toBe(true);
+      const a = t?.annotations;
+      expect(a, `${name} annotations`).toBeDefined();
+      // all four hints present on every tool
+      expect(typeof a?.readOnlyHint, `${name} readOnlyHint`).toBe("boolean");
+      expect(typeof a?.destructiveHint, `${name} destructiveHint`).toBe("boolean");
+      expect(typeof a?.idempotentHint, `${name} idempotentHint`).toBe("boolean");
+      // openWorldHint must be present and accurate (most tools hit an external service)
+      expect(typeof a?.openWorldHint, `${name} openWorldHint`).toBe("boolean");
+      expect(a?.openWorldHint, `${name} openWorldHint value`).toBe(!CLOSED_WORLD_TOOLS.has(name));
+      // read/write hint must match the known write-tool set
+      expect(a?.readOnlyHint, `${name} readOnlyHint value`).toBe(!WRITE_TOOLS.has(name));
+    }
+  });
+
+  test("read-only tools are non-destructive and idempotent", () => {
+    for (const name of EXPECTED) {
+      if (WRITE_TOOLS.has(name)) continue;
+      const a = registered[name]?.annotations;
+      expect(a?.destructiveHint, `${name} destructiveHint`).toBe(false);
+      expect(a?.idempotentHint, `${name} idempotentHint`).toBe(true);
     }
   });
 });

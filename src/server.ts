@@ -108,6 +108,12 @@ server.registerTool(
   "clone_order",
   {
     title: "Clone Copilot order(s) prod -> pre-prod",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false, // creates fresh pre-prod orders; never deletes/overwrites
+      idempotentHint: false, // each call mints new order(s)
+      openWorldHint: true,
+    },
     description:
       "Mirror one or more PROD EHR Copilot orders into the PRE-PROD tenant as fresh orders. " +
       "Clone-only by default (stops at forReview / ready-to-submit). Set submit=true ONLY when the " +
@@ -171,6 +177,12 @@ server.registerTool(
   "find_clone_candidates",
   {
     title: "Find cloneable prod orders",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Scan the most recent PROD orders and return only the ones that will actually clone to forReview — " +
       "i.e. they have a referredFacility, orderType, and orderNames. Orders missing those (common for " +
@@ -236,6 +248,12 @@ server.registerTool(
   "delete_preprod_order",
   {
     title: "Delete pre-prod order(s)",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true, // deletes orders
+      idempotentHint: true, // re-deleting an already-gone uid is a no-op
+      openWorldHint: true,
+    },
     description:
       "Delete one or more orders from the PRE-PROD tenant via DELETE /api/v1/orders/{uid}. " +
       "Use to clean up junk or incomplete clones. PRE-PROD ONLY — never targets prod.",
@@ -274,6 +292,12 @@ server.registerTool(
   "build_queue_item",
   {
     title: "Build UiPath AddQueueItem request from an order",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    }, // BUILD ONLY — fetches an order, never POSTs
     description:
       "Fetch an EHR Copilot order (prod or pre-prod) and build the UiPath AddQueueItem request " +
       "(payload + ready-to-run curl) from its details. BUILD ONLY — never POSTs to UiPath; run the " +
@@ -309,6 +333,12 @@ server.registerTool(
   "analyze_order_execution",
   {
     title: "Analyze a Copilot order's UiPath Orchestrator execution",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Given a Copilot orderUid, find the matching UiPath Orchestrator job(s) and diagnose the run: " +
       "job State, output result, error/warning robot logs, failure-language heuristics, a video link, " +
@@ -476,6 +506,12 @@ server.registerTool(
   "pull_queue_item",
   {
     title: "Pull a UiPath queue item as a test payload",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Fetch a single UiPath queue item (by Orchestrator URL or transaction id) and return its " +
       "SpecificContent as a ready-to-run test payload, mapped to its portal. READ-ONLY. " +
@@ -526,6 +562,12 @@ server.registerTool(
   "list_queue_items",
   {
     title: "Browse a UiPath queue",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "List items in a portal's UiPath queue for triage, newest first. Resolve by queueName " +
       "(prod queue ids only — pass queueDefId for dev) or an explicit queueDefId, optionally " +
@@ -581,6 +623,12 @@ server.registerTool(
   "list_jobs",
   {
     title: "List recent UiPath Orchestrator jobs",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "List the most recent Orchestrator jobs in a folder (newest first), without order " +
       "correlation. READ-ONLY. Returns {env, folder, count, jobs:[{id,key,state,creationTime,deepLink}]}.",
@@ -622,6 +670,12 @@ server.registerTool(
   "get_job_logs",
   {
     title: "Get a UiPath job's robot logs",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Fetch robot execution logs (oldest first, capped 200) for a single job by its GUID Key, " +
       "optionally with the video-recording URL. READ-ONLY. Returns {jobKey, folder, logs[], videoUrl?}.",
@@ -661,6 +715,12 @@ server.registerTool(
   "find_stuck_orders",
   {
     title: "Find stuck Copilot orders",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       "Scan recent orders in an env and flag the ones sitting in a non-terminal ('stuck') status " +
       "(default inProgress/incomplete/pending). Optionally correlate each to its UiPath job(s) for a " +
