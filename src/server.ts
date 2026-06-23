@@ -108,7 +108,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
   };
 };
 
-export const server = new McpServer({ name: "copilot", version: "1.3.1" });
+export const server = new McpServer({ name: "copilot", version: "1.4.0" });
 
 // ---- clone_order ---------------------------------------------------------
 server.registerTool(
