@@ -18,8 +18,9 @@ interface RegisteredTool {
   };
 }
 
-// Tools that mutate state (everything else is read-only).
-const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order"]);
+// Tools that mutate state (everything else is read-only). sync_settings is a stub but
+// declares write semantics for its intended behavior.
+const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order", "sync_settings"]);
 // Tools that touch no external service (pure/local). All others set openWorldHint=true.
 const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections"]);
 const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
@@ -38,6 +39,9 @@ const EXPECTED = [
   "find_stuck_orders",
   "diff_settings",
   "list_setting_sections",
+  "sync_settings",
+  "get_order",
+  "doctor",
 ] as const;
 
 describe("server tool registration", () => {
@@ -89,6 +93,9 @@ describe("tool input schemas accept representative payloads", () => {
     analyze_order_execution: { valid: { orderUid: "abcdefgh" } },
     diff_settings: { valid: { groups: ["orders"] }, invalid: { profile: "nope" } },
     list_setting_sections: { valid: { group: "orders" }, invalid: { group: 123 } },
+    sync_settings: { valid: { groups: ["orders"] }, invalid: { profile: "nope" } },
+    get_order: { valid: { orderUid: "abcdefgh" }, invalid: { orderUid: "short" } },
+    doctor: { valid: {}, invalid: { profile: "nope" } },
   };
 
   for (const [name, c] of Object.entries(cases)) {

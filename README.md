@@ -15,6 +15,9 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 | `analyze_order_execution` | Trace an order to its UiPath Orchestrator job(s) and diagnose the run. READ-ONLY. |
 | `diff_settings` | Diff an account's `/api/v1/settings/*` between prod and pre-prod (UID/timestamp noise stripped, lists matched by name). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). READ-ONLY. |
 | `list_setting_sections` | List the settings sections/groups `diff_settings` can compare (keys, labels, groups, kind). Use it to discover what to scope by. READ-ONLY, no network. |
+| `sync_settings` | Push settings prod → pre-prod to reconcile drift. **STUB — not implemented** (returns a not-implemented error); use `diff_settings` to inspect drift for now. |
+| `get_order` | Fetch a single order's normalized detail (status, insurance, ICD/CPT, facility, note presence) by uid in a chosen env. READ-ONLY. |
+| `doctor` | Probe the server's external connections (Copilot BE prod + pre-prod login, UiPath Orchestrator per env) and report what's reachable. READ-ONLY. |
 
 ## Configuration
 

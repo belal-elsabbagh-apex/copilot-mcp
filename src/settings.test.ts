@@ -4,9 +4,11 @@ import {
   diffObjects,
   type FieldDiff,
   listSettingSections,
+  NotImplementedError,
   SETTINGS_CATALOG,
   settingGroups,
   stripNoise,
+  syncSettings,
 } from "./settings.js";
 
 const NO_IGNORE = new Set<string>();
@@ -188,5 +190,13 @@ describe("settingGroups + listSettingSections", () => {
 
   test("unknown group throws a listing error", () => {
     expect(() => listSettingSections({ group: "nope" })).toThrow(/unknown group/);
+  });
+});
+
+describe("syncSettings (stub)", () => {
+  test("rejects with NotImplementedError", async () => {
+    const p = syncSettings({ groups: ["orders"] });
+    await expect(p).rejects.toThrow(NotImplementedError);
+    await expect(p).rejects.toThrow(/not implemented/i);
   });
 });

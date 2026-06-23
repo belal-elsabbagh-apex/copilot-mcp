@@ -13,6 +13,9 @@
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/groups diff_settings can compare (read-only, no network)
+//   - sync_settings            push settings prod -> pre-prod to reconcile drift (STUB — not implemented)
+//   - get_order                fetch a single order's normalized detail by uid (read-only)
+//   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
 //
 // See the copilot + copilot-order-mirror skills for the full flow and quirks.
 
@@ -25,6 +28,7 @@ import { z } from "zod";
 import { analyzeOrderExecution } from "./analyze.js";
 import { resolveCreds } from "./config.js";
 import { login, makeClient, ORDER_MODE, verify } from "./copilot-client.js";
+import { runDoctor } from "./doctor.js";
 import { type MirrorResult, mirrorOne } from "./mirror.js";
 import { listQueue, pullQueueItem } from "./queue.js";
 import { buildQueueItem } from "./queue-item.js";
@@ -36,7 +40,7 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./reference.js";
-import { diffSettings, listSettingSections } from "./settings.js";
+import { diffSettings, listSettingSections, syncSettings } from "./settings.js";
 import { findStuckOrders } from "./sweep.js";
 import {
   fetchJobLogs,
@@ -884,6 +888,129 @@ server.registerTool(
   ({ group, emr }) => {
     try {
       return ok(listSettingSections({ ...(group ? { group } : {}), ...(emr ? { emr } : {}) }));
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- sync_settings (STUB) ------------------------------------------------
+server.registerTool(
+  "sync_settings",
+  {
+    title: "Sync settings prod -> pre-prod (NOT IMPLEMENTED)",
+    annotations: {
+      readOnlyHint: false, // intended to write settings to pre-prod
+      destructiveHint: true, // overwrites existing pre-prod settings
+      idempotentHint: true, // applying the same prod settings twice converges
+      openWorldHint: true,
+    },
+    description:
+      "STUB — NOT IMPLEMENTED. The write-side counterpart to diff_settings: it will push " +
+      "selected settings sections from PROD to PRE-PROD to reconcile drift (pre-prod only, " +
+      "dry-run by default). Calling it currently returns a not-implemented error. Use " +
+      "diff_settings to inspect drift and apply changes manually for now.",
+    inputSchema: {
+      profile: z
+        .enum(["ossm", "kafri"])
+        .optional()
+        .describe("Credential profile / account; omit for default"),
+      groups: z.array(z.string()).optional().describe("Top-level groups to sync (e.g. ['orders'])"),
+      sections: z.array(z.string()).optional().describe("Exact section keys to sync"),
+      emr: z.string().optional().describe("EMR type to include emrDetailsSettings"),
+      dryRun: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe("Preview writes without applying (will default true once implemented)"),
+    },
+  },
+  async ({ profile, groups, sections, emr, dryRun }) => {
+    try {
+      await syncSettings({
+        profile: profile ?? null,
+        ...(groups ? { groups } : {}),
+        ...(sections ? { sections } : {}),
+        ...(emr ? { emr } : {}),
+        dryRun: dryRun ?? true,
+      });
+      return ok({ status: "ok" }); // unreachable while stubbed
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- get_order -----------------------------------------------------------
+server.registerTool(
+  "get_order",
+  {
+    title: "Get a Copilot order's normalized detail",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Fetch a single EHR Copilot order by uid in a chosen env and return its normalized " +
+      "detail: status/submissionStatus, patient, insurance + memberId, order type, facility, " +
+      "place of service, requiredAuthorization, appointment date, ICD/CPT codes, and whether a " +
+      "progress note is present. READ-ONLY. Returns {orderUid, env, ...detail} or an error if the " +
+      "order is not found in that env.",
+    inputSchema: {
+      orderUid: z.string().min(8).describe("Order UID to fetch"),
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .default("prod")
+        .describe("Which env the order lives in"),
+      profile: z
+        .enum(["ossm", "kafri"])
+        .optional()
+        .describe("Credential profile / account; omit for default"),
+    },
+  },
+  async ({ orderUid, env, profile }) => {
+    try {
+      const creds = resolveCreds(profile ?? null)[env];
+      const client = makeClient(creds.be);
+      await login(client, creds.email, creds.password);
+      const detail = await verify(client, orderUid);
+      if (!detail) return err(`order ${orderUid} not found in ${env}`);
+      return ok({ orderUid, env, ...detail });
+    } catch (e) {
+      return err(toMessage(e));
+    }
+  },
+);
+
+// ---- doctor --------------------------------------------------------------
+server.registerTool(
+  "doctor",
+  {
+    title: "Check the server's external API connections",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Probe the MCP server's connections to its external APIs and report what is reachable: " +
+      "logs into the Copilot BE for PROD and PRE-PROD, and makes one cheap authenticated UiPath " +
+      "Orchestrator call per env/folder. READ-ONLY. Use it to debug setup (creds, UiPath token, " +
+      "folder access). Returns {account, ok, checks:[{name, target, ok, detail}]}.",
+    inputSchema: {
+      profile: z
+        .enum(["ossm", "kafri"])
+        .optional()
+        .describe("Credential profile / account to check; omit for default"),
+    },
+  },
+  async ({ profile }) => {
+    try {
+      return ok(await runDoctor({ profile: profile ?? null }));
     } catch (e) {
       return err(toMessage(e));
     }
