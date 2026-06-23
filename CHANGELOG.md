@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-06-23
+
+### Fixed
+
+- Publishing no longer aborts on the `prepare` lifecycle script. `bun publish` runs
+  `prepare` without `node_modules/.bin` on `PATH`, so `lefthook install` exited 127 and
+  failed the Publish workflow (the package never reached GitHub Packages). `prepare` is now
+  `lefthook install || true`, so a missing `lefthook` no-ops during publish while local dev
+  installs still wire up the git hook.
+
 ## [1.3.0] - 2026-06-23
 
 ### Added
@@ -36,5 +46,6 @@ Baseline: order clone (prod → pre-prod), clone-candidate/stuck-order scans, Ui
 queue-item build, queue browse/pull, Orchestrator job listing/logs/execution analysis,
 and bundled reference resources.
 
+[1.3.1]: https://github.com/belal-elsabbagh-apex/copilot-mcp/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/belal-elsabbagh-apex/copilot-mcp/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/tag/v1.2.0
