@@ -13,7 +13,7 @@
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/groups diff_settings can compare (read-only, no network)
-//   - sync_settings            push settings prod -> pre-prod to reconcile drift (STUB — not implemented)
+//   - sync_settings            additively add prod-only settings into pre-prod (STUB — not implemented)
 //   - get_order                fetch a single order's normalized detail by uid (read-only)
 //   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
 //
@@ -963,18 +963,20 @@ server.registerTool(
 server.registerTool(
   "sync_settings",
   {
-    title: "Sync settings prod -> pre-prod (NOT IMPLEMENTED)",
+    title: "Add prod-only settings into pre-prod (NOT IMPLEMENTED)",
     annotations: {
-      readOnlyHint: false, // intended to write settings to pre-prod
-      destructiveHint: true, // overwrites existing pre-prod settings
-      idempotentHint: true, // applying the same prod settings twice converges
+      readOnlyHint: false, // intended to create settings in pre-prod
+      destructiveHint: false, // ADDITIVE ONLY — never overwrites or deletes existing pre-prod settings
+      idempotentHint: true, // re-adding an item that already exists in pre-prod is a no-op
       openWorldHint: true,
     },
     description:
-      "STUB — NOT IMPLEMENTED. The write-side counterpart to diff_settings: it will push " +
-      "selected settings sections from PROD to PRE-PROD to reconcile drift (pre-prod only, " +
-      "dry-run by default). Calling it currently returns a not-implemented error. Use " +
-      "diff_settings to inspect drift and apply changes manually for now.",
+      "STUB — NOT IMPLEMENTED. The write-side counterpart to diff_settings: it will ADDITIVELY " +
+      "copy settings items that exist in PROD but are MISSING in PRE-PROD into pre-prod (the " +
+      "diff_settings `onlyInProd` items per section). Additive only — it never overwrites or " +
+      "deletes existing pre-prod settings, and leaves items that merely differ untouched. " +
+      "Pre-prod only, dry-run by default. Calling it currently returns a not-implemented error. " +
+      "Use diff_settings to inspect what is missing and add it manually for now.",
     inputSchema: {
       profile: z
         .enum(["ossm", "kafri"])
@@ -987,7 +989,9 @@ server.registerTool(
         .boolean()
         .optional()
         .default(true)
-        .describe("Preview writes without applying (will default true once implemented)"),
+        .describe(
+          "Preview the additions without writing them (will default true once implemented)",
+        ),
     },
   },
   async ({ profile, groups, sections, emr, dryRun }) => {

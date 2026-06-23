@@ -532,11 +532,13 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
 }
 
 // ---- sync_settings (stub) -------------------------------------------------
-// The write-side counterpart to diffSettings: push selected sections from PROD to
-// PRE-PROD to reconcile drift. Deliberately NOT implemented yet — reconciling settings
-// means writing to a tenant, which needs the per-section write endpoints mapped and a
-// dry-run/safety design first. Registered + thrown so the tool is discoverable and its
-// intent is documented, while never silently doing nothing.
+// The write-side counterpart to diffSettings: ADDITIVELY copy settings items that exist
+// in PROD but are missing in PRE-PROD into pre-prod (i.e. the diffList `onlyInProd` items
+// per selected section). Additive only — it must never overwrite or delete existing
+// pre-prod settings, and leaves items that merely differ (the `changed` set) untouched.
+// Deliberately NOT implemented yet — creating items in a tenant needs the per-section
+// write endpoints mapped and a dry-run/safety design first. Registered + thrown so the
+// tool is discoverable and its intent is documented, while never silently doing nothing.
 
 export class NotImplementedError extends Error {
   constructor(message: string) {
@@ -556,9 +558,10 @@ export interface SyncSettingsOpts {
 export function syncSettings(_opts: SyncSettingsOpts): Promise<never> {
   return Promise.reject(
     new NotImplementedError(
-      "sync_settings is not implemented yet (stub). It will push selected settings sections " +
-        "from PROD to PRE-PROD to reconcile drift — pre-prod only, dry-run by default. " +
-        "For now use diff_settings to inspect drift and apply changes by hand.",
+      "sync_settings is not implemented yet (stub). It will ADDITIVELY add settings items that " +
+        "exist in PROD but are missing in PRE-PROD (the diff_settings `onlyInProd` items) into " +
+        "pre-prod — additive only (never overwrites or deletes), pre-prod only, dry-run by default. " +
+        "For now use diff_settings to inspect what is missing and add it by hand.",
     ),
   );
 }
