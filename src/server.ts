@@ -935,24 +935,36 @@ server.registerTool(
       openWorldHint: false, // pure catalog read — no external service
     },
     description:
-      "List the settings sections diff_settings can compare: each section's key, label, " +
-      "top-level group, kind (object/list), and whether it is 'derived' (crawled from order " +
-      "types — heavier). Use this to discover what to pass to diff_settings' groups/sections " +
-      "params. READ-ONLY, no network (reads the static catalog). Returns {groups, sections:[...]}.",
+      "List the settings sections diff_settings/sync_settings can scope to: each section's key, " +
+      "label, top-level group, kind (object/list), whether it is 'derived' (crawled from order " +
+      "types — heavier), and (for list sections) its matchKey — the field items are matched/scoped " +
+      "by. Use this to drive FINE-GRAINED scoping: pass exact section keys to diff_settings' " +
+      "`sections` param instead of the broader `groups`. Narrow this listing with `group` and/or " +
+      "`sections`. READ-ONLY, no network (reads the static catalog). Returns {groups, sections:[...]}.",
     inputSchema: {
       group: z
         .string()
         .optional()
         .describe("Only list sections in this top-level group (e.g. 'orders')"),
+      sections: z
+        .array(z.string())
+        .optional()
+        .describe("Only list these exact section keys (e.g. ['orders-outbound','locations'])"),
       emr: z
         .string()
         .optional()
         .describe("Include the opt-in emr-details section for this EMR type"),
     },
   },
-  ({ group, emr }) => {
+  ({ group, sections, emr }) => {
     try {
-      return ok(listSettingSections({ ...(group ? { group } : {}), ...(emr ? { emr } : {}) }));
+      return ok(
+        listSettingSections({
+          ...(group ? { group } : {}),
+          ...(sections ? { sections } : {}),
+          ...(emr ? { emr } : {}),
+        }),
+      );
     } catch (e) {
       return err(toMessage(e));
     }

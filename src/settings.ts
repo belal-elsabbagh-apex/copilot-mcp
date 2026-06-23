@@ -439,29 +439,41 @@ export interface SettingSectionInfo {
   group: string;
   kind: "object" | "list";
   derived: boolean; // crawled (heavier) vs a plain single GET
+  matchKey?: string; // list sections: the field items are matched/scoped by (omitted => content-set diff)
 }
 
-// List the catalog sections diff_settings can compare, optionally filtered to one group.
-// Pure: reads the static catalog, no creds/network.
-export function listSettingSections(opts: { group?: string; emr?: string }): {
+// List the catalog sections diff_settings can compare, optionally narrowed by top-level
+// group and/or an explicit set of section keys (both applied as AND). Pure: reads the
+// static catalog, no creds/network. Unknown groups/keys throw a clear, value-listing error.
+export function listSettingSections(opts: { group?: string; sections?: string[]; emr?: string }): {
   groups: string[];
   sections: SettingSectionInfo[];
 } {
   const all = catalogWithEmr(opts.emr);
-  if (opts.group && !all.some((s) => s.group === opts.group))
-    throw new Error(
-      `unknown group: ${opts.group}. Known: ${[...new Set(all.map((s) => s.group))].join(", ")}`,
-    );
+  const allGroups = [...new Set(all.map((s) => s.group))];
+  if (opts.group && !allGroups.includes(opts.group))
+    throw new Error(`unknown group: ${opts.group}. Known: ${allGroups.join(", ")}`);
+  if (opts.sections?.length) {
+    const known = new Set(all.map((s) => s.key));
+    const missing = opts.sections.filter((k) => !known.has(k));
+    if (missing.length)
+      throw new Error(
+        `unknown section(s): ${missing.join(", ")}. Known: ${[...known].join(", ")}` +
+          (opts.emr ? "" : " (pass `emr` to include emr-details)"),
+      );
+  }
+  const want = opts.sections?.length ? new Set(opts.sections) : undefined;
   const sections = all
-    .filter((s) => !opts.group || s.group === opts.group)
+    .filter((s) => (!opts.group || s.group === opts.group) && (!want || want.has(s.key)))
     .map((s) => ({
       key: s.key,
       label: s.label,
       group: s.group,
       kind: s.kind,
       derived: !!s.derive,
+      ...(s.matchKey ? { matchKey: s.matchKey } : {}),
     }));
-  return { groups: [...new Set(all.map((s) => s.group))], sections };
+  return { groups: allGroups, sections };
 }
 
 const toMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));

@@ -14,7 +14,7 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 | `build_queue_item` | Build a UiPath AddQueueItem request (payload + curl) from an order. BUILD ONLY — `IsApproved` is always `false`. |
 | `analyze_order_execution` | Trace an order to its UiPath Orchestrator job(s) and diagnose the run. READ-ONLY. |
 | `diff_settings` | Diff an account's `/api/v1/settings/*` between prod and pre-prod (UID/timestamp noise stripped, lists matched by name). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). READ-ONLY. |
-| `list_setting_sections` | List the settings sections/groups `diff_settings` can compare (keys, labels, groups, kind). Use it to discover what to scope by. READ-ONLY, no network. |
+| `list_setting_sections` | List the settings sections `diff_settings`/`sync_settings` can scope to (key, label, group, kind, derived, and each list section's `matchKey`). Narrow with `group` and/or exact `sections` keys. Use it to drive fine-grained, section-level scoping rather than broad `groups`. READ-ONLY, no network. |
 | `sync_settings` | Additively add settings items that exist in prod but are missing in pre-prod (the `diff_settings` `onlyInProd` items) into pre-prod — additive only, never overwrites or deletes existing pre-prod settings. **STUB — not implemented** (returns a not-implemented error); use `diff_settings` to inspect what's missing and add it by hand for now. |
 | `get_order` | Fetch a single order's normalized detail (status, insurance, ICD/CPT, facility, note presence) by uid in a chosen env. READ-ONLY. |
 | `doctor` | Probe the server's external connections (Copilot BE prod + pre-prod login, UiPath Orchestrator per env) and report what's reachable. READ-ONLY. |

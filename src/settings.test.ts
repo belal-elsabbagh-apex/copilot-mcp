@@ -191,6 +191,21 @@ describe("settingGroups + listSettingSections", () => {
   test("unknown group throws a listing error", () => {
     expect(() => listSettingSections({ group: "nope" })).toThrow(/unknown group/);
   });
+
+  test("sections filter narrows to exact keys", () => {
+    const { sections } = listSettingSections({ sections: ["locations", "orders-outbound"] });
+    expect(sections.map((s) => s.key).sort()).toEqual(["locations", "orders-outbound"]);
+  });
+
+  test("unknown section key throws with the known keys listed", () => {
+    expect(() => listSettingSections({ sections: ["nope"] })).toThrow(/unknown section/);
+  });
+
+  test("list sections expose their matchKey; object sections do not", () => {
+    const { sections } = listSettingSections({});
+    expect(sections.find((s) => s.key === "locations")?.matchKey).toBe("name");
+    expect(sections.find((s) => s.key === "orders-outbound")?.matchKey).toBeUndefined();
+  });
 });
 
 describe("syncSettings (stub)", () => {
