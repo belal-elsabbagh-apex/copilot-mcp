@@ -86,16 +86,34 @@ describe("server tool registration", () => {
 
 describe("tool input schemas accept representative payloads", () => {
   const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
-    clone_order: { valid: { uids: ["abcdefgh"] }, invalid: {} },
-    find_clone_candidates: { valid: {} },
-    delete_preprod_order: { valid: { uids: ["abcdefgh"] }, invalid: { uids: [] } },
-    build_queue_item: { valid: { orderUid: "abcdefgh" }, invalid: { orderUid: "short" } },
-    analyze_order_execution: { valid: { orderUid: "abcdefgh" } },
-    diff_settings: { valid: { groups: ["orders"] }, invalid: { profile: "nope" } },
+    // profile is required (any non-empty string; validated against config at call time).
+    // env is required on every env-taking tool. Invalid cases omit a required field or
+    // use a wrong type.
+    clone_order: {
+      valid: { uids: ["abcdefgh"], profile: "ossm" },
+      invalid: { uids: ["abcdefgh"] },
+    },
+    find_clone_candidates: { valid: { profile: "ossm" }, invalid: {} },
+    delete_preprod_order: {
+      valid: { uids: ["abcdefgh"], profile: "ossm" },
+      invalid: { uids: [], profile: "ossm" },
+    },
+    build_queue_item: {
+      valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" },
+      invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
+    },
+    analyze_order_execution: {
+      valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
+      invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
+    },
+    diff_settings: { valid: { groups: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
     list_setting_sections: { valid: { group: "orders" }, invalid: { group: 123 } },
-    sync_settings: { valid: { groups: ["orders"] }, invalid: { profile: "nope" } },
-    get_order: { valid: { orderUid: "abcdefgh" }, invalid: { orderUid: "short" } },
-    doctor: { valid: {}, invalid: { profile: "nope" } },
+    sync_settings: { valid: { groups: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
+    get_order: {
+      valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
+      invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required
+    },
+    doctor: { valid: { profile: "ossm" }, invalid: {} }, // profile is required
   };
 
   for (const [name, c] of Object.entries(cases)) {

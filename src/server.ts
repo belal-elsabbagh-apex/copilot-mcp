@@ -144,9 +144,9 @@ server.registerTool(
     inputSchema: {
       uids: z.array(z.string().min(8)).min(1).describe("Prod orderUid(s) to clone"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
       submit: z
         .boolean()
         .optional()
@@ -218,9 +218,9 @@ server.registerTool(
       "pick good uids before calling clone_order.",
     inputSchema: {
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
       limit: z
         .number()
         .int()
@@ -288,9 +288,9 @@ server.registerTool(
     inputSchema: {
       uids: z.array(z.string().min(8)).min(1).describe("Pre-prod orderUid(s) to delete"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
     },
   },
   async ({ uids, profile }) => {
@@ -340,20 +340,18 @@ server.registerTool(
       orderUid: z.string().min(8).describe("Order UID to fetch (must exist in the chosen env)"),
       env: z
         .enum(["prod", "pre_prod"])
-        .optional()
-        .default("pre_prod")
-        .describe("Which env the order lives in; drives fetch + token + serverURL"),
+        .describe("Which env the order lives in; drives fetch + token + serverURL (required)"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
     },
   },
   async ({ orderUid, env, profile }) => {
     try {
       const out = await buildQueueItem(orderUid, {
         profile: profile ?? null,
-        env: env ?? "pre_prod",
+        env,
       });
       return ok(out);
     } catch (e) {
@@ -387,10 +385,8 @@ server.registerTool(
       orderUid: z.string().min(8).describe("Copilot orderUid to trace"),
       env: z
         .enum(["prod", "pre_prod"])
-        .optional()
-        .default("prod")
         .describe(
-          "Which UiPath folder/env the job ran in: prod='Authorization', pre_prod='Authorization Dev Clone'",
+          "Which UiPath folder/env the job ran in: prod='Authorization', pre_prod='Authorization Dev Clone' (required)",
         ),
       folder: z
         .string()
@@ -426,9 +422,11 @@ server.registerTool(
         .default(false)
         .describe("Also fetch the order's current BE status (same env; needs Copilot creds)"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile for enrichOrderState; omit for default"),
+        .string()
+        .min(1)
+        .describe(
+          "Credential profile / account name from config (used for enrichOrderState) (required)",
+        ),
     },
   },
   async (
@@ -605,7 +603,7 @@ server.registerTool(
       env: z
         .enum(["prod", "pre_prod"])
         .optional()
-        .describe("Folder/env override; defaults from the URL fid, else pre_prod"),
+        .describe("Folder/env; derived from the URL fid when a url is given, otherwise required"),
       folderId: z
         .string()
         .optional()
@@ -614,12 +612,14 @@ server.registerTool(
   },
   async ({ url, txnId, env, folderId }) => {
     try {
+      if (!url && !env)
+        throw new Error("env is required when pulling by txnId (no url to derive it from)");
       const args = url
         ? ({ source: "url", url } as const)
         : ({
             source: "txn",
             txnId: txnId ?? 0,
-            env: env ?? "pre_prod",
+            env: env as "prod" | "pre_prod",
             folderId: folderId ?? "",
           } as const);
       return ok(await pullQueueItem(args));
@@ -662,9 +662,7 @@ server.registerTool(
         .describe("Which queue for the named portal (default submit)"),
       env: z
         .enum(["prod", "pre_prod"])
-        .optional()
-        .default("prod")
-        .describe("Folder/env (queueName ids are prod; use queueDefId for pre_prod)"),
+        .describe("Folder/env (queueName ids are prod; use queueDefId for pre_prod) (required)"),
       status: z
         .enum(["New", "InProgress", "Failed", "Successful", "Retried", "Abandoned", "Deleted"])
         .optional()
@@ -707,9 +705,7 @@ server.registerTool(
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
-        .optional()
-        .default("prod")
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone'"),
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
       folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
       since: z.string().optional().describe("ISO date lower bound on CreationTime"),
       top: z.number().int().min(1).max(500).optional().default(50).describe("Max jobs to return"),
@@ -758,9 +754,7 @@ server.registerTool(
         .describe("The job's GUID Key (from analyze_order_execution / list_jobs)"),
       env: z
         .enum(["prod", "pre_prod"])
-        .optional()
-        .default("prod")
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone'"),
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
       folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
       includeVideo: z
         .boolean()
@@ -799,11 +793,11 @@ server.registerTool(
       "coarse verdict (no-job / job-faulted / job-running / job-successful-order-stuck). READ-ONLY. " +
       "Returns {env, scanned, statuses, found, stuck:[{orderUid,status,ageHours,uipath?}]}.",
     inputSchema: {
-      env: z.enum(["prod", "pre_prod"]).optional().default("prod").describe("Which env to scan"),
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to scan (required)"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
       scanPages: z
         .number()
         .int()
@@ -884,9 +878,9 @@ server.registerTool(
       "{account, prodBase, preProdBase, sectionsCompared, sectionsWithDiffs, sections:[...]}.",
     inputSchema: {
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
       groups: z
         .array(z.string())
         .optional()
@@ -991,9 +985,9 @@ server.registerTool(
       "Use diff_settings to inspect what is missing and add it manually for now.",
     inputSchema: {
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
       groups: z.array(z.string()).optional().describe("Top-level groups to sync (e.g. ['orders'])"),
       sections: z.array(z.string()).optional().describe("Exact section keys to sync"),
       emr: z.string().optional().describe("EMR type to include emrDetailsSettings"),
@@ -1041,15 +1035,11 @@ server.registerTool(
       "order is not found in that env.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Order UID to fetch"),
-      env: z
-        .enum(["prod", "pre_prod"])
-        .optional()
-        .default("prod")
-        .describe("Which env the order lives in"),
+      env: z.enum(["prod", "pre_prod"]).describe("Which env the order lives in (required)"),
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
     },
   },
   async ({ orderUid, env, profile }) => {
@@ -1084,9 +1074,9 @@ server.registerTool(
       "folder access). Returns {account, ok, checks:[{name, target, ok, detail}]}.",
     inputSchema: {
       profile: z
-        .enum(["ossm", "kafri"])
-        .optional()
-        .describe("Credential profile / account to check; omit for default"),
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config to check (required)"),
     },
   },
   async ({ profile }) => {
