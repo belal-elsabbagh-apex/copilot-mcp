@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { server } from "./server.js";
+import { server } from "../server.js";
 
 // The SDK keeps prompts and resource templates in private maps, mirroring the tool
 // registry asserted in server.test.ts. We read them here only to confirm the server
@@ -11,11 +11,12 @@ const resourceTemplates = (
 )._registeredResourceTemplates;
 
 describe("prompt + resource template registration", () => {
-  test("registers exactly the four workflow prompts", () => {
+  test("registers exactly the workflow prompts", () => {
     expect(Object.keys(prompts).sort()).toEqual([
       "clone-and-verify-order",
       "diagnose-order",
       "reconcile-settings",
+      "report-faulted-uipath-jobs",
       "triage-stuck-orders",
     ]);
   });

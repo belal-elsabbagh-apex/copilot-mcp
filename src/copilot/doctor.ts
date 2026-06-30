@@ -3,10 +3,10 @@
 // cheap authenticated UiPath Orchestrator call per env. Intended for setup/onboarding
 // debugging ("are my creds + token + folders right?").
 
-import type { Env } from "./config.js";
-import { getUipath, resolveCreds } from "./config.js";
+import type { Env } from "../config/config.js";
+import { getUipath, resolveCreds } from "../config/config.js";
+import { listRecentJobs, resolveFolder } from "../uipath/uipath.js";
 import { login, makeClient } from "./copilot-client.js";
-import { listRecentJobs, resolveFolder } from "./uipath.js";
 
 export interface DoctorCheck {
   name: string;

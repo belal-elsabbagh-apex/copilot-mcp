@@ -6,7 +6,7 @@
 // All types here are TOTAL — no optionals/nullables. Inputs arrive as discriminated
 // unions; missing data is normalized to "" / 0 sentinels at the boundary.
 
-import type { Env } from "./config.js";
+import type { Env } from "../config/config.js";
 import {
   envForFolderId,
   folderNameForId,
@@ -14,7 +14,7 @@ import {
   PORTALS,
   resolvePortal,
   resolvePortalByDefId,
-} from "./reference.js";
+} from "../mcp/reference.js";
 import {
   type FolderScope,
   getQueueDefinitionName,

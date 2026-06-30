@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { JobLog } from "../uipath/uipath.js";
 import { analyzeOutput, isFailureLog } from "./output-analysis.js";
-import type { JobLog } from "./uipath.js";
 
 const log = (Level: string, Message: string): JobLog => ({ Level, Message, TimeStamp: "" });
 

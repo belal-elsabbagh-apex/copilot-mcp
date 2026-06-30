@@ -36,11 +36,13 @@ const EXPECTED = [
   "list_queue_items",
   "list_jobs",
   "get_job_logs",
+  "build_faulted_job_issue",
   "find_stuck_orders",
   "diff_settings",
   "list_setting_sections",
   "sync_settings",
   "get_order",
+  "get_login_token",
   "doctor",
 ] as const;
 
@@ -113,7 +115,15 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required
     },
+    get_login_token: {
+      valid: { env: "prod", profile: "ossm" },
+      invalid: { profile: "ossm" }, // env is required
+    },
     doctor: { valid: { profile: "ossm" }, invalid: {} }, // profile is required
+    build_faulted_job_issue: {
+      valid: { env: "prod", jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+      invalid: { jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, // env is required
+    },
   };
 
   for (const [name, c] of Object.entries(cases)) {

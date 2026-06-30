@@ -2,10 +2,10 @@
 // deep links, and per-env folder resolution. Ported from copilot-doctor src/api.ts
 // (chrome background-proxy removed — direct fetch with the bearer from config.ts).
 
-import { type Env, getUipath } from "./config.js";
-import { outputMatchesOrder } from "./output-schema.js";
-import { folderIdFor } from "./reference.js";
-import { isRecord } from "./util.js";
+import { type Env, getUipath } from "../config/config.js";
+import { outputMatchesOrder } from "../copilot/output-schema.js";
+import { folderIdFor } from "../mcp/reference.js";
+import { isRecord } from "../shared/util.js";
 
 export type { Env };
 
@@ -145,6 +145,28 @@ async function fetchJobDetailsById(jobId: string, folder?: string): Promise<UiPa
       { $select: "Id,Key,State,CreationTime,EndTime,OutputArguments,InputArguments" },
       folder,
     )) as UiPathJob;
+  } catch {
+    return null;
+  }
+}
+
+// Single job by its GUID Key (the collection is keyed by numeric Id, so a Key
+// lookup needs an OData $filter). Returns the job incl. OutputArguments, or null
+// if no job matches. Used by build_faulted_job_issue, which is given only a Key.
+export async function fetchJobByKey(jobKey: string, folder?: string): Promise<UiPathJob | null> {
+  const key = jobKey.trim();
+  if (!key) return null;
+  try {
+    const data = await uipathGet(
+      "/odata/Jobs",
+      {
+        $filter: `Key eq ${key}`,
+        $top: "1",
+        $select: "Id,Key,State,CreationTime,EndTime,OutputArguments,InputArguments",
+      },
+      folder,
+    );
+    return odataValues<UiPathJob>(data)[0] ?? null;
   } catch {
     return null;
   }

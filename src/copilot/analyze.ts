@@ -2,8 +2,7 @@
 // diagnose the run. Ported from copilot-doctor src/jobMatcher.ts, extended with a
 // recent-scan fallback for when Orchestrator rejects the OutputArguments filter.
 
-import { analyzeOutput, type OutputComment } from "./output-analysis.js";
-import { normalizeOutput, type OutputSchemaId } from "./output-schema.js";
+import { isRecord } from "../shared/util.js";
 import {
   confirmJobsForOrder,
   type Env,
@@ -15,8 +14,9 @@ import {
   resolveFolder,
   searchJobsByOrderId,
   type UiPathJob,
-} from "./uipath.js";
-import { isRecord } from "./util.js";
+} from "../uipath/uipath.js";
+import { analyzeOutput, type OutputComment } from "./output-analysis.js";
+import { normalizeOutput, type OutputSchemaId } from "./output-schema.js";
 
 export type { Env };
 

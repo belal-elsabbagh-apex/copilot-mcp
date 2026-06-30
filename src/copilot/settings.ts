@@ -9,9 +9,10 @@
 // strip env-specific fields (stripNoise) and match list items on a SEMANTIC key (name),
 // never on UID.
 
-import { resolveCreds } from "./config.js";
+import { resolveCreds } from "../config/config.js";
+import { ExpectedError } from "../mcp/feedback.js";
+import { envelopeRows, isRecord, prop, stringProp } from "../shared/util.js";
 import { type HttpClient, login, makeClient } from "./copilot-client.js";
-import { envelopeRows, isRecord, prop, stringProp } from "./util.js";
 
 // ---- Section catalog (derived from the captured HAR) ----------------------
 
@@ -543,20 +544,346 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
   };
 }
 
-// ---- sync_settings (stub) -------------------------------------------------
-// The write-side counterpart to diffSettings: ADDITIVELY copy settings items that exist
-// in PROD but are missing in PRE-PROD into pre-prod (i.e. the diffList `onlyInProd` items
-// per selected section). Additive only — it must never overwrite or delete existing
-// pre-prod settings, and leaves items that merely differ (the `changed` set) untouched.
-// Deliberately NOT implemented yet — creating items in a tenant needs the per-section
-// write endpoints mapped and a dry-run/safety design first. Registered + thrown so the
-// tool is discoverable and its intent is documented, while never silently doing nothing.
+// ---- sync_settings --------------------------------------------------------
+// The write-side counterpart to diffSettings: ADDITIVELY copy settings that exist in PROD
+// but are missing in PRE-PROD into pre-prod. Additive only — never overwrites or deletes
+// existing pre-prod settings; pre-prod only; dry-run by default.
+//
+// Scope: the outbound order-type SPECIALITIES domain (the resource behind the three derived
+// diff sections `specialties` / `referred-providers` / `referred-facilities`). Two additive
+// ops, both verified against captured HARs:
+//   - create: a prod-only speciality (with its facilities/providers) ->
+//             POST /api/v1/settings/orders/outbound/types/{preTypeUid}/specialities
+//   - merge:  a speciality present in both, with prod-only facilities/providers ->
+//             PUT  /api/v1/settings/specialities/{preSpecialityUid}  (full-replace body, so we
+//             send the EXISTING pre-prod speciality + only the prod-only additions)
+// Other catalog sections have no verified write endpoint yet and are reported as skipped.
+//
+// Crucial: referredFacilities[].payersProviderId[].payerUid is a real foreign key to a payer,
+// and payer UIDs differ per env — so we REMAP payerUid prod->pre (payers matched by name),
+// never strip it. Own-record UIDs (specialityUid, referredFacilityUid, timestamps) ARE
+// stripped on create (the BE assigns fresh ones).
 
-export class NotImplementedError extends Error {
+// Kept as a representative ExpectedError for feedback classification tests; no longer thrown.
+export class NotImplementedError extends ExpectedError {
   constructor(message: string) {
     super(message);
     this.name = "NotImplementedError";
   }
+}
+
+// ---- rich speciality crawl (separate from the diff crawl, which flattens away context) ----
+
+interface CrawledType {
+  typeUid: string;
+  name: string;
+  specialities: Record<string, unknown>[]; // full speciality objects (referredFacilities, etc.)
+}
+export interface SpecialityTree {
+  types: CrawledType[];
+}
+
+async function crawlSpecialityTree(client: HttpClient): Promise<SpecialityTree> {
+  const typesRes = await client.req("GET", "/api/v1/settings/orders/outbound/types");
+  if (typesRes.status >= 400)
+    throw new Error(`GET /settings/orders/outbound/types -> ${typesRes.status}`);
+  const types: CrawledType[] = [];
+  for (const t of asArray(typesRes.data)) {
+    const typeUid = stringProp(t, "typeUid");
+    const name = stringProp(t, "name") ?? "";
+    if (!typeUid) continue;
+    const r = await client.req(
+      "GET",
+      `/api/v1/settings/orders/outbound/types/${typeUid}/specialities`,
+    );
+    if (r.status >= 400) throw new Error(`GET specialities(${name}) -> ${r.status}`);
+    types.push({ typeUid, name, specialities: envelopeRows(r.data).filter(isRecord) });
+  }
+  return { types };
+}
+
+// ---- payer prod->pre UID remap --------------------------------------------
+
+// Candidate keys for a payer's own UID in the clinic-payers list (exact field unconfirmed —
+// fall back to any *Uid key). A wrong/empty map drops payer links with a warning rather than
+// linking to the wrong payer, so the miss is visible in dry-run output.
+const PAYER_UID_KEYS = ["payerUid", "uid"];
+const payerUidOf = (p: unknown): string | undefined => {
+  for (const k of PAYER_UID_KEYS) {
+    const v = stringProp(p, k);
+    if (v) return v;
+  }
+  if (isRecord(p))
+    for (const k of Object.keys(p))
+      if (/uid$/i.test(k)) {
+        const v = stringProp(p, k);
+        if (v) return v;
+      }
+  return undefined;
+};
+
+// name -> own payerUid for one env (source: clinic-payers, envelope `data`, key `Name`).
+async function fetchPayerUidsByName(client: HttpClient): Promise<Map<string, string>> {
+  const r = await client.req("GET", "/api/v1/settings/clinic-payers");
+  if (r.status >= 400) throw new Error(`GET /settings/clinic-payers -> ${r.status}`);
+  const out = new Map<string, string>();
+  for (const p of asArray(getEnvelope(r.data, "data"))) {
+    const name = stringProp(p, "Name");
+    const uid = payerUidOf(p);
+    if (name && uid) out.set(name, uid);
+  }
+  return out;
+}
+
+// prod payerUid -> pre-prod payerUid, by matching payers across envs on name.
+async function buildPayerMap(prod: HttpClient, pre: HttpClient): Promise<Map<string, string>> {
+  const [prodByName, preByName] = await Promise.all([
+    fetchPayerUidsByName(prod),
+    fetchPayerUidsByName(pre),
+  ]);
+  const map = new Map<string, string>();
+  for (const [name, prodUid] of prodByName) {
+    const preUid = preByName.get(name);
+    if (preUid) map.set(prodUid, preUid);
+  }
+  return map;
+}
+
+// Rewrite each link's payerUid prod->pre; drop (and report) links with no pre-prod match.
+export function remapPayerLinks(
+  links: unknown,
+  payerMap: ReadonlyMap<string, string>,
+): { links: Record<string, unknown>[]; dropped: string[] } {
+  const out: Record<string, unknown>[] = [];
+  const dropped: string[] = [];
+  for (const l of asArray(links)) {
+    if (!isRecord(l)) continue;
+    const prodUid = stringProp(l, "payerUid");
+    if (!prodUid) {
+      out.push({ ...l }); // link carries no payer ref — keep verbatim
+      continue;
+    }
+    const preUid = payerMap.get(prodUid);
+    if (!preUid) {
+      dropped.push(prodUid);
+      continue;
+    }
+    out.push({ ...l, payerUid: preUid });
+  }
+  return { links: out, dropped };
+}
+
+// ---- create/merge body builders (pure; unit-tested) -----------------------
+
+// Drop own-record UIDs + timestamps (the BE assigns fresh ones on create).
+const stripOwnUids = (rec: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) if (!isNoiseKey(k)) out[k] = v;
+  return out;
+};
+
+// Clean a prod facility/provider for writing into pre-prod: strip its own UIDs and remap the
+// nested payersProviderId links prod->pre.
+export function cleanReferralForWrite(
+  item: unknown,
+  payerMap: ReadonlyMap<string, string>,
+): { item: Record<string, unknown>; droppedPayers: string[] } {
+  const base = isRecord(item) ? stripOwnUids(item) : {};
+  let droppedPayers: string[] = [];
+  if (Object.hasOwn(base, "payersProviderId")) {
+    const { links, dropped } = remapPayerLinks(base["payersProviderId"], payerMap);
+    base["payersProviderId"] = links;
+    droppedPayers = dropped;
+  }
+  return { item: base, droppedPayers };
+}
+
+const cleanMany = (
+  items: unknown[],
+  payerMap: ReadonlyMap<string, string>,
+): { items: Record<string, unknown>[]; droppedPayers: string[] } => {
+  const out: Record<string, unknown>[] = [];
+  const droppedPayers: string[] = [];
+  for (const it of items) {
+    const c = cleanReferralForWrite(it, payerMap);
+    out.push(c.item);
+    droppedPayers.push(...c.droppedPayers);
+  }
+  return { items: out, droppedPayers };
+};
+
+// POST body to create a whole prod-only speciality under a pre-prod type. Matches the verified
+// HAR shape: { name, referredFacilities, referredProviders? }.
+export function buildSpecialityCreateBody(
+  prodSpeciality: unknown,
+  payerMap: ReadonlyMap<string, string>,
+): { body: Record<string, unknown>; droppedPayers: string[] } {
+  const facs = cleanMany(asArray(prop(prodSpeciality, "referredFacilities")), payerMap);
+  const provsRaw = asArray(prop(prodSpeciality, "referredProviders"));
+  const provs = cleanMany(provsRaw, payerMap);
+  const body: Record<string, unknown> = {
+    name: stringProp(prodSpeciality, "name") ?? "",
+    referredFacilities: facs.items,
+  };
+  if (provsRaw.length) body["referredProviders"] = provs.items;
+  return { body, droppedPayers: [...facs.droppedPayers, ...provs.droppedPayers] };
+}
+
+// PUT body to additively merge prod-only facilities/providers into an EXISTING pre-prod
+// speciality. PUT is full-replace, so we keep the existing pre-prod facilities/providers
+// verbatim (their referredFacilityUid + already-valid pre-prod payer links) and append only
+// the cleaned, payer-remapped prod-only additions.
+export function buildMergedSpecialityBody(
+  preSpeciality: unknown,
+  prodOnlyFacilities: unknown[],
+  prodOnlyProviders: unknown[],
+  payerMap: ReadonlyMap<string, string>,
+): { body: Record<string, unknown>; droppedPayers: string[] } {
+  const existingFacs = asArray(prop(preSpeciality, "referredFacilities")).filter(isRecord);
+  const existingProvs = asArray(prop(preSpeciality, "referredProviders")).filter(isRecord);
+  const newFacs = cleanMany(prodOnlyFacilities, payerMap);
+  const newProvs = cleanMany(prodOnlyProviders, payerMap);
+  const body: Record<string, unknown> = {
+    name: stringProp(preSpeciality, "name") ?? "",
+    referredFacilities: [...existingFacs, ...newFacs.items],
+  };
+  if (existingProvs.length || newProvs.items.length)
+    body["referredProviders"] = [...existingProvs, ...newProvs.items];
+  return { body, droppedPayers: [...newFacs.droppedPayers, ...newProvs.droppedPayers] };
+}
+
+// ---- plan (pure over crawled trees + payer map; unit-tested) --------------
+
+export interface SyncAction {
+  section: string;
+  op: "create" | "merge";
+  typeName: string;
+  specialityName: string;
+  method: "POST" | "PUT";
+  path: string;
+  body: Record<string, unknown>;
+  warnings?: string[];
+}
+export interface SyncSkip {
+  typeName: string;
+  specialityName?: string;
+  reason: string;
+}
+
+const referralName = (x: unknown): string => stringProp(x, "name") ?? "";
+const missingByName = (prodArr: unknown[], preArr: unknown[]): unknown[] => {
+  const have = new Set(preArr.map(referralName));
+  return prodArr.filter((x) => !have.has(referralName(x)));
+};
+const payerWarning = (dropped: string[]): string =>
+  `${dropped.length} payer link(s) dropped (no matching pre-prod payer): ${[...new Set(dropped)].join(", ")}`;
+
+// Match order types by name, then specialities by name; emit create actions for prod-only
+// specialities and merge actions for specialities whose facilities/providers are a superset in
+// prod. Pure — no network. Types/specialities that can't be placed are reported in `skipped`.
+export function planSpecialitySync(
+  prodTree: SpecialityTree,
+  preTree: SpecialityTree,
+  payerMap: ReadonlyMap<string, string>,
+): { actions: SyncAction[]; skipped: SyncSkip[] } {
+  const preTypeByName = new Map(preTree.types.map((t) => [t.name, t]));
+  const actions: SyncAction[] = [];
+  const skipped: SyncSkip[] = [];
+
+  for (const pType of prodTree.types) {
+    const qType = preTypeByName.get(pType.name);
+    if (!qType) {
+      skipped.push({
+        typeName: pType.name,
+        reason: "order type missing in pre-prod (order types are not auto-created)",
+      });
+      continue;
+    }
+    const preSpecByName = new Map(qType.specialities.map((s) => [referralName(s), s]));
+
+    for (const pSpec of pType.specialities) {
+      const sName = referralName(pSpec);
+      const qSpec = preSpecByName.get(sName);
+
+      if (!qSpec) {
+        const { body, droppedPayers } = buildSpecialityCreateBody(pSpec, payerMap);
+        actions.push({
+          section: "specialties",
+          op: "create",
+          typeName: pType.name,
+          specialityName: sName,
+          method: "POST",
+          path: `/api/v1/settings/orders/outbound/types/${qType.typeUid}/specialities`,
+          body,
+          ...(droppedPayers.length ? { warnings: [payerWarning(droppedPayers)] } : {}),
+        });
+        continue;
+      }
+
+      const missFacs = missingByName(
+        asArray(prop(pSpec, "referredFacilities")),
+        asArray(prop(qSpec, "referredFacilities")),
+      );
+      const missProvs = missingByName(
+        asArray(prop(pSpec, "referredProviders")),
+        asArray(prop(qSpec, "referredProviders")),
+      );
+      if (!missFacs.length && !missProvs.length) continue; // already in sync
+
+      const preSpecUid = stringProp(qSpec, "specialityUid");
+      if (!preSpecUid) {
+        skipped.push({
+          typeName: pType.name,
+          specialityName: sName,
+          reason: "speciality has no specialityUid in pre-prod (cannot target the update endpoint)",
+        });
+        continue;
+      }
+      const { body, droppedPayers } = buildMergedSpecialityBody(
+        qSpec,
+        missFacs,
+        missProvs,
+        payerMap,
+      );
+      actions.push({
+        section: "specialties",
+        op: "merge",
+        typeName: pType.name,
+        specialityName: sName,
+        method: "PUT",
+        path: `/api/v1/settings/specialities/${preSpecUid}`,
+        body,
+        ...(droppedPayers.length ? { warnings: [payerWarning(droppedPayers)] } : {}),
+      });
+    }
+  }
+  return { actions, skipped };
+}
+
+// ---- orchestration --------------------------------------------------------
+
+// Catalog section keys whose additive write is handled by the specialities syncer.
+const SPECIALITY_SYNC_SECTIONS = ["specialties", "referred-providers", "referred-facilities"];
+
+export interface ExecutedAction {
+  op: SyncAction["op"];
+  typeName: string;
+  specialityName: string;
+  method: string;
+  path: string;
+  status: number;
+  ok: boolean;
+  warnings?: string[];
+}
+export interface SyncSettingsResult {
+  account: string;
+  prodBase: string;
+  preProdBase: string;
+  dryRun: boolean;
+  planned: SyncAction[];
+  executed?: ExecutedAction[];
+  skipped: SyncSkip[];
+  skippedSections: { key: string; reason: string }[];
 }
 
 export interface SyncSettingsOpts {
@@ -565,15 +892,80 @@ export interface SyncSettingsOpts {
   groups?: string[];
   emr?: string;
   dryRun?: boolean;
+  // Optional audit hook; the server wires this to mcpLog(warning) so every live write is logged.
+  onWrite?: (message: string, data?: Record<string, unknown>) => void;
 }
 
-export function syncSettings(_opts: SyncSettingsOpts): Promise<never> {
-  return Promise.reject(
-    new NotImplementedError(
-      "sync_settings is not implemented yet (stub). It will ADDITIVELY add settings items that " +
-        "exist in PROD but are missing in PRE-PROD (the diff_settings `onlyInProd` items) into " +
-        "pre-prod — additive only (never overwrites or deletes), pre-prod only, dry-run by default. " +
-        "For now use diff_settings to inspect what is missing and add it by hand.",
-    ),
-  );
+// Additively sync prod -> pre-prod settings for the selected sections. Dry-run by default:
+// returns the planned create/merge actions without writing. With dryRun=false, executes each
+// write against PRE-PROD only and logs it via onWrite.
+export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettingsResult> {
+  const dryRun = opts.dryRun ?? true;
+  // Validate + resolve the selection up front (unknown group/section fails fast, no login).
+  const chosen = selectSections(opts.sections, opts.groups, opts.emr);
+  const chosenKeys = new Set(chosen.map((s) => s.key));
+  const runSpeciality = SPECIALITY_SYNC_SECTIONS.some((k) => chosenKeys.has(k));
+
+  const covered = new Set(runSpeciality ? SPECIALITY_SYNC_SECTIONS : []);
+  const skippedSections = chosen
+    .filter((s) => !covered.has(s.key))
+    .map((s) => ({ key: s.key, reason: "no write mapping yet — additive sync not implemented" }));
+
+  const creds = resolveCreds(opts.profile ?? null);
+  const result: SyncSettingsResult = {
+    account: opts.profile ?? "(default)",
+    prodBase: creds.prod.be,
+    preProdBase: creds.pre_prod.be,
+    dryRun,
+    planned: [],
+    skipped: [],
+    skippedSections,
+  };
+  if (!runSpeciality) return result; // nothing syncable selected — report skipped only
+
+  const prod = makeClient(creds.prod.be);
+  const pre = makeClient(creds.pre_prod.be);
+  await Promise.all([
+    login(prod, creds.prod.email, creds.prod.password),
+    login(pre, creds.pre_prod.email, creds.pre_prod.password),
+  ]);
+
+  const [prodTree, preTree, payerMap] = await Promise.all([
+    crawlSpecialityTree(prod),
+    crawlSpecialityTree(pre),
+    buildPayerMap(prod, pre),
+  ]);
+
+  const { actions, skipped } = planSpecialitySync(prodTree, preTree, payerMap);
+  result.planned = actions;
+  result.skipped = skipped;
+  if (dryRun) return result;
+
+  // Execute against PRE-PROD only. Additive: POST new specialities / PUT existing-plus-additions.
+  const executed: ExecutedAction[] = [];
+  for (const a of actions) {
+    const r = await pre.req(a.method, a.path, { json: a.body });
+    const okWrite = r.status < 400;
+    opts.onWrite?.(
+      `sync_settings ${a.op} speciality '${a.specialityName}' (type '${a.typeName}')`,
+      {
+        method: a.method,
+        path: a.path,
+        status: r.status,
+        ok: okWrite,
+      },
+    );
+    executed.push({
+      op: a.op,
+      typeName: a.typeName,
+      specialityName: a.specialityName,
+      method: a.method,
+      path: a.path,
+      status: r.status,
+      ok: okWrite,
+      ...(a.warnings ? { warnings: a.warnings } : {}),
+    });
+  }
+  result.executed = executed;
+  return result;
 }

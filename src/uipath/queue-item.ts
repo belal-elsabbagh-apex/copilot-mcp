@@ -5,10 +5,10 @@
 // BUILD ONLY — never POSTs. IsApproved is ALWAYS false (see repo CLAUDE.md rule).
 
 import { randomUUID } from "node:crypto";
-import type { Env, UipathConfig } from "./config.js";
-import { getUipath, resolveCreds } from "./config.js";
-import { type BeOrder, fetchOrder, makeClient, pad } from "./copilot-client.js";
-import { prop, stringProp } from "./util.js";
+import type { Env, UipathConfig } from "../config/config.js";
+import { getUipath, resolveCreds } from "../config/config.js";
+import { type BeOrder, fetchOrder, makeClient, pad } from "../copilot/copilot-client.js";
+import { prop, stringProp } from "../shared/util.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error).
 export function toMDY(input: string | null | undefined): string {

@@ -20,5 +20,6 @@
   },
   "overrides": {
     "<prodOrderUid>": { "referredFacilityUid": "<preprod-uid>", "specialityUid": "<preprod-uid>", "placeOfService": "11", "injectCPTs": false }
-  }
+  },
+  "feedback": { "enabled": true, "repositoryUrl": "https://github.com/belal-elsabbagh-apex/copilot-mcp" }
 }

@@ -6,7 +6,7 @@
 import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { listProfiles } from "./config.js";
+import { listProfiles } from "../config/config.js";
 
 // Profiles are read live from the config so autocompletion reflects whatever the
 // running server is configured with, not a hardcoded list.
@@ -124,6 +124,50 @@ export function registerPrompts(server: McpServer): void {
           `2. For each stuck order, call analyze_order_execution to see whether its UiPath job failed, is still running, or never started.\n` +
           `3. Group them by root cause and recommend a remediation per group (retry, re-clone, fix data, escalate).\n` +
           `Do not take any write action without the user's explicit go-ahead.`,
+      );
+    },
+  );
+
+  // ---- report-faulted-uipath-jobs ----------------------------------------
+  server.registerPrompt(
+    "report-faulted-uipath-jobs",
+    {
+      title: "Report faulted UiPath jobs as GitHub issues",
+      description:
+        "Find faulted UiPath jobs (prod by default) and file each as a GitHub issue on the RPA repo, " +
+        "commenting on an existing issue when the same fault is already filed. Requires a connected GitHub MCP server.",
+      argsSchema: {
+        env: completable(
+          z.string().optional().describe("Env to scan (prod | pre_prod); defaults to prod"),
+          () => ENVS,
+        ),
+        since: z
+          .string()
+          .optional()
+          .describe("ISO lower bound on job CreationTime (e.g. last 24h)"),
+        top: z.string().optional().describe("Max recent jobs to scan (default 50)"),
+        repo: z
+          .string()
+          .optional()
+          .describe("Target repo owner/name (default Apex-Medical-AI-Inc/RPAPlaywright)"),
+      },
+    },
+    ({ env, since, top, repo }) => {
+      const e = env || "prod";
+      const repoRef = repo || "Apex-Medical-AI-Inc/RPAPlaywright";
+      const listArgs = [`env="${e}"`, since ? `since="${since}"` : "", top ? `top=${top}` : ""]
+        .filter(Boolean)
+        .join(", ");
+      return userText(
+        `File GitHub issues for faulted UiPath jobs in ${e} on ${repoRef}.\n` +
+          `This requires a connected GitHub MCP server with write access to ${repoRef}; if none is available, stop and say so.\n` +
+          `1. Call list_jobs with ${listArgs}, then keep only jobs whose state is "Faulted" or "Stopped". If none, report that and stop.\n` +
+          `2. For each faulted job, call build_faulted_job_issue with env="${e}" and that job's key${repo ? `, repo="${repo}"` : ""} to get the issue payload (it does NOT post to GitHub).\n` +
+          `3. Using the GitHub MCP server, run the payload's searchQuery to find an existing OPEN issue for this fault (matched by faultSignature):\n` +
+          `   - If one exists, add the payload's recurrenceComment to that issue's discussion (do NOT open a duplicate).\n` +
+          `   - Otherwise create a new issue with the payload's title, body, and labels.\n` +
+          `4. Report a per-job summary: faulted job key -> created issue (#/url) or commented on existing issue (#/url).\n` +
+          `Only write to GitHub — never take any UiPath write action.`,
       );
     },
   );

@@ -4,7 +4,7 @@
 // the legacy `.planning/copy_order_prod_to_preprod.mjs` harness. The order mirror
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
-import { envelopeRows } from "./util.js";
+import { envelopeRows, stringProp } from "../shared/util.js";
 
 // orderMode sent on every /orders/filter call (orders + pcp notes).
 export const ORDER_MODE = '["orders_only_mode","pcp_notes_mode"]';
@@ -146,6 +146,17 @@ export function makeClient(base: string): HttpClient {
 export async function login(c: HttpClient, email: string, password: string): Promise<void> {
   const r = await c.req("POST", "/api/v1/copilot/physician/login", { json: { email, password } });
   if (r.status >= 400) throw new Error(`login failed ${r.status}: ${r.text.slice(0, 300)}`);
+}
+
+// Log in and return the BE session JWT (the `token` field of the login response).
+// Used as SpecificContent.token for UiPath callbacks; the cookie jar is also primed
+// as a side effect. Throws if login fails or the response carries no token.
+export async function loginToken(c: HttpClient, email: string, password: string): Promise<string> {
+  const r = await c.req("POST", "/api/v1/copilot/physician/login", { json: { email, password } });
+  if (r.status >= 400) throw new Error(`login failed ${r.status}: ${r.text.slice(0, 300)}`);
+  const token = stringProp(r.data, "token");
+  if (!token) throw new Error("login succeeded but returned no token");
+  return token;
 }
 
 // Pull a single order row out of an /orders/filter response (defensive about shape).

@@ -9,8 +9,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import type { ResolvedCreds } from "./config.js";
-import { getOverrides, type OrderOverride } from "./config.js";
+import type { ResolvedCreds } from "../config/config.js";
+import { getOverrides, type OrderOverride } from "../config/config.js";
+import { envelopeRows, prop, stringProp } from "../shared/util.js";
 import {
   type BeFacility,
   type BeOrder,
@@ -23,7 +24,6 @@ import {
   toMDY,
   verify,
 } from "./copilot-client.js";
-import { envelopeRows, prop, stringProp } from "./util.js";
 
 export interface MirrorResult {
   prodUid: string;

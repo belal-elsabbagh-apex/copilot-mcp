@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 
 // MCP server: EHR Copilot operations (order cloning + Orchestrator execution analysis).
-// Thin wiring layer — tool logic lives in:
-//   - config.ts      single-file config (copilot creds + uipath args) + validation
-//   - harness.ts     lazy-loaded legacy .planning clone/queue logic
-//   - analyze.ts     analyze_order_execution orchestration
+// Thin wiring layer — src/ is organized by domain (config/, copilot/, uipath/, mcp/, shared/);
+// tool logic lives in per-domain modules, e.g.:
+//   - config/config.ts     single-file config (copilot creds + uipath args) + validation
+//   - copilot/analyze.ts   analyze_order_execution orchestration
+//   - uipath/faults.ts     build_faulted_job_issue (faulted job -> GitHub issue payload)
 // Tools:
 //   - clone_order              mirror prod order(s) into pre-prod (clone-only by default; submit opt-in)
 //   - find_clone_candidates    list recent prod orders that are actually cloneable
 //   - delete_preprod_order     delete pre-prod order(s)
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
+//   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/groups diff_settings can compare (read-only, no network)
-//   - sync_settings            additively add prod-only settings into pre-prod (STUB — not implemented)
+//   - sync_settings            additively add prod-only settings into pre-prod (specialties domain; dry-run default)
 //   - get_order                fetch a single order's normalized detail by uid (read-only)
+//   - get_login_token          log into the Copilot BE for a profile/env and return the session JWT (read-only)
 //   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
 //
 // See the copilot + copilot-order-mirror skills for the full flow and quirks.
@@ -25,15 +28,16 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { analyzeOrderExecution } from "./analyze.js";
-import { resolveCreds } from "./config.js";
-import { login, makeClient, ORDER_MODE, verify } from "./copilot-client.js";
-import { runDoctor } from "./doctor.js";
-import { type MirrorResult, mirrorOne } from "./mirror.js";
-import { mcpLog, registerLogging, reportProgress } from "./notify.js";
-import { registerPrompts } from "./prompts.js";
-import { listQueue, pullQueueItem } from "./queue.js";
-import { buildQueueItem } from "./queue-item.js";
+import { resolveCreds } from "./config/config.js";
+import { analyzeOrderExecution } from "./copilot/analyze.js";
+import { login, loginToken, makeClient, ORDER_MODE, verify } from "./copilot/copilot-client.js";
+import { runDoctor } from "./copilot/doctor.js";
+import { type MirrorResult, mirrorOne } from "./copilot/mirror.js";
+import { diffSettings, listSettingSections, syncSettings } from "./copilot/settings.js";
+import { findStuckOrders } from "./copilot/sweep.js";
+import { toolError } from "./mcp/feedback.js";
+import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
+import { registerPrompts } from "./mcp/prompts.js";
 import {
   ORDER_LIFECYCLE,
   PORTALS,
@@ -42,17 +46,18 @@ import {
   RESULT_CONTRACT,
   SAFETY_RULES,
   UIPATH_FOLDERS,
-} from "./reference.js";
-import { diffSettings, listSettingSections, syncSettings } from "./settings.js";
-import { findStuckOrders } from "./sweep.js";
+} from "./mcp/reference.js";
+import { envelopeRows, stringProp } from "./shared/util.js";
+import { buildFaultedJobIssue } from "./uipath/faults.js";
+import { listQueue, pullQueueItem } from "./uipath/queue.js";
+import { buildQueueItem } from "./uipath/queue-item.js";
 import {
   fetchJobLogs,
   fetchJobVideoUrl,
   jobDeepLink,
   listRecentJobs,
   resolveFolder,
-} from "./uipath.js";
-import { envelopeRows, stringProp } from "./util.js";
+} from "./uipath/uipath.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
 // write corrupts it. We therefore never let console.log/info/warn reach stdout:
@@ -111,8 +116,13 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
   };
 };
 
+// Single source of truth for the server version: advertised to clients and embedded
+// in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
+// sync with package.json on release.
+const VERSION = "1.5.0";
+
 export const server = new McpServer(
-  { name: "copilot", version: "1.5.0" },
+  { name: "copilot", version: VERSION },
   // `logging` must be declared explicitly for notifications/message + logging/setLevel
   // to be advertised; tools/resources/prompts/completions are auto-negotiated by McpServer.
   { capabilities: { logging: {} } },
@@ -195,7 +205,7 @@ server.registerTool(
         ],
       });
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("clone_order", e, VERSION);
     }
   },
 );
@@ -266,7 +276,7 @@ server.registerTool(
       }
       return ok({ profile: profile ?? "(default)", scanned, found: candidates.length, candidates });
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("find_clone_candidates", e, VERSION);
     }
   },
 );
@@ -316,7 +326,7 @@ server.registerTool(
         results,
       });
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("delete_preprod_order", e, VERSION);
     }
   },
 );
@@ -355,7 +365,7 @@ server.registerTool(
       });
       return ok(out);
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("build_queue_item", e, VERSION);
     }
   },
 );
@@ -460,7 +470,7 @@ server.registerTool(
       reportProgress(extra, 2, 2, "done");
       return ok(out);
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("analyze_order_execution", e, VERSION);
     }
   },
 );
@@ -624,7 +634,7 @@ server.registerTool(
           } as const);
       return ok(await pullQueueItem(args));
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("pull_queue_item", e, VERSION);
     }
   },
 );
@@ -683,7 +693,7 @@ server.registerTool(
         }),
       );
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("list_queue_items", e, VERSION);
     }
   },
 );
@@ -728,7 +738,7 @@ server.registerTool(
         })),
       });
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("list_jobs", e, VERSION);
     }
   },
 );
@@ -771,7 +781,47 @@ server.registerTool(
       if (includeVideo) out["videoUrl"] = await fetchJobVideoUrl(jobKey, resolved);
       return ok(out);
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("get_job_logs", e, VERSION);
+    }
+  },
+);
+
+// ---- build_faulted_job_issue ---------------------------------------------
+server.registerTool(
+  "build_faulted_job_issue",
+  {
+    title: "Build a GitHub issue payload for a faulted UiPath job",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Read a faulted UiPath job (by its GUID Key) and its robot logs, and BUILD a ready-to-post " +
+      "GitHub issue payload for the RPA repo. READ-ONLY: this does NOT post to GitHub — it returns " +
+      "{repo,title,body,labels,faultSignature,searchQuery,recurrenceComment,found}. The caller (the " +
+      "report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search with " +
+      "`searchQuery`, then add `recurrenceComment` to the matching open issue, or create_issue with " +
+      "title/body/labels. `faultSignature` is the normalized error (stable across reruns) used to dedupe.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      jobKey: z.string().min(1).describe("The faulted job's GUID Key (from list_jobs)"),
+      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      repo: z
+        .string()
+        .optional()
+        .describe("Target repo owner/name (default Apex-Medical-AI-Inc/RPAPlaywright)"),
+      labels: z.array(z.string()).optional().describe("Issue labels (default uipath-fault, bug)"),
+    },
+  },
+  async ({ env, jobKey, folder, repo, labels }) => {
+    try {
+      return ok(await buildFaultedJobIssue(env, jobKey, { folder, repo, labels }));
+    } catch (e) {
+      return toolError("build_faulted_job_issue", e, VERSION);
     }
   },
 );
@@ -848,7 +898,7 @@ server.registerTool(
         }),
       );
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("find_stuck_orders", e, VERSION);
     }
   },
 );
@@ -912,7 +962,7 @@ server.registerTool(
         }),
       );
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("diff_settings", e, VERSION);
     }
   },
 );
@@ -960,29 +1010,31 @@ server.registerTool(
         }),
       );
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("list_setting_sections", e, VERSION);
     }
   },
 );
 
-// ---- sync_settings (STUB) ------------------------------------------------
+// ---- sync_settings -------------------------------------------------------
 server.registerTool(
   "sync_settings",
   {
-    title: "Add prod-only settings into pre-prod (NOT IMPLEMENTED)",
+    title: "Additively add prod-only settings into pre-prod",
     annotations: {
-      readOnlyHint: false, // intended to create settings in pre-prod
+      readOnlyHint: false, // creates settings in pre-prod (when dryRun=false)
       destructiveHint: false, // ADDITIVE ONLY — never overwrites or deletes existing pre-prod settings
-      idempotentHint: true, // re-adding an item that already exists in pre-prod is a no-op
+      idempotentHint: true, // re-running once names match is a no-op
       openWorldHint: true,
     },
     description:
-      "STUB — NOT IMPLEMENTED. The write-side counterpart to diff_settings: it will ADDITIVELY " +
-      "copy settings items that exist in PROD but are MISSING in PRE-PROD into pre-prod (the " +
-      "diff_settings `onlyInProd` items per section). Additive only — it never overwrites or " +
-      "deletes existing pre-prod settings, and leaves items that merely differ untouched. " +
-      "Pre-prod only, dry-run by default. Calling it currently returns a not-implemented error. " +
-      "Use diff_settings to inspect what is missing and add it manually for now.",
+      "Write-side counterpart to diff_settings: ADDITIVELY copy settings that exist in PROD but " +
+      "are MISSING in PRE-PROD into pre-prod. Additive only — never overwrites or deletes existing " +
+      "pre-prod settings. PRE-PROD ONLY. Dry-run by default (returns the planned create/merge " +
+      "actions without writing; pass dryRun:false to apply). Currently covers the outbound " +
+      "order-type SPECIALTIES domain (sections specialties / referred-providers / referred-" +
+      "facilities): creates prod-only specialties and merges prod-only facilities/providers into " +
+      "specialties that already exist in pre-prod, remapping payer references prod->pre. Other " +
+      "sections have no write mapping yet and are reported under skippedSections.",
     inputSchema: {
       profile: z
         .string()
@@ -995,23 +1047,23 @@ server.registerTool(
         .boolean()
         .optional()
         .default(true)
-        .describe(
-          "Preview the additions without writing them (will default true once implemented)",
-        ),
+        .describe("Preview the additions without writing them (default true)"),
     },
   },
   async ({ profile, groups, sections, emr, dryRun }) => {
     try {
-      await syncSettings({
+      const out = await syncSettings({
         profile: profile ?? null,
         ...(groups ? { groups } : {}),
         ...(sections ? { sections } : {}),
         ...(emr ? { emr } : {}),
         dryRun: dryRun ?? true,
+        // Audit trail: surface every live write to the client log.
+        onWrite: (message, data) => mcpLog(server, "warning", message, data),
       });
-      return ok({ status: "ok" }); // unreachable while stubbed
+      return ok(out);
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("sync_settings", e, VERSION);
     }
   },
 );
@@ -1051,7 +1103,42 @@ server.registerTool(
       if (!detail) return err(`order ${orderUid} not found in ${env}`);
       return ok({ orderUid, env, ...detail });
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("get_order", e, VERSION);
+    }
+  },
+);
+
+// ---- get_login_token -----------------------------------------------------
+server.registerTool(
+  "get_login_token",
+  {
+    title: "Get a Copilot BE login token",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Log into the EHR Copilot BE for a profile + env and return the session JWT " +
+      "(the same token used as SpecificContent.token for UiPath callbacks). READ-ONLY — " +
+      "authenticates only, never reads or writes order data. Returns {env, profile, token}.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to log into (required)"),
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+    },
+  },
+  async ({ env, profile }) => {
+    try {
+      const creds = resolveCreds(profile ?? null)[env];
+      const client = makeClient(creds.be);
+      const token = await loginToken(client, creds.email, creds.password);
+      return ok({ env, profile, token });
+    } catch (e) {
+      return toolError("get_login_token", e, VERSION);
     }
   },
 );
@@ -1083,7 +1170,7 @@ server.registerTool(
     try {
       return ok(await runDoctor({ profile: profile ?? null }));
     } catch (e) {
-      return err(toMessage(e));
+      return toolError("doctor", e, VERSION);
     }
   },
 );

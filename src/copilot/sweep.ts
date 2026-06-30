@@ -3,10 +3,10 @@
 // Read-only. Reuses the order-filter scan (same shape as find_clone_candidates) and
 // the Orchestrator search in uipath.ts.
 
-import { type Env, resolveCreds } from "./config.js";
+import { type Env, resolveCreds } from "../config/config.js";
+import { envelopeRows } from "../shared/util.js";
+import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "../uipath/uipath.js";
 import { login, makeClient, ORDER_MODE } from "./copilot-client.js";
-import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "./uipath.js";
-import { envelopeRows } from "./util.js";
 
 // Statuses considered "stuck" by default: submitted-but-not-finished, or never
 // completed. Terminal/healthy statuses (e.g. forReview, completed) are excluded.

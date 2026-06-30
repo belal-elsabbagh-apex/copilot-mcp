@@ -83,10 +83,19 @@ const OrderOverrideSchema = z
   })
   .passthrough();
 
+// On-failure GitHub-issue suggestion (see feedback.ts). Optional; on by default.
+const FeedbackSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    repositoryUrl: z.string().url().optional(),
+  })
+  .passthrough();
+
 const ConfigSchema = z.object({
   copilot: CopilotSchema,
   uipath: UipathSchema,
   overrides: z.record(OrderOverrideSchema).optional(),
+  feedback: FeedbackSchema.optional(),
 });
 
 export type Env = "prod" | "pre_prod";
@@ -207,6 +216,17 @@ export function listProfiles(): string[] {
 }
 
 export const getOverrides = (): Record<string, OrderOverride> => loadConfig().overrides ?? {};
+
+// On-failure feedback settings. Enabled by default; repositoryUrl is omitted unless
+// configured (feedback.ts supplies the default repo). Reads through loadConfig, so it
+// may throw if the config is absent — callers in the error path guard against that.
+export function getFeedbackConfig(): { enabled: boolean; repositoryUrl?: string } {
+  const fb = loadConfig().feedback;
+  return {
+    enabled: fb?.enabled ?? true,
+    ...(fb?.repositoryUrl ? { repositoryUrl: fb.repositoryUrl } : {}),
+  };
+}
 
 // Resolve a credential pair: a named profile (copilot.profiles[name]) or the
 // top-level prod/pre_prod pair. Throws a clear error if the requested set is absent.

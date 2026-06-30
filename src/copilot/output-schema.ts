@@ -6,7 +6,7 @@
 // an OutputAdapter and register it in ADAPTERS — matching + display both read the
 // normalized view.
 
-import { isRecord } from "./util.js";
+import { isRecord } from "../shared/util.js";
 
 export type OutputSchemaId = "jobOutput" | "transactionItem" | "unknown";
 

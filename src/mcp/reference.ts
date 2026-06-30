@@ -11,7 +11,7 @@
 //   - ../RPAPlaywright/optum/packages/core/src/schema.ts        (SpecificContent schema)
 //   - ../RPAPlaywright/optum/.claude/skills/submissions-contract (result.json contract, dry-run gate)
 
-import type { Env } from "./config.js";
+import type { Env } from "../config/config.js";
 
 // ---- UiPath folders (per env) --------------------------------------------
 

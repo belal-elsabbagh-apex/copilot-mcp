@@ -2,7 +2,7 @@
 // OutputArguments and the job's robot logs and emits severity-tagged comments.
 // Ported from copilot-doctor src/outputAnalysis.ts.
 
-import type { JobLog } from "./uipath.js";
+import type { JobLog } from "../uipath/uipath.js";
 
 export type CommentSeverity = "error" | "warning" | "info";
 
