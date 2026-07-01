@@ -1109,7 +1109,7 @@ server.registerTool(
       await login(client, creds.email, creds.password);
       const order = await fetchOrder(client, orderUid);
       const detail = normalizeOrder(order);
-      const documents = await orderDocuments(client, order, orderUid);
+      const documents = await orderDocuments(client, order, orderUid, profile);
       return ok({ orderUid, env, ...detail, ...(documents.length > 0 ? { documents } : {}) });
     } catch (e) {
       return toolError("get_order", e, VERSION);

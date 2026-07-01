@@ -29,6 +29,33 @@ export function cdnContext(order: BeOrder): { origin: string; account: string } 
   return null;
 }
 
+// The CloudFront origin (https://cdn.<env>.ehrcopilotbe.com) derived from the BE
+// base url (https://be.<env>.ehrcopilotbe.com): the CDN mirrors the BE host with the
+// leading `be.` label swapped for `cdn.`. Returns null if base isn't a `be.` host.
+export function cdnOriginFromBase(base: string): string | null {
+  try {
+    const u = new URL(base);
+    if (!u.hostname.startsWith("be.")) return null;
+    return `${u.protocol}//cdn.${u.hostname.slice("be.".length)}`;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve the CDN origin + account for an order. Prefer the DETERMINISTIC pairing —
+// the env's CDN host (from the client base) + the account (the config profile) — so
+// links resolve even for failed orders that carry no stamped CDN url. Fall back to
+// parsing a url the BE stamped on the order (cdnContext).
+export function resolveCdn(
+  order: BeOrder,
+  base?: string,
+  account?: string,
+): { origin: string; account: string } | null {
+  const origin = base ? cdnOriginFromBase(base) : null;
+  if (origin && account) return { origin, account };
+  return cdnContext(order);
+}
+
 // Summary.pdf url for one medical-authorization entity: prefer a direct url the BE
 // may already provide, else construct {origin}/{account}/medicalAuthorizations/{uid}/
 // summary.pdf from the entity's uid + the order's CDN context. Returns null if neither
@@ -60,18 +87,23 @@ export async function orderDocuments(
   c: HttpClient,
   order: BeOrder,
   orderUid: string,
+  account?: string,
 ): Promise<OrderDocument[]> {
   const docs: OrderDocument[] = [];
+  const cdn = resolveCdn(order, c.base, account);
 
-  // 1) auth-screenshot PDF — the order carries both the url and an existence flag.
-  const shotUrl = str(order.authScreenshotFileUrl);
-  if (order.hasAuthScreenshot === true && shotUrl) {
-    docs.push({ kind: "authScreenshot", url: shotUrl });
+  // 1) auth-screenshot PDF — hasAuthScreenshot is the BE's existence signal. Prefer
+  //    the url the BE stamped, else construct the deterministic CDN path so the link
+  //    still resolves when the order carries no stamped url.
+  if (order.hasAuthScreenshot === true) {
+    const shotUrl =
+      str(order.authScreenshotFileUrl) ||
+      (cdn ? `${cdn.origin}/${cdn.account}/orders/${orderUid}/screenshots/authScreen.pdf` : "");
+    if (shotUrl) docs.push({ kind: "authScreenshot", url: shotUrl });
   }
 
   // 2) medical-authorization summary PDFs — the listing is the authoritative
   //    existence check (only real auths come back).
-  const cdn = cdnContext(order);
   try {
     const r = await c.req(
       "GET",

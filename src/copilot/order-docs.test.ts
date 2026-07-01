@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BeOrder } from "./copilot-client.js";
-import { cdnContext, summaryUrlFor } from "./order-docs.js";
+import { cdnContext, cdnOriginFromBase, resolveCdn, summaryUrlFor } from "./order-docs.js";
 
 describe("cdnContext", () => {
   test("parses origin + account from authScreenshotFileUrl", () => {
@@ -24,6 +24,42 @@ describe("cdnContext", () => {
 
   test("returns null when no CDN url is present", () => {
     expect(cdnContext({} as BeOrder)).toBeNull();
+  });
+});
+
+describe("cdnOriginFromBase", () => {
+  test("mirrors the be.<env> host to cdn.<env>", () => {
+    expect(cdnOriginFromBase("https://be.prod.ehrcopilotbe.com")).toBe(
+      "https://cdn.prod.ehrcopilotbe.com",
+    );
+    expect(cdnOriginFromBase("https://be.pre-prod.ehrcopilotbe.com")).toBe(
+      "https://cdn.pre-prod.ehrcopilotbe.com",
+    );
+  });
+
+  test("returns null for a non-be host or garbage", () => {
+    expect(cdnOriginFromBase("https://api.example.com")).toBeNull();
+    expect(cdnOriginFromBase("not a url")).toBeNull();
+  });
+});
+
+describe("resolveCdn", () => {
+  test("derives origin+account from base+account even when the order carries no url", () => {
+    expect(resolveCdn({} as BeOrder, "https://be.prod.ehrcopilotbe.com", "ossm")).toEqual({
+      origin: "https://cdn.prod.ehrcopilotbe.com",
+      account: "ossm",
+    });
+  });
+
+  test("falls back to parsing the order url when base/account are unavailable", () => {
+    const o = {
+      authScreenshotFileUrl:
+        "https://cdn.prod.ehrcopilotbe.com/kafri/orders/x/screenshots/authScreen.pdf",
+    } as BeOrder;
+    expect(resolveCdn(o)).toEqual({
+      origin: "https://cdn.prod.ehrcopilotbe.com",
+      account: "kafri",
+    });
   });
 });
 
