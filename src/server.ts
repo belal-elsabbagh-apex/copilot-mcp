@@ -30,9 +30,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { resolveCreds } from "./config/config.js";
 import { analyzeOrderExecution } from "./copilot/analyze.js";
-import { login, loginToken, makeClient, ORDER_MODE, verify } from "./copilot/copilot-client.js";
+import {
+  fetchOrder,
+  login,
+  loginToken,
+  makeClient,
+  normalizeOrder,
+  ORDER_MODE,
+  verify,
+} from "./copilot/copilot-client.js";
 import { runDoctor } from "./copilot/doctor.js";
 import { type MirrorResult, mirrorOne } from "./copilot/mirror.js";
+import { orderDocuments } from "./copilot/order-docs.js";
 import { diffSettings, listSettingSections, syncSettings } from "./copilot/settings.js";
 import { findStuckOrders } from "./copilot/sweep.js";
 import { toolError } from "./mcp/feedback.js";
@@ -75,10 +84,6 @@ console.warn = toStderr;
 
 const ok = (obj: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }],
-});
-const err = (message: string) => ({
-  isError: true,
-  content: [{ type: "text" as const, text: JSON.stringify({ error: message }, null, 2) }],
 });
 const toMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -1083,8 +1088,11 @@ server.registerTool(
       "Fetch a single EHR Copilot order by uid in a chosen env and return its normalized " +
       "detail: status/submissionStatus, patient, insurance + memberId, order type, facility, " +
       "place of service, requiredAuthorization, appointment date, ICD/CPT codes, and whether a " +
-      "progress note is present. READ-ONLY. Returns {orderUid, env, ...detail} or an error if the " +
-      "order is not found in that env.",
+      "progress note is present. Also returns `documents`: clickable CDN links that actually exist " +
+      "for the order — the auth-screenshot PDF (when hasAuthScreenshot) and the medical-authorization " +
+      "summary PDF(s) (from /medicalAuthorizations). The CDN is CloudFront signed-cookie protected, so " +
+      "these links open only in an authenticated Copilot browser session; they are not fetched here. " +
+      "READ-ONLY. Returns {orderUid, env, ...detail, documents?} or an error if the order is not found.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Order UID to fetch"),
       env: z.enum(["prod", "pre_prod"]).describe("Which env the order lives in (required)"),
@@ -1099,9 +1107,10 @@ server.registerTool(
       const creds = resolveCreds(profile ?? null)[env];
       const client = makeClient(creds.be);
       await login(client, creds.email, creds.password);
-      const detail = await verify(client, orderUid);
-      if (!detail) return err(`order ${orderUid} not found in ${env}`);
-      return ok({ orderUid, env, ...detail });
+      const order = await fetchOrder(client, orderUid);
+      const detail = normalizeOrder(order);
+      const documents = await orderDocuments(client, order, orderUid);
+      return ok({ orderUid, env, ...detail, ...(documents.length > 0 ? { documents } : {}) });
     } catch (e) {
       return toolError("get_order", e, VERSION);
     }

@@ -59,6 +59,12 @@ export interface BeOrder {
   placeOfService?: string;
   requiredAuthorization?: boolean;
   latestProgressNote?: unknown;
+  // CDN document pointers (see order-docs.ts). The BE stamps authScreenshotFileUrl
+  // with the deterministic CDN path even when the file is absent — hasAuthScreenshot
+  // is the existence signal. authorizationResultURL holds the summary result when set.
+  authScreenshotFileUrl?: string;
+  hasAuthScreenshot?: boolean;
+  authorizationResultURL?: string | null;
   referralFormJSON?: {
     from?: Record<string, unknown>;
     to?: Record<string, unknown>;
@@ -181,19 +187,8 @@ export async function fetchOrder(c: HttpClient, uid: string): Promise<BeOrder> {
   return o;
 }
 
-// Read-only status summary for an order (used by clone verify + analyze enrich).
-export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | null> {
-  const r = await c.req("POST", "/api/v1/orders/filter", {
-    json: {
-      searchUid: uid,
-      pageSize: 30,
-      pageNumber: 0,
-      type: "Outbound Referral",
-      orderMode: ORDER_MODE,
-    },
-  });
-  const o = firstOrder(r.data);
-  if (!o) return null;
+// Normalize a raw BE order into the read-only status subset the tools expose. Pure.
+export function normalizeOrder(o: BeOrder): OrderVerify {
   return {
     status: o.status,
     submissionStatus: o.submissionStatus,
@@ -210,6 +205,22 @@ export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | 
     cpts: (o.CPTCodes ?? []).map((c2) => c2.code ?? ""),
     notePresent: !!o.latestProgressNote,
   };
+}
+
+// Read-only status summary for an order (used by clone verify + analyze enrich).
+export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | null> {
+  const r = await c.req("POST", "/api/v1/orders/filter", {
+    json: {
+      searchUid: uid,
+      pageSize: 30,
+      pageNumber: 0,
+      type: "Outbound Referral",
+      orderMode: ORDER_MODE,
+    },
+  });
+  const o = firstOrder(r.data);
+  if (!o) return null;
+  return normalizeOrder(o);
 }
 
 // ---- shared date helpers --------------------------------------------------
