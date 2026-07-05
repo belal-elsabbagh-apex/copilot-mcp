@@ -348,8 +348,7 @@ export async function listQueueItems(
       $filter: filters.join(" and "),
       $orderby: "CreationTime desc",
       $top: String(top),
-      $select:
-        "Id,Status,Reference,CreationTime,RetryNumber,QueueDefinitionId,Name,SpecificContent",
+      $select: "Id,Status,Reference,CreationTime,RetryNumber,QueueDefinitionId,SpecificContent",
     },
     scope.folderPath,
     scope.orgUnitId,
