@@ -2,7 +2,7 @@
 //
 // One file holds BOTH the Copilot BE credentials and the UiPath Orchestrator
 // args: { copilot: {...}, uipath: {...} }. The path is taken from the
-// COPILOT_MCP_CONFIG env var, else `config.local.json` next to the package.
+// COPILOT_MCP_CONFIG env var, else `config.local.json` in the project root (cwd).
 //
 // Migration fallback: if no single-file config exists, this assembles the same
 // shape from a split `order-copy-credentials.json` + `uipath-config.json` (+ optional
@@ -114,7 +114,7 @@ export interface ResolvedCreds {
 // Resolved lazily (per loadConfig call) so the env var is honored even if it is set
 // after this module is first evaluated — notably under the test runner.
 const configPath = (): string =>
-  process.env["COPILOT_MCP_CONFIG"] ?? new URL("../config.local.json", import.meta.url).pathname;
+  process.env["COPILOT_MCP_CONFIG"] ?? join(process.cwd(), "config.local.json");
 // Split legacy config lives in COPILOT_MCP_LOCAL_DIR (falls back to a `.local` dir
 // next to the package for in-tree/dev use).
 const LOCAL_DIR = process.env["COPILOT_MCP_LOCAL_DIR"];
@@ -180,7 +180,7 @@ export function loadConfig(): Config {
     } catch (e2) {
       if (e2 instanceof ConfigMissing) {
         throw new Error(
-          `No config found. Set COPILOT_MCP_CONFIG to a config file (see config.example.json), or COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Missing: ${e2.message}`,
+          `No config found. Put a config.local.json in the project root (${process.cwd()}), or set COPILOT_MCP_CONFIG to a config file (see config.example.json), or COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Missing: ${e2.message}`,
         );
       }
       throw e2;
