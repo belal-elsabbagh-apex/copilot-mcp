@@ -124,7 +124,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.7.1";
+const VERSION = "1.7.2";
 
 export const server = new McpServer(
   { name: "copilot", version: VERSION },
