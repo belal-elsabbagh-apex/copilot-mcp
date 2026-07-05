@@ -82,6 +82,60 @@ const deriveReferredProviders = async (c: HttpClient): Promise<unknown[]> =>
 const deriveReferredFacilities = async (c: HttpClient): Promise<unknown[]> =>
   (await crawlSpecialities(c)).facilities;
 
+// ---- Derived section: crawl order types -> order names --------------------
+// Each outbound order type carries a paged list of "order names" at
+// /types/{uid}/names. They are not a standalone endpoint, so — like specialties — we
+// crawl every type once per env and flatten the rows for the diff. Memoized per client.
+
+interface OrderTypeRef {
+  typeUid: string;
+  name: string;
+}
+
+// The order-type list, reduced to {typeUid, name}. Shared by the name crawls.
+async function listOrderTypes(client: HttpClient): Promise<OrderTypeRef[]> {
+  const r = await client.req("GET", "/api/v1/settings/orders/outbound/types");
+  if (r.status >= 400) throw new Error(`GET /settings/orders/outbound/types -> ${r.status}`);
+  const out: OrderTypeRef[] = [];
+  for (const t of asArray(r.data)) {
+    const typeUid = stringProp(t, "typeUid");
+    if (typeUid) out.push({ typeUid, name: stringProp(t, "name") ?? "" });
+  }
+  return out;
+}
+
+// The UI always sends this page/sort query; 200 is well above the per-type name count.
+const ORDER_NAMES_QS = "?pageSize=200&pageNumber=0&search=&sortAlphabitically=true";
+
+// Order-name rows for one type (envelope `{ data: [...] }`).
+async function fetchOrderNames(
+  client: HttpClient,
+  typeUid: string,
+): Promise<Record<string, unknown>[]> {
+  const r = await client.req(
+    "GET",
+    `/api/v1/settings/orders/outbound/types/${typeUid}/names${ORDER_NAMES_QS}`,
+  );
+  if (r.status >= 400) throw new Error(`GET names(${typeUid}) -> ${r.status}`);
+  return envelopeRows(r.data).filter(isRecord);
+}
+
+const orderNamesCache = new WeakMap<HttpClient, Promise<Record<string, unknown>[]>>();
+function crawlOrderNamesFlat(client: HttpClient): Promise<Record<string, unknown>[]> {
+  const cached = orderNamesCache.get(client);
+  if (cached) return cached;
+  const run = (async (): Promise<Record<string, unknown>[]> => {
+    const rows: Record<string, unknown>[] = [];
+    for (const t of await listOrderTypes(client))
+      rows.push(...(await fetchOrderNames(client, t.typeUid)));
+    return rows;
+  })();
+  orderNamesCache.set(client, run);
+  return run;
+}
+
+const deriveOrderNames = async (c: HttpClient): Promise<unknown[]> => crawlOrderNamesFlat(c);
+
 export const SETTINGS_CATALOG: readonly SettingsSection[] = [
   {
     key: "file-manager",
@@ -232,6 +286,15 @@ export const SETTINGS_CATALOG: readonly SettingsSection[] = [
     kind: "list",
     matchKey: "name",
     derive: deriveReferredFacilities,
+  },
+  {
+    key: "orders",
+    label: "Orders (across order types)",
+    group: "orders",
+    path: "/api/v1/settings/orders/outbound/types/*/names", // crawled (see derive)
+    kind: "list",
+    matchKey: "name",
+    derive: deriveOrderNames,
   },
 ];
 
@@ -757,8 +820,9 @@ export function buildMergedSpecialityBody(
 export interface SyncAction {
   section: string;
   op: "create" | "merge";
+  itemKind: "speciality" | "order";
   typeName: string;
-  specialityName: string;
+  itemName: string; // speciality name or order name, depending on itemKind
   method: "POST" | "PUT";
   path: string;
   body: Record<string, unknown>;
@@ -810,8 +874,9 @@ export function planSpecialitySync(
         actions.push({
           section: "specialties",
           op: "create",
+          itemKind: "speciality",
           typeName: pType.name,
-          specialityName: sName,
+          itemName: sName,
           method: "POST",
           path: `/api/v1/settings/orders/outbound/types/${qType.typeUid}/specialities`,
           body,
@@ -848,8 +913,9 @@ export function planSpecialitySync(
       actions.push({
         section: "specialties",
         op: "merge",
+        itemKind: "speciality",
         typeName: pType.name,
-        specialityName: sName,
+        itemName: sName,
         method: "PUT",
         path: `/api/v1/settings/specialities/${preSpecUid}`,
         body,
@@ -860,15 +926,260 @@ export function planSpecialitySync(
   return { actions, skipped };
 }
 
+// ---- orders domain (create prod-only orders in pre-prod) ------------------
+// The write-side counterpart to the `orders` diff section (the UI's "Orders" section). Each
+// outbound order type holds a list of orders; each order references facilities, auth/referral sub-categories,
+// and per-CPT payers. The create endpoint (verified against a captured HAR) is
+//   POST /api/v1/settings/orders/outbound/types/{preTypeUid}/names
+// with a body of UID *references* (facilitiesUids, authSubCategoryUids, referralSubCategoryUids,
+// CPTCodes[].payers map). Those UIDs are per-env, so — exactly like payer links in the specialities
+// syncer — we REMAP every reference prod->pre by NAME and DROP (with a warning) any that has no
+// pre-prod match, rather than copy a prod UID that would dangle or point at the wrong entity.
+// Create-only: order names present in both envs are left untouched (there is no verified
+// name-update endpoint, and this tool never overwrites).
+
+export interface OrderNameType {
+  typeUid: string;
+  name: string;
+  names: Record<string, unknown>[];
+}
+export interface OrderNameTree {
+  types: OrderNameType[];
+}
+
+async function crawlOrderNameTree(client: HttpClient): Promise<OrderNameTree> {
+  const types: OrderNameType[] = [];
+  for (const t of await listOrderTypes(client))
+    types.push({
+      typeUid: t.typeUid,
+      name: t.name,
+      names: await fetchOrderNames(client, t.typeUid),
+    });
+  return { types };
+}
+
+// The pre-prod name->UID lookups needed to remap one order type's references prod->pre.
+export interface PreTypeRefs {
+  facilityUidByName: ReadonlyMap<string, string>;
+  authSubCatUidByName: ReadonlyMap<string, string>;
+  referralSubCatUidByName: ReadonlyMap<string, string>;
+}
+
+// Pre-prod facilities for a type: name -> referredFacilityUid (verified endpoint; the fullest
+// source, since it includes facilities not yet referenced by any name).
+async function fetchFacilityUidByName(
+  client: HttpClient,
+  typeUid: string,
+): Promise<Map<string, string>> {
+  const r = await client.req("GET", `/api/v1/settings/specialities/facilities?typeUid=${typeUid}`);
+  if (r.status >= 400) throw new Error(`GET facilities(${typeUid}) -> ${r.status}`);
+  const rows = Array.isArray(r.data) ? r.data : envelopeRows(r.data);
+  const m = new Map<string, string>();
+  for (const f of rows) {
+    const name = stringProp(f, "name");
+    const uid = stringProp(f, "referredFacilityUid");
+    if (name && uid) m.set(name, uid);
+  }
+  return m;
+}
+
+// Sub-categories have no list endpoint, so harvest name -> subCategoryUid from the sub-category
+// objects embedded in the (pre-prod) crawled name rows of one type.
+function harvestSubCatUidByName(
+  names: Record<string, unknown>[],
+  field: string,
+): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const n of names)
+    for (const s of asArray(prop(n, field))) {
+      const name = stringProp(s, "subCategoryName");
+      const uid = stringProp(s, "subCategoryUid");
+      if (name && uid) m.set(name, uid);
+    }
+  return m;
+}
+
+// Build the per-type pre-prod ref maps, keyed by order-type NAME (the cross-env match key).
+async function buildPreTypeRefs(
+  pre: HttpClient,
+  preTree: OrderNameTree,
+): Promise<Map<string, PreTypeRefs>> {
+  const out = new Map<string, PreTypeRefs>();
+  for (const t of preTree.types) {
+    out.set(t.name, {
+      facilityUidByName: await fetchFacilityUidByName(pre, t.typeUid),
+      authSubCatUidByName: harvestSubCatUidByName(t.names, "authSubCategories"),
+      referralSubCatUidByName: harvestSubCatUidByName(t.names, "referralSubCategories"),
+    });
+  }
+  return out;
+}
+
+// Rewrite a CPT's payers map prod->pre: remap both the map key and each entry's inner payerUid,
+// dropping (and reporting, by payer name) any payer with no pre-prod match.
+export function remapPayersMap(
+  payers: unknown,
+  payerMap: ReadonlyMap<string, string>,
+): { payers: Record<string, unknown>; dropped: string[] } {
+  const out: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  if (isRecord(payers))
+    for (const [prodUid, val] of Object.entries(payers)) {
+      const preUid = payerMap.get(prodUid);
+      if (!preUid) {
+        dropped.push(stringProp(val, "Name") ?? prodUid);
+        continue;
+      }
+      out[preUid] = isRecord(val) ? { ...val, payerUid: preUid } : val;
+    }
+  return { payers: out, dropped };
+}
+
+// Resolve a list of named reference objects to their pre-prod UIDs by name; unmatched names are
+// dropped and returned so the caller can warn.
+export function remapNamedRefs(
+  items: unknown,
+  nameField: string,
+  byName: ReadonlyMap<string, string>,
+): { uids: string[]; dropped: string[] } {
+  const uids: string[] = [];
+  const dropped: string[] = [];
+  for (const it of asArray(items)) {
+    const name = stringProp(it, nameField);
+    if (!name) continue;
+    const uid = byName.get(name);
+    if (uid) uids.push(uid);
+    else dropped.push(name);
+  }
+  return { uids, dropped };
+}
+
+// One CPT cleaned for the create body: drop its own codeUid, remap the payers map prod->pre.
+function cleanCptForWrite(
+  cpt: unknown,
+  payerMap: ReadonlyMap<string, string>,
+): { cpt: Record<string, unknown>; dropped: string[] } {
+  const base = isRecord(cpt) ? stripOwnUids(cpt) : {};
+  if (Object.hasOwn(base, "payers")) {
+    const { payers, dropped } = remapPayersMap(base["payers"], payerMap);
+    base["payers"] = payers;
+    return { cpt: base, dropped };
+  }
+  return { cpt: base, dropped: [] };
+}
+
+// POST body to create a whole prod-only order name under a pre-prod type. Matches the verified HAR
+// shape: { name, CPTCodes, facilitiesUids, authSubCategoryUids, referralSubCategoryUids,
+// mandatoryICDCodes }. Every UID reference is remapped prod->pre by name; unmatched refs/payers
+// are dropped and reported.
+export function buildOrderNameCreateBody(
+  prodRow: unknown,
+  refs: PreTypeRefs,
+  payerMap: ReadonlyMap<string, string>,
+): { body: Record<string, unknown>; droppedPayers: string[]; droppedRefs: string[] } {
+  const cpts: Record<string, unknown>[] = [];
+  const droppedPayers: string[] = [];
+  for (const c of asArray(prop(prodRow, "outboundReferralOrderTypeNameCPTCodes"))) {
+    const r = cleanCptForWrite(c, payerMap);
+    cpts.push(r.cpt);
+    droppedPayers.push(...r.dropped);
+  }
+  const fac = remapNamedRefs(prop(prodRow, "referredFacilities"), "name", refs.facilityUidByName);
+  const auth = remapNamedRefs(
+    prop(prodRow, "authSubCategories"),
+    "subCategoryName",
+    refs.authSubCatUidByName,
+  );
+  const ref = remapNamedRefs(
+    prop(prodRow, "referralSubCategories"),
+    "subCategoryName",
+    refs.referralSubCatUidByName,
+  );
+  const droppedRefs = [
+    ...fac.dropped.map((n) => `facility '${n}'`),
+    ...auth.dropped.map((n) => `auth sub-category '${n}'`),
+    ...ref.dropped.map((n) => `referral sub-category '${n}'`),
+  ];
+  const body: Record<string, unknown> = {
+    name: stringProp(prodRow, "name") ?? "",
+    CPTCodes: cpts,
+    facilitiesUids: fac.uids,
+    authSubCategoryUids: auth.uids,
+    referralSubCategoryUids: ref.uids,
+    mandatoryICDCodes: asArray(prop(prodRow, "mandatoryICDCodes")),
+  };
+  return { body, droppedPayers, droppedRefs };
+}
+
+const nameOf = (x: unknown): string => stringProp(x, "name") ?? "";
+const refWarning = (dropped: string[]): string =>
+  `${dropped.length} reference(s) dropped (no matching pre-prod entity by name): ${[...new Set(dropped)].join(", ")}`;
+
+// Match order types by name, then order names by name; emit a create action for each prod-only
+// order name. Pure — the per-type pre-prod ref maps and payer map are supplied by the caller.
+// Existing (both-env) names are left untouched; types missing in pre-prod are reported in `skipped`.
+export function planOrderNameSync(
+  prodTree: OrderNameTree,
+  preTree: OrderNameTree,
+  preRefsByType: ReadonlyMap<string, PreTypeRefs>,
+  payerMap: ReadonlyMap<string, string>,
+): { actions: SyncAction[]; skipped: SyncSkip[] } {
+  const preTypeByName = new Map(preTree.types.map((t) => [t.name, t]));
+  const emptyRefs: PreTypeRefs = {
+    facilityUidByName: new Map(),
+    authSubCatUidByName: new Map(),
+    referralSubCatUidByName: new Map(),
+  };
+  const actions: SyncAction[] = [];
+  const skipped: SyncSkip[] = [];
+
+  for (const pType of prodTree.types) {
+    const qType = preTypeByName.get(pType.name);
+    if (!qType) {
+      skipped.push({
+        typeName: pType.name,
+        reason: "order type missing in pre-prod (order types are not auto-created)",
+      });
+      continue;
+    }
+    const refs = preRefsByType.get(pType.name) ?? emptyRefs;
+    const preNames = new Set(qType.names.map(nameOf));
+    for (const pName of pType.names) {
+      const nm = nameOf(pName);
+      if (preNames.has(nm)) continue; // present in both — create-only, leave untouched
+      const { body, droppedPayers, droppedRefs } = buildOrderNameCreateBody(pName, refs, payerMap);
+      const warnings = [
+        ...(droppedPayers.length ? [payerWarning(droppedPayers)] : []),
+        ...(droppedRefs.length ? [refWarning(droppedRefs)] : []),
+      ];
+      actions.push({
+        section: "orders",
+        op: "create",
+        itemKind: "order",
+        typeName: pType.name,
+        itemName: nm,
+        method: "POST",
+        path: `/api/v1/settings/orders/outbound/types/${qType.typeUid}/names`,
+        body,
+        ...(warnings.length ? { warnings } : {}),
+      });
+    }
+  }
+  return { actions, skipped };
+}
+
 // ---- orchestration --------------------------------------------------------
 
 // Catalog section keys whose additive write is handled by the specialities syncer.
 const SPECIALITY_SYNC_SECTIONS = ["specialties", "referred-providers", "referred-facilities"];
+// Catalog section key handled by the orders syncer.
+const ORDER_NAME_SYNC_SECTIONS = ["orders"];
 
 export interface ExecutedAction {
   op: SyncAction["op"];
+  itemKind: SyncAction["itemKind"];
   typeName: string;
-  specialityName: string;
+  itemName: string;
   method: string;
   path: string;
   status: number;
@@ -905,8 +1216,12 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
   const chosen = selectSections(opts.sections, opts.groups, opts.emr);
   const chosenKeys = new Set(chosen.map((s) => s.key));
   const runSpeciality = SPECIALITY_SYNC_SECTIONS.some((k) => chosenKeys.has(k));
+  const runOrderNames = ORDER_NAME_SYNC_SECTIONS.some((k) => chosenKeys.has(k));
 
-  const covered = new Set(runSpeciality ? SPECIALITY_SYNC_SECTIONS : []);
+  const covered = new Set([
+    ...(runSpeciality ? SPECIALITY_SYNC_SECTIONS : []),
+    ...(runOrderNames ? ORDER_NAME_SYNC_SECTIONS : []),
+  ]);
   const skippedSections = chosen
     .filter((s) => !covered.has(s.key))
     .map((s) => ({ key: s.key, reason: "no write mapping yet — additive sync not implemented" }));
@@ -921,7 +1236,7 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
     skipped: [],
     skippedSections,
   };
-  if (!runSpeciality) return result; // nothing syncable selected — report skipped only
+  if (!runSpeciality && !runOrderNames) return result; // nothing syncable selected — report skipped only
 
   const prod = makeClient(creds.prod.be);
   const pre = makeClient(creds.pre_prod.be);
@@ -930,35 +1245,52 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
     login(pre, creds.pre_prod.email, creds.pre_prod.password),
   ]);
 
-  const [prodTree, preTree, payerMap] = await Promise.all([
-    crawlSpecialityTree(prod),
-    crawlSpecialityTree(pre),
-    buildPayerMap(prod, pre),
-  ]);
+  // Both domains remap payer references prod->pre, so build the payer map once and share it.
+  const payerMap = await buildPayerMap(prod, pre);
+  const actions: SyncAction[] = [];
+  const skipped: SyncSkip[] = [];
 
-  const { actions, skipped } = planSpecialitySync(prodTree, preTree, payerMap);
+  if (runSpeciality) {
+    const [prodTree, preTree] = await Promise.all([
+      crawlSpecialityTree(prod),
+      crawlSpecialityTree(pre),
+    ]);
+    const s = planSpecialitySync(prodTree, preTree, payerMap);
+    actions.push(...s.actions);
+    skipped.push(...s.skipped);
+  }
+  if (runOrderNames) {
+    const [prodTree, preTree] = await Promise.all([
+      crawlOrderNameTree(prod),
+      crawlOrderNameTree(pre),
+    ]);
+    const preRefsByType = await buildPreTypeRefs(pre, preTree);
+    const o = planOrderNameSync(prodTree, preTree, preRefsByType, payerMap);
+    actions.push(...o.actions);
+    skipped.push(...o.skipped);
+  }
+
   result.planned = actions;
   result.skipped = skipped;
   if (dryRun) return result;
 
-  // Execute against PRE-PROD only. Additive: POST new specialities / PUT existing-plus-additions.
+  // Execute against PRE-PROD only. Additive: POST new specialities/orders / PUT
+  // existing-plus-additions (specialities merge only).
   const executed: ExecutedAction[] = [];
   for (const a of actions) {
     const r = await pre.req(a.method, a.path, { json: a.body });
     const okWrite = r.status < 400;
-    opts.onWrite?.(
-      `sync_settings ${a.op} speciality '${a.specialityName}' (type '${a.typeName}')`,
-      {
-        method: a.method,
-        path: a.path,
-        status: r.status,
-        ok: okWrite,
-      },
-    );
+    opts.onWrite?.(`sync_settings ${a.op} ${a.itemKind} '${a.itemName}' (type '${a.typeName}')`, {
+      method: a.method,
+      path: a.path,
+      status: r.status,
+      ok: okWrite,
+    });
     executed.push({
       op: a.op,
+      itemKind: a.itemKind,
       typeName: a.typeName,
-      specialityName: a.specialityName,
+      itemName: a.itemName,
       method: a.method,
       path: a.path,
       status: r.status,

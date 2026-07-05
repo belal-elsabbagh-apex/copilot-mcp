@@ -124,7 +124,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.7.4";
+const VERSION = "1.8.0";
 
 export const server = new McpServer(
   { name: "copilot", version: VERSION },
@@ -1035,11 +1035,14 @@ server.registerTool(
       "Write-side counterpart to diff_settings: ADDITIVELY copy settings that exist in PROD but " +
       "are MISSING in PRE-PROD into pre-prod. Additive only — never overwrites or deletes existing " +
       "pre-prod settings. PRE-PROD ONLY. Dry-run by default (returns the planned create/merge " +
-      "actions without writing; pass dryRun:false to apply). Currently covers the outbound " +
+      "actions without writing; pass dryRun:false to apply). Covers two domains: (1) the outbound " +
       "order-type SPECIALTIES domain (sections specialties / referred-providers / referred-" +
-      "facilities): creates prod-only specialties and merges prod-only facilities/providers into " +
-      "specialties that already exist in pre-prod, remapping payer references prod->pre. Other " +
-      "sections have no write mapping yet and are reported under skippedSections.",
+      "facilities) — creates prod-only specialties and merges prod-only facilities/providers into " +
+      "specialties that already exist in pre-prod; and (2) the ORDERS domain (section orders) — " +
+      "creates prod-only orders under matching order types. All references (payers, " +
+      "facilities, auth/referral sub-categories) are remapped prod->pre by name; unmatched ones are " +
+      "dropped with a warning. Other sections have no write mapping yet and are reported under " +
+      "skippedSections.",
     inputSchema: {
       profile: z
         .string()

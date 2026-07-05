@@ -77,12 +77,18 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `pull_queue_item` force `IsApproved=false` so a test run can never submit a real auth.
 - **`sync_settings` is additive, pre-prod-only, dry-run by default.** It copies prod-only settings into
   pre-prod and never overwrites/deletes (the `changed`/`onlyInPreProd` sets are left untouched). It
-  currently covers only the outbound order-type **specialties** domain (sections `specialties` /
-  `referred-providers` / `referred-facilities`): create prod-only specialties (`POST .../types/{uid}/
-  specialities`) and merge prod-only facilities/providers into existing ones (`PUT .../specialities/
-  {uid}`, full-replace body = existing + additions). `payersProviderId[].payerUid` is **remapped**
-  prod→pre (payers matched by name), never stripped. Sections with no verified write endpoint are
-  reported under `skippedSections` — add new domains via a `SectionSyncer`, only with a verified endpoint.
+  covers two outbound order-type domains:
+  - **specialties** (sections `specialties` / `referred-providers` / `referred-facilities`): create
+    prod-only specialties (`POST .../types/{uid}/specialities`) and merge prod-only facilities/providers
+    into existing ones (`PUT .../specialities/{uid}`, full-replace body = existing + additions).
+  - **orders** (section `orders`, the UI's "Orders" section): create prod-only orders under matching
+    order types (`POST .../types/{uid}/names`). Create-only — orders present in both envs are left
+    untouched (no verified name-update endpoint).
+  All env-specific references are **remapped** prod→pre by **name** (never stripped, never copied raw):
+  `payersProviderId[].payerUid` / the CPT `payers` map for orders, plus orders' `facilitiesUids` and
+  `authSubCategoryUids` / `referralSubCategoryUids`. Anything with no pre-prod match is **dropped with a
+  warning** rather than linked to the wrong entity. Sections with no verified write endpoint are reported
+  under `skippedSections` — add new domains via a `SectionSyncer`, only with a verified endpoint.
 - Tools return via the `ok()` / `err()` helpers and declare all four annotation hints
   (readOnly/destructive/idempotent/openWorld); `server.test.ts` enforces the wiring.
 
