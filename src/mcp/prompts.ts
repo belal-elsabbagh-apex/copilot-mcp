@@ -66,8 +66,48 @@ export function registerPrompts(server: McpServer): void {
         `Reconcile account settings between prod and pre-prod for profile="${profile}".\n` +
           `1. Call list_setting_sections to see which sections/groups can be compared.\n` +
           `2. Call diff_settings (profile="${profile}") for the relevant groups to find drift, focusing on each section's onlyInProd items (present in prod, missing in pre-prod).\n` +
-          `3. Review those missing items with the user. Only if they explicitly approve, call sync_settings — it ADDITIVELY adds the prod-only items to pre-prod and never overwrites or deletes existing pre-prod settings.\n` +
-          `Never sync without confirming the diff first.`,
+          `3. Call plan_settings_sync (profile="${profile}", same groups/sections scope) to compute the additive actions. It is READ-ONLY and returns each action with a stable id, a one-line summary, and warnings about references dropped for having no pre-prod match by name.\n` +
+          `4. Present the planned actions (id, op, type, item, warnings) to the user and ask which to apply. Call out warnings — dropped payer/facility/sub-category links mean the created item will be missing those references.\n` +
+          `5. Only after the user explicitly approves, call apply_settings_sync (profile="${profile}", same groups/sections scope) with actionIds set to exactly the approved ids — or all=true only if the user explicitly approved everything. It re-plans server-side, writes ADDITIVELY to PRE-PROD only, and never overwrites or deletes. Report executed vs notSelected vs unmatchedIds (an unmatched id means state changed since planning — re-plan and re-review).\n` +
+          `Tip: if applying both specialties and orders, apply the specialties/referred-* actions first, then RE-PLAN the orders section — order creates resolve facility references by name against current pre-prod state, so newly created facilities only resolve on a fresh plan.\n` +
+          `Never apply without the user reviewing the plan first.`,
+      );
+    },
+  );
+
+  // ---- inspect-settings ----------------------------------------------------
+  server.registerPrompt(
+    "inspect-settings",
+    {
+      title: "Inspect one env's account settings",
+      description:
+        "Fetch and summarize an account's settings from a single env (prod or pre_prod), optionally scoped to a group.",
+      argsSchema: {
+        profile: completable(
+          z.string().min(1).describe("Credential profile / account name from config (required)"),
+          () => listProfiles(),
+        ),
+        env: completable(
+          z.string().optional().describe("Env to inspect (prod | pre_prod)"),
+          () => ENVS,
+        ),
+        group: z
+          .string()
+          .optional()
+          .describe("Top-level settings group to focus on (e.g. 'orders')"),
+      },
+    },
+    ({ profile, env, group }) => {
+      const envArg = env ? `, env="${env}"` : "";
+      const groupArg = group ? `, groups=["${group}"]` : "";
+      const envReminder = env
+        ? ""
+        : " get_settings requires an env (prod or pre_prod) — confirm with the user which env to inspect before calling it.";
+      return userText(
+        `Inspect Copilot settings for profile="${profile}"${env ? ` in ${env}` : ""}${group ? ` (group: ${group})` : ""}. Everything here is READ-ONLY.\n` +
+          `1. Call list_setting_sections${group ? ` with group="${group}"` : ""} to see the available sections; note which are 'derived' (crawled from order types — heavier to fetch).\n` +
+          `2. Call get_settings (profile="${profile}"${envArg}${groupArg}) to fetch the sections from that one env.\n` +
+          `3. Summarize per section: row counts for list sections, the key fields for object sections, and surface any per-section errors.${envReminder}`,
       );
     },
   );

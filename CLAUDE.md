@@ -48,10 +48,10 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **`config/config.ts`** loads one validated config (single-file `COPILOT_MCP_CONFIG`, or split legacy
   files via `COPILOT_MCP_LOCAL_DIR`). `resolveCreds(profile)` returns `{ prod, pre_prod }` creds.
   Profiles are dynamic — read them with `listProfiles()`; never hardcode profile names.
-- **`copilot/settings.ts`** (diff_settings / sync_settings): the hard part is cross-env noise. It strips
-  env-specific fields (`stripNoise`: UIDs, timestamps, dummy emails, CDN hosts) and matches list
-  items by a **semantic key** (`matchKey`, usually `name`), never by UID. The pure diff functions
-  are unit-tested; keep them pure.
+- **`copilot/settings.ts`** (diff_settings / get_settings / plan_settings_sync / apply_settings_sync):
+  the hard part is cross-env noise. It strips env-specific fields (`stripNoise`: UIDs, timestamps,
+  dummy emails, CDN hosts) and matches list items by a **semantic key** (`matchKey`, usually `name`),
+  never by UID. The pure diff/plan/id functions are unit-tested; keep them pure.
 - **`mcp/notify.ts`**: `mcpLog()` sends MCP `notifications/message`; `reportProgress()` sends
   `notifications/progress` only when the caller passed a progressToken. Both are no-throw side-channels.
 - **`uipath/faults.ts`** (`build_faulted_job_issue` + the `report-faulted-uipath-jobs` prompt):
@@ -75,9 +75,13 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **prod/pre-prod isolation**: writes target pre-prod only; `delete_preprod_order` never touches
   prod; `clone_order` is clone-only unless `submit` is explicitly authorized; `build_queue_item` /
   `pull_queue_item` force `IsApproved=false` so a test run can never submit a real auth.
-- **`sync_settings` is additive, pre-prod-only, dry-run by default.** It copies prod-only settings into
-  pre-prod and never overwrites/deletes (the `changed`/`onlyInPreProd` sets are left untouched). It
-  covers two outbound order-type domains:
+- **Settings sync is a plan/apply pair — additive, pre-prod-only.** `plan_settings_sync` is
+  READ-ONLY and returns the planned actions, each with a stable id (`section:op:typeName:itemName`).
+  `apply_settings_sync` never accepts request bodies — it **re-plans server-side** and executes only
+  the actions selected by `actionIds` or an explicit `all:true` (**exactly one required**; there is
+  deliberately no default "apply everything"; a stale id after state drift lands in `unmatchedIds`
+  instead of executing). It copies prod-only settings into pre-prod and never overwrites/deletes
+  (the `changed`/`onlyInPreProd` sets are left untouched). It covers two outbound order-type domains:
   - **specialties** (sections `specialties` / `referred-providers` / `referred-facilities`): create
     prod-only specialties (`POST .../types/{uid}/specialities`) and merge prod-only facilities/providers
     into existing ones (`PUT .../specialities/{uid}`, full-replace body = existing + additions).

@@ -15,6 +15,7 @@ describe("prompt + resource template registration", () => {
     expect(Object.keys(prompts).sort()).toEqual([
       "clone-and-verify-order",
       "diagnose-order",
+      "inspect-settings",
       "reconcile-settings",
       "report-faulted-uipath-jobs",
       "triage-stuck-orders",

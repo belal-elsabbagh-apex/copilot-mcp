@@ -14,8 +14,10 @@
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
-//   - list_setting_sections    list the settings sections/groups diff_settings can compare (read-only, no network)
-//   - sync_settings            additively add prod-only settings into pre-prod (specialties domain; dry-run default)
+//   - list_setting_sections    list the settings sections/groups the settings tools can scope to (read-only, no network)
+//   - get_settings             fetch one env's settings sections (read-only)
+//   - plan_settings_sync       plan the additive prod -> pre-prod sync actions (read-only)
+//   - apply_settings_sync      execute selected planned sync actions against pre-prod (additive only)
 //   - get_order                fetch a single order's normalized detail by uid (read-only)
 //   - get_login_token          log into the Copilot BE for a profile/env and return the session JWT (read-only)
 //   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
@@ -42,7 +44,13 @@ import {
 import { runDoctor } from "./copilot/doctor.js";
 import { type MirrorResult, mirrorOne } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
-import { diffSettings, listSettingSections, syncSettings } from "./copilot/settings.js";
+import {
+  applySettingsSync,
+  diffSettings,
+  getSettings,
+  listSettingSections,
+  planSettingsSyncOp,
+} from "./copilot/settings.js";
 import { findStuckOrders } from "./copilot/sweep.js";
 import { toolError } from "./mcp/feedback.js";
 import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
@@ -935,7 +943,8 @@ server.registerTool(
       "sections are matched by a semantic key (name) rather than UID, so only real drift shows. " +
       "Unchanged sections are omitted unless includeUnchanged=true. Scope with groups (top-level, " +
       "e.g. ['orders']) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
-      "to discover valid groups/keys. Returns " +
+      "to discover valid groups/keys. For a single env's raw values use get_settings; to " +
+      "reconcile drift use plan_settings_sync then apply_settings_sync. Returns " +
       "{account, prodBase, preProdBase, sectionsCompared, sectionsWithDiffs, sections:[...]}.",
     inputSchema: {
       profile: z
@@ -982,7 +991,7 @@ server.registerTool(
 server.registerTool(
   "list_setting_sections",
   {
-    title: "List settings sections diff_settings can compare",
+    title: "List the settings sections the settings tools can scope to",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -990,11 +999,11 @@ server.registerTool(
       openWorldHint: false, // pure catalog read — no external service
     },
     description:
-      "List the settings sections diff_settings/sync_settings can scope to: each section's key, " +
-      "label, top-level group, kind (object/list), whether it is 'derived' (crawled from order " +
-      "types — heavier), and (for list sections) its matchKey — the field items are matched/scoped " +
-      "by. Use this to drive FINE-GRAINED scoping: pass exact section keys to diff_settings' " +
-      "`sections` param instead of the broader `groups`. Narrow this listing with `group` and/or " +
+      "List the settings sections diff_settings / get_settings / plan_settings_sync can scope to: " +
+      "each section's key, label, top-level group, kind (object/list), whether it is 'derived' " +
+      "(crawled from order types — heavier), and (for list sections) its matchKey — the field items " +
+      "are matched/scoped by. Use this to drive FINE-GRAINED scoping: pass exact section keys via " +
+      "the `sections` param instead of the broader `groups`. Narrow this listing with `group` and/or " +
       "`sections`. READ-ONLY, no network (reads the static catalog). Returns {groups, sections:[...]}.",
     inputSchema: {
       group: z
@@ -1026,58 +1035,196 @@ server.registerTool(
   },
 );
 
-// ---- sync_settings -------------------------------------------------------
+// ---- get_settings ---------------------------------------------------------
 server.registerTool(
-  "sync_settings",
+  "get_settings",
   {
-    title: "Additively add prod-only settings into pre-prod",
+    title: "Get one env's Copilot settings",
     annotations: {
-      readOnlyHint: false, // creates settings in pre-prod (when dryRun=false)
-      destructiveHint: false, // ADDITIVE ONLY — never overwrites or deletes existing pre-prod settings
-      idempotentHint: true, // re-running once names match is a no-op
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
     description:
-      "Write-side counterpart to diff_settings: ADDITIVELY copy settings that exist in PROD but " +
-      "are MISSING in PRE-PROD into pre-prod. Additive only — never overwrites or deletes existing " +
-      "pre-prod settings. PRE-PROD ONLY. Dry-run by default (returns the planned create/merge " +
-      "actions without writing; pass dryRun:false to apply). Covers two domains: (1) the outbound " +
-      "order-type SPECIALTIES domain (sections specialties / referred-providers / referred-" +
-      "facilities) — creates prod-only specialties and merges prod-only facilities/providers into " +
-      "specialties that already exist in pre-prod; and (2) the ORDERS domain (section orders) — " +
-      "creates prod-only orders under matching order types. All references (payers, " +
-      "facilities, auth/referral sub-categories) are remapped prod->pre by name; unmatched ones are " +
-      "dropped with a warning. Other sections have no write mapping yet and are reported under " +
-      "skippedSections.",
+      "Fetch an account's EHR Copilot settings from ONE env (prod or pre_prod) — the single-env " +
+      "counterpart to diff_settings. Logs into that env only and returns each selected section's " +
+      "raw payload (list sections also report a row count). READ-ONLY — never writes. Scope with " +
+      "groups (top-level) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
+      "to discover them; crawled sections (specialties / referred-* / orders) are heavier. Pass " +
+      "normalized=true to strip env-specific noise (UIDs, timestamps, per-section ignore fields) " +
+      "for cross-env comparison; default is raw so real UIDs stay visible. Returns " +
+      "{account, env, base, sectionsFetched, sections:[{key,label,group,kind,count?,data|error}]}.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to read (required — never assumed)"),
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      groups: z
+        .array(z.string())
+        .optional()
+        .describe("Top-level groups to fetch (e.g. ['orders']); omit for all"),
+      sections: z
+        .array(z.string())
+        .optional()
+        .describe("Exact section keys to fetch; omit for all"),
+      emr: z
+        .string()
+        .optional()
+        .describe("EMR type (e.g. 'NEXTGEN') to include emrDetailsSettings"),
+      normalized: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Strip UID/timestamp noise like diff_settings does (default false = raw)"),
+    },
+  },
+  async ({ env, profile, groups, sections, emr, normalized }) => {
+    try {
+      return ok(
+        await getSettings({
+          env,
+          profile: profile ?? null,
+          ...(groups ? { groups } : {}),
+          ...(sections ? { sections } : {}),
+          ...(emr ? { emr } : {}),
+          normalized,
+        }),
+      );
+    } catch (e) {
+      return toolError("get_settings", e, VERSION);
+    }
+  },
+);
+
+// ---- plan_settings_sync ----------------------------------------------------
+server.registerTool(
+  "plan_settings_sync",
+  {
+    title: "Plan an additive prod -> pre-prod settings sync",
+    annotations: {
+      readOnlyHint: true, // planning only — apply_settings_sync executes
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Compute — WITHOUT WRITING — the additive actions that would copy settings existing in PROD " +
+      "but missing in PRE-PROD into pre-prod. READ-ONLY planning step; apply_settings_sync " +
+      "executes a reviewed selection. Covers two domains: (1) the outbound order-type SPECIALTIES " +
+      "domain (sections specialties / referred-providers / referred-facilities) — creates prod-only " +
+      "specialties and merges prod-only facilities/providers into specialties that already exist in " +
+      "pre-prod; and (2) the ORDERS domain (section orders) — creates prod-only orders under " +
+      "matching order types (create-only). All references (payers, facilities, auth/referral " +
+      "sub-categories) are remapped prod->pre by NAME; unmatched ones are dropped with a warning on " +
+      "the action. Each action carries a stable id ('section:op:typeName:itemName') to pass to " +
+      "apply_settings_sync after user review. Request bodies are summarized, not included " +
+      "(includeBodies=true to inspect them — scope with sections first). Sections with no verified " +
+      "write endpoint are reported under skippedSections. Returns {account, prodBase, preProdBase, " +
+      "actionCount, actions:[{id,op,itemKind,typeName,itemName,method,path,summary,warnings?}], " +
+      "skipped, skippedSections}.",
     inputSchema: {
       profile: z
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
-      groups: z.array(z.string()).optional().describe("Top-level groups to sync (e.g. ['orders'])"),
-      sections: z.array(z.string()).optional().describe("Exact section keys to sync"),
+      groups: z
+        .array(z.string())
+        .optional()
+        .describe("Top-level groups to plan for (e.g. ['orders'])"),
+      sections: z.array(z.string()).optional().describe("Exact section keys to plan for"),
       emr: z.string().optional().describe("EMR type to include emrDetailsSettings"),
-      dryRun: z
+      includeBodies: z
         .boolean()
         .optional()
-        .default(true)
-        .describe("Preview the additions without writing them (default true)"),
+        .default(false)
+        .describe(
+          "Include full request bodies per action (large; for spot-checking a scoped plan)",
+        ),
     },
   },
-  async ({ profile, groups, sections, emr, dryRun }) => {
+  async ({ profile, groups, sections, emr, includeBodies }) => {
     try {
-      const out = await syncSettings({
-        profile: profile ?? null,
-        ...(groups ? { groups } : {}),
-        ...(sections ? { sections } : {}),
-        ...(emr ? { emr } : {}),
-        dryRun: dryRun ?? true,
-        // Audit trail: surface every live write to the client log.
-        onWrite: (message, data) => mcpLog(server, "warning", message, data),
-      });
-      return ok(out);
+      return ok(
+        await planSettingsSyncOp({
+          profile: profile ?? null,
+          ...(groups ? { groups } : {}),
+          ...(sections ? { sections } : {}),
+          ...(emr ? { emr } : {}),
+          includeBodies,
+        }),
+      );
     } catch (e) {
-      return toolError("sync_settings", e, VERSION);
+      return toolError("plan_settings_sync", e, VERSION);
+    }
+  },
+);
+
+// ---- apply_settings_sync ---------------------------------------------------
+server.registerTool(
+  "apply_settings_sync",
+  {
+    title: "Apply planned additive settings sync actions to pre-prod",
+    annotations: {
+      readOnlyHint: false, // writes to pre-prod
+      destructiveHint: false, // ADDITIVE ONLY — never overwrites or deletes existing pre-prod settings
+      idempotentHint: true, // re-applying once names match is a no-op (nothing left to plan)
+      openWorldHint: true,
+    },
+    description:
+      "Execute additive prod -> pre-prod settings sync actions. PRE-PROD ONLY; additive only — " +
+      "never overwrites or deletes existing pre-prod settings. SAFETY: it never accepts request " +
+      "bodies — it RE-PLANS server-side (same computation and scoping args as plan_settings_sync; " +
+      "use the SAME groups/sections scope) and executes only the planned actions you select: pass " +
+      "actionIds (from plan_settings_sync, after reviewing with the user) OR all=true to apply " +
+      "every planned action — exactly one of the two is required; calls with neither (or both) are " +
+      "rejected. If pre-prod changed since planning, a stale id matches nothing and is reported " +
+      "under unmatchedIds instead of executing. References are remapped prod->pre by name; " +
+      "unmatched refs are dropped with a warning. Every write is logged to the client (audit " +
+      "trail). Returns {account, prodBase, preProdBase, plannedCount, executed:[{id,op,itemKind," +
+      "typeName,itemName,method,path,status,ok,warnings?}], notSelected, unmatchedIds, skipped, " +
+      "skippedSections}.",
+    inputSchema: {
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      groups: z
+        .array(z.string())
+        .optional()
+        .describe("Top-level groups to re-plan (must match the plan call's scope)"),
+      sections: z
+        .array(z.string())
+        .optional()
+        .describe("Exact section keys to re-plan (must match the plan call's scope)"),
+      emr: z.string().optional().describe("EMR type to include emrDetailsSettings"),
+      actionIds: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Ids from plan_settings_sync to execute (reviewed with the user)"),
+      all: z
+        .boolean()
+        .optional()
+        .describe("Explicitly apply EVERY planned action (mutually exclusive with actionIds)"),
+    },
+  },
+  async ({ profile, groups, sections, emr, actionIds, all }) => {
+    try {
+      return ok(
+        await applySettingsSync({
+          profile: profile ?? null,
+          ...(groups ? { groups } : {}),
+          ...(sections ? { sections } : {}),
+          ...(emr ? { emr } : {}),
+          ...(actionIds ? { actionIds } : {}),
+          ...(all !== undefined ? { all } : {}),
+          // Audit trail: surface every live write to the client log.
+          onWrite: (message, data) => mcpLog(server, "warning", message, data),
+        }),
+      );
+    } catch (e) {
+      return toolError("apply_settings_sync", e, VERSION);
     }
   },
 );

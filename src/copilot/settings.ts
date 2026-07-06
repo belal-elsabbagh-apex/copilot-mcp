@@ -607,10 +607,87 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
   };
 }
 
-// ---- sync_settings --------------------------------------------------------
+// ---- get_settings (single-env read) ----------------------------------------
+
+// stripNoise with a section's per-section ignore set — the same normalization the diff
+// applies to each side. Exposed pure so get_settings' normalized=true output is
+// byte-comparable with what diff_settings compared.
+export const normalizeSectionValue = (
+  section: Pick<SettingsSection, "ignore">,
+  data: unknown,
+): unknown => stripNoise(data, new Set(section.ignore ?? []));
+
+export interface GetSettingsOpts {
+  env: "prod" | "pre_prod";
+  profile?: string | null;
+  sections?: string[];
+  groups?: string[];
+  emr?: string;
+  normalized?: boolean; // default false = raw payloads (UIDs/timestamps visible)
+}
+
+export interface GetSettingsSection {
+  key: string;
+  label: string;
+  group: string;
+  kind: "object" | "list";
+  count?: number; // list sections: row count
+  data?: unknown;
+  error?: string; // per-section fetch failure (other sections still return)
+}
+
+export interface GetSettingsResult {
+  account: string;
+  env: "prod" | "pre_prod";
+  base: string;
+  sectionsFetched: number;
+  sections: GetSettingsSection[];
+}
+
+// Fetch the selected settings sections from ONE env — the single-env counterpart to
+// diffSettings. Read-only. Raw by default so real UIDs/timestamps stay visible for
+// inspection; normalized=true applies the diff's noise-stripping instead.
+export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsResult> {
+  // Select first so an unknown group/section fails fast (no needless login).
+  const chosen = selectSections(opts.sections, opts.groups, opts.emr);
+
+  const creds = resolveCreds(opts.profile ?? null)[opts.env];
+  const client = makeClient(creds.be);
+  await login(client, creds.email, creds.password);
+
+  const sections: GetSettingsSection[] = [];
+  for (const section of chosen) {
+    const head = { key: section.key, label: section.label, group: section.group };
+    try {
+      const raw = await fetchSection(client, section);
+      const data = opts.normalized ? normalizeSectionValue(section, raw) : raw;
+      sections.push({
+        ...head,
+        kind: section.kind,
+        ...(Array.isArray(data) ? { count: data.length } : {}),
+        data,
+      });
+    } catch (e) {
+      sections.push({ ...head, kind: section.kind, error: toMessage(e) });
+    }
+  }
+
+  return {
+    account: opts.profile ?? "(default)",
+    env: opts.env,
+    base: creds.be,
+    sectionsFetched: chosen.length,
+    sections,
+  };
+}
+
+// ---- settings sync (plan/apply) --------------------------------------------
 // The write-side counterpart to diffSettings: ADDITIVELY copy settings that exist in PROD
 // but are missing in PRE-PROD into pre-prod. Additive only — never overwrites or deletes
-// existing pre-prod settings; pre-prod only; dry-run by default.
+// existing pre-prod settings; pre-prod only. Split into two operations:
+//   - planSettingsSyncOp: read-only — compute the planned actions, each with a stable id.
+//   - applySettingsSync:  re-plans server-side (never accepts bodies from the caller) and
+//                         executes only the actions the caller selected by id / all=true.
 //
 // Scope: the outbound order-type SPECIALITIES domain (the resource behind the three derived
 // diff sections `specialties` / `referred-providers` / `referred-facilities`). Two additive
@@ -1168,6 +1245,113 @@ export function planOrderNameSync(
   return { actions, skipped };
 }
 
+// ---- action ids + apply selection (pure; unit-tested) ----------------------
+
+// Stable, human-readable id for one planned action, derived from its semantic fields —
+// stable across plan runs as long as the underlying drift is the same. Colons inside
+// names are fine: ids are opaque match tokens, never parsed back apart.
+export const actionId = (a: Pick<SyncAction, "section" | "op" | "typeName" | "itemName">): string =>
+  `${a.section}:${a.op}:${a.typeName}:${a.itemName}`;
+
+export type PlannedSyncAction = SyncAction & { id: string };
+
+// Assign ids in plan order. Two actions with identical semantic fields (duplicate item
+// names under one type) get a deterministic "#2"/"#3" suffix so every id stays unique.
+export function assignActionIds(actions: SyncAction[]): PlannedSyncAction[] {
+  const seen = new Map<string, number>();
+  return actions.map((a) => {
+    const base = actionId(a);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return { ...a, id: n === 1 ? base : `${base}#${n}` };
+  });
+}
+
+// The apply selection filter: exactly ONE of actionIds / all=true is required — there is
+// deliberately no default "apply everything" (breadth must be an explicit input).
+export interface ApplyFilter {
+  actionIds?: string[];
+  all?: boolean;
+}
+
+const assertApplyFilter = (filter: ApplyFilter): void => {
+  const wantAll = filter.all === true;
+  const hasIds = (filter.actionIds?.length ?? 0) > 0;
+  if (wantAll === hasIds)
+    throw new ExpectedError(
+      "pass exactly one of actionIds (from plan_settings_sync, reviewed with the user) or all=true — refusing to apply without an explicit selection",
+    );
+};
+
+// Split the planned actions into the selected subset and the rest; ids that match no
+// planned action are returned so the caller can surface state drift since planning.
+export function selectPlannedActions(
+  actions: readonly PlannedSyncAction[],
+  filter: ApplyFilter,
+): { selected: PlannedSyncAction[]; notSelected: PlannedSyncAction[]; unmatchedIds: string[] } {
+  assertApplyFilter(filter);
+  if (filter.all === true) return { selected: [...actions], notSelected: [], unmatchedIds: [] };
+
+  const want = new Set(filter.actionIds);
+  const selected: PlannedSyncAction[] = [];
+  const notSelected: PlannedSyncAction[] = [];
+  for (const a of actions) (want.has(a.id) ? selected : notSelected).push(a);
+  const have = new Set(actions.map((a) => a.id));
+  return { selected, notSelected, unmatchedIds: [...want].filter((id) => !have.has(id)) };
+}
+
+// One-line description of an action's request body so the plan output can omit the
+// (potentially large) body itself.
+export function summarizeActionBody(a: SyncAction): string {
+  const count = (field: string): number => asArray(prop(a.body, field)).length;
+  if (a.itemKind === "speciality") {
+    const facs = count("referredFacilities");
+    const provs = count("referredProviders");
+    return a.op === "create"
+      ? `create speciality '${a.itemName}' (${facs} facilities, ${provs} providers)`
+      : `merge speciality '${a.itemName}' -> ${facs} facilities, ${provs} providers (existing + prod-only additions)`;
+  }
+  return (
+    `create order '${a.itemName}' (${count("CPTCodes")} CPTs, ${count("facilitiesUids")} facilities, ` +
+    `${count("authSubCategoryUids")} auth + ${count("referralSubCategoryUids")} referral sub-categories)`
+  );
+}
+
+// Plan-output shape for one action: everything needed to review + select it, with the
+// request body summarized (includeBodies=true for spot-checking a scoped plan).
+export interface PlannedActionSummary {
+  id: string;
+  section: string;
+  op: SyncAction["op"];
+  itemKind: SyncAction["itemKind"];
+  typeName: string;
+  itemName: string;
+  method: SyncAction["method"];
+  path: string;
+  summary: string;
+  warnings?: string[];
+  body?: Record<string, unknown>;
+}
+
+export function toActionSummary(
+  a: PlannedSyncAction,
+  includeBodies: boolean,
+): PlannedActionSummary {
+  return {
+    id: a.id,
+    section: a.section,
+    op: a.op,
+    itemKind: a.itemKind,
+    typeName: a.typeName,
+    itemName: a.itemName,
+    method: a.method,
+    path: a.path,
+    summary: summarizeActionBody(a),
+    ...(a.warnings ? { warnings: a.warnings } : {}),
+    ...(includeBodies ? { body: a.body } : {}),
+  };
+}
+
 // ---- orchestration --------------------------------------------------------
 
 // Catalog section keys whose additive write is handled by the specialities syncer.
@@ -1175,43 +1359,24 @@ const SPECIALITY_SYNC_SECTIONS = ["specialties", "referred-providers", "referred
 // Catalog section key handled by the orders syncer.
 const ORDER_NAME_SYNC_SECTIONS = ["orders"];
 
-export interface ExecutedAction {
-  op: SyncAction["op"];
-  itemKind: SyncAction["itemKind"];
-  typeName: string;
-  itemName: string;
-  method: string;
-  path: string;
-  status: number;
-  ok: boolean;
-  warnings?: string[];
-}
-export interface SyncSettingsResult {
+// The crawled + planned state shared by plan and apply: apply re-runs this exact
+// computation rather than accepting bodies from the caller.
+interface SyncPlanContext {
   account: string;
   prodBase: string;
   preProdBase: string;
-  dryRun: boolean;
-  planned: SyncAction[];
-  executed?: ExecutedAction[];
+  actions: PlannedSyncAction[];
   skipped: SyncSkip[];
   skippedSections: { key: string; reason: string }[];
+  pre: HttpClient | null; // logged-in pre-prod client; null when nothing syncable was selected (no login done)
 }
 
-export interface SyncSettingsOpts {
+async function buildSyncPlan(opts: {
   profile?: string | null;
   sections?: string[];
   groups?: string[];
   emr?: string;
-  dryRun?: boolean;
-  // Optional audit hook; the server wires this to mcpLog(warning) so every live write is logged.
-  onWrite?: (message: string, data?: Record<string, unknown>) => void;
-}
-
-// Additively sync prod -> pre-prod settings for the selected sections. Dry-run by default:
-// returns the planned create/merge actions without writing. With dryRun=false, executes each
-// write against PRE-PROD only and logs it via onWrite.
-export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettingsResult> {
-  const dryRun = opts.dryRun ?? true;
+}): Promise<SyncPlanContext> {
   // Validate + resolve the selection up front (unknown group/section fails fast, no login).
   const chosen = selectSections(opts.sections, opts.groups, opts.emr);
   const chosenKeys = new Set(chosen.map((s) => s.key));
@@ -1227,16 +1392,16 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
     .map((s) => ({ key: s.key, reason: "no write mapping yet — additive sync not implemented" }));
 
   const creds = resolveCreds(opts.profile ?? null);
-  const result: SyncSettingsResult = {
+  const ctx: SyncPlanContext = {
     account: opts.profile ?? "(default)",
     prodBase: creds.prod.be,
     preProdBase: creds.pre_prod.be,
-    dryRun,
-    planned: [],
+    actions: [],
     skipped: [],
     skippedSections,
+    pre: null,
   };
-  if (!runSpeciality && !runOrderNames) return result; // nothing syncable selected — report skipped only
+  if (!runSpeciality && !runOrderNames) return ctx; // nothing syncable selected — report skipped only
 
   const prod = makeClient(creds.prod.be);
   const pre = makeClient(creds.pre_prod.be);
@@ -1270,23 +1435,111 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
     skipped.push(...o.skipped);
   }
 
-  result.planned = actions;
-  result.skipped = skipped;
-  if (dryRun) return result;
+  ctx.actions = assignActionIds(actions);
+  ctx.skipped = skipped;
+  ctx.pre = pre;
+  return ctx;
+}
+
+// ---- plan_settings_sync ----------------------------------------------------
+
+export interface PlanSettingsSyncOpts {
+  profile?: string | null;
+  sections?: string[];
+  groups?: string[];
+  emr?: string;
+  includeBodies?: boolean;
+}
+
+export interface PlanSettingsSyncResult {
+  account: string;
+  prodBase: string;
+  preProdBase: string;
+  actionCount: number;
+  actions: PlannedActionSummary[];
+  skipped: SyncSkip[];
+  skippedSections: { key: string; reason: string }[];
+}
+
+// Compute — without writing — the additive actions that would sync prod -> pre-prod for
+// the selected sections. Read-only; applySettingsSync executes a reviewed selection.
+export async function planSettingsSyncOp(
+  opts: PlanSettingsSyncOpts,
+): Promise<PlanSettingsSyncResult> {
+  const ctx = await buildSyncPlan(opts);
+  return {
+    account: ctx.account,
+    prodBase: ctx.prodBase,
+    preProdBase: ctx.preProdBase,
+    actionCount: ctx.actions.length,
+    actions: ctx.actions.map((a) => toActionSummary(a, opts.includeBodies ?? false)),
+    skipped: ctx.skipped,
+    skippedSections: ctx.skippedSections,
+  };
+}
+
+// ---- apply_settings_sync ---------------------------------------------------
+
+export interface ExecutedAction {
+  id: string;
+  op: SyncAction["op"];
+  itemKind: SyncAction["itemKind"];
+  typeName: string;
+  itemName: string;
+  method: string;
+  path: string;
+  status: number;
+  ok: boolean;
+  warnings?: string[];
+}
+
+export interface ApplySettingsSyncOpts extends ApplyFilter {
+  profile?: string | null;
+  sections?: string[];
+  groups?: string[];
+  emr?: string;
+  // Optional audit hook; the server wires this to mcpLog(warning) so every live write is logged.
+  onWrite?: (message: string, data?: Record<string, unknown>) => void;
+}
+
+export interface ApplySettingsSyncResult {
+  account: string;
+  prodBase: string;
+  preProdBase: string;
+  plannedCount: number;
+  executed: ExecutedAction[];
+  notSelected: { id: string; op: SyncAction["op"]; typeName: string; itemName: string }[];
+  unmatchedIds: string[];
+  skipped: SyncSkip[];
+  skippedSections: { key: string; reason: string }[];
+}
+
+// Re-plan server-side (same computation + scoping args as planSettingsSyncOp — bodies are
+// never accepted from the caller) and execute only the selected actions against PRE-PROD.
+// Additive only. Requires actionIds XOR all=true; a stale id (state drifted since planning)
+// matches nothing and lands in unmatchedIds instead of executing something unreviewed.
+export async function applySettingsSync(
+  opts: ApplySettingsSyncOpts,
+): Promise<ApplySettingsSyncResult> {
+  // Reject a missing/ambiguous selection BEFORE any login so the bad call is free.
+  assertApplyFilter(opts);
+
+  const ctx = await buildSyncPlan(opts);
+  const { selected, notSelected, unmatchedIds } = selectPlannedActions(ctx.actions, opts);
 
   // Execute against PRE-PROD only. Additive: POST new specialities/orders / PUT
   // existing-plus-additions (specialities merge only).
   const executed: ExecutedAction[] = [];
-  for (const a of actions) {
-    const r = await pre.req(a.method, a.path, { json: a.body });
+  for (const a of selected) {
+    if (!ctx.pre) break; // unreachable: actions imply a logged-in pre client
+    const r = await ctx.pre.req(a.method, a.path, { json: a.body });
     const okWrite = r.status < 400;
-    opts.onWrite?.(`sync_settings ${a.op} ${a.itemKind} '${a.itemName}' (type '${a.typeName}')`, {
-      method: a.method,
-      path: a.path,
-      status: r.status,
-      ok: okWrite,
-    });
+    opts.onWrite?.(
+      `apply_settings_sync ${a.op} ${a.itemKind} '${a.itemName}' (type '${a.typeName}')`,
+      { id: a.id, method: a.method, path: a.path, status: r.status, ok: okWrite },
+    );
     executed.push({
+      id: a.id,
       op: a.op,
       itemKind: a.itemKind,
       typeName: a.typeName,
@@ -1298,6 +1551,21 @@ export async function syncSettings(opts: SyncSettingsOpts): Promise<SyncSettings
       ...(a.warnings ? { warnings: a.warnings } : {}),
     });
   }
-  result.executed = executed;
-  return result;
+
+  return {
+    account: ctx.account,
+    prodBase: ctx.prodBase,
+    preProdBase: ctx.preProdBase,
+    plannedCount: ctx.actions.length,
+    executed,
+    notSelected: notSelected.map((a) => ({
+      id: a.id,
+      op: a.op,
+      typeName: a.typeName,
+      itemName: a.itemName,
+    })),
+    unmatchedIds,
+    skipped: ctx.skipped,
+    skippedSections: ctx.skippedSections,
+  };
 }

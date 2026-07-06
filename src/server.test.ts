@@ -18,9 +18,9 @@ interface RegisteredTool {
   };
 }
 
-// Tools that mutate state (everything else is read-only). sync_settings is a stub but
-// declares write semantics for its intended behavior.
-const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order", "sync_settings"]);
+// Tools that mutate state (everything else is read-only). apply_settings_sync writes
+// additively to pre-prod only.
+const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order", "apply_settings_sync"]);
 // Tools that touch no external service (pure/local). All others set openWorldHint=true.
 const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections"]);
 const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
@@ -40,7 +40,9 @@ const EXPECTED = [
   "find_stuck_orders",
   "diff_settings",
   "list_setting_sections",
-  "sync_settings",
+  "get_settings",
+  "plan_settings_sync",
+  "apply_settings_sync",
   "get_order",
   "get_login_token",
   "doctor",
@@ -110,7 +112,19 @@ describe("tool input schemas accept representative payloads", () => {
     },
     diff_settings: { valid: { groups: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
     list_setting_sections: { valid: { group: "orders" }, invalid: { group: 123 } },
-    sync_settings: { valid: { groups: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
+    get_settings: {
+      valid: { env: "pre_prod", profile: "ossm", groups: ["orders"] },
+      invalid: { profile: "ossm" }, // env is required
+    },
+    plan_settings_sync: {
+      valid: { profile: "ossm", groups: ["orders"] },
+      invalid: {}, // profile is required
+    },
+    apply_settings_sync: {
+      // The actionIds-XOR-all rule is enforced at runtime (ExpectedError), not in the schema.
+      valid: { profile: "ossm", actionIds: ["specialties:create:MRI:Cardiology"] },
+      invalid: { actionIds: ["specialties:create:MRI:Cardiology"] }, // profile is required
+    },
     get_order: {
       valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required

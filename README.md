@@ -15,16 +15,23 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 | `analyze_order_execution` | Trace an order to its UiPath Orchestrator job(s) and diagnose the run. READ-ONLY. |
 | `build_faulted_job_issue` | Read a faulted UiPath job (by Key) + its robot logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`) for the RPA repo. READ-ONLY — it does **not** post to GitHub; the caller hands the payload to a GitHub MCP server. |
 | `diff_settings` | Diff an account's `/api/v1/settings/*` between prod and pre-prod (UID/timestamp noise stripped, lists matched by name). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). READ-ONLY. |
-| `list_setting_sections` | List the settings sections `diff_settings`/`sync_settings` can scope to (key, label, group, kind, derived, and each list section's `matchKey`). Narrow with `group` and/or exact `sections` keys. Use it to drive fine-grained, section-level scoping rather than broad `groups`. READ-ONLY, no network. |
-| `sync_settings` | Additively copy settings that exist in prod but are missing in pre-prod into pre-prod — additive only (never overwrites or deletes existing pre-prod settings), PRE-PROD only, **dry-run by default** (returns the planned create/merge actions; pass `dryRun:false` to apply). Currently covers the outbound order-type **specialties** domain (`specialties` / `referred-providers` / `referred-facilities`): creates prod-only specialties and merges prod-only facilities/providers into specialties that already exist in pre-prod, remapping payer references prod→pre. Sections without a verified write endpoint are reported under `skippedSections`. |
+| `get_settings` | Fetch an account's settings sections from ONE env (`prod` \| `pre_prod`) — the single-env counterpart to `diff_settings`. Raw payloads by default (UIDs visible); `normalized:true` applies the diff's noise-stripping. Same `groups`/`sections` scoping. READ-ONLY. |
+| `list_setting_sections` | List the settings sections `diff_settings`/`get_settings`/`plan_settings_sync` can scope to (key, label, group, kind, derived, and each list section's `matchKey`). Narrow with `group` and/or exact `sections` keys. Use it to drive fine-grained, section-level scoping rather than broad `groups`. READ-ONLY, no network. |
+| `plan_settings_sync` | Compute — WITHOUT writing — the additive actions that would copy prod-only settings into pre-prod. Each action carries a stable id (`section:op:typeName:itemName`), a one-line body summary, and warnings for references dropped for having no pre-prod match by name. Covers the outbound order-type **specialties** domain (`specialties` / `referred-providers` / `referred-facilities`) and the **orders** domain (section `orders`, create-only). Sections without a verified write endpoint are reported under `skippedSections`. READ-ONLY. |
+| `apply_settings_sync` | Execute planned sync actions against PRE-PROD — additive only (never overwrites or deletes existing pre-prod settings). Never accepts request bodies: it **re-plans server-side** (same scoping args as `plan_settings_sync`) and executes only the actions selected via `actionIds` OR an explicit `all:true` (exactly one required). Stale ids (state drifted since planning) are reported under `unmatchedIds` instead of executing. Every write is audit-logged to the client. |
 | `get_order` | Fetch a single order's normalized detail (status, insurance, ICD/CPT, facility, note presence) by uid in a chosen env, plus `documents`: clickable CDN links that exist for the order — the auth-screenshot PDF (when `hasAuthScreenshot`) and medical-authorization summary PDF(s). The CDN is CloudFront signed-cookie protected, so links open only in an authenticated Copilot browser session (never fetched/probed server-side). READ-ONLY. |
 | `doctor` | Probe the server's external connections (Copilot BE prod + pre-prod login, UiPath Orchestrator per env) and report what's reachable. READ-ONLY. |
 
 ## Prompts
 
 User-invokable workflow prompts chain the tools above for common ops tasks:
-`diagnose-order`, `reconcile-settings`, `clone-and-verify-order`, `triage-stuck-orders`, and
-`report-faulted-uipath-jobs`.
+`diagnose-order`, `reconcile-settings`, `inspect-settings`, `clone-and-verify-order`,
+`triage-stuck-orders`, and `report-faulted-uipath-jobs`.
+
+`reconcile-settings` walks the full settings workflow: `list_setting_sections` →
+`diff_settings` → `plan_settings_sync` → review the planned action ids with the user →
+`apply_settings_sync` with exactly the approved ids. `inspect-settings` reads one env's
+settings via `get_settings` and summarizes them.
 
 `report-faulted-uipath-jobs` finds faulted UiPath jobs (prod by default) and files each as a
 GitHub issue on `Apex-Medical-AI-Inc/RPAPlaywright` — creating one issue per distinct fault
