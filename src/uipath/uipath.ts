@@ -13,6 +13,7 @@ export interface UiPathJob {
   Id?: string;
   Key?: string;
   State?: string;
+  ReleaseName?: string;
   CreationTime?: string;
   EndTime?: string;
   OutputArguments?: string;
@@ -110,7 +111,7 @@ export async function searchJobsByOrderId(
       $filter: filter,
       $orderby: "CreationTime desc",
       $top: String(top),
-      $select: "Id,Key,State,CreationTime",
+      $select: "Id,Key,State,ReleaseName,CreationTime",
     },
     folder,
   );
@@ -125,13 +126,18 @@ export async function listRecentJobs(
   since: string | undefined,
   top: number,
   folder?: string,
+  processName?: string,
 ): Promise<UiPathJob[]> {
   const params: Record<string, string> = {
     $orderby: "CreationTime desc",
     $top: String(top),
-    $select: "Id,Key,State,CreationTime",
+    $select: "Id,Key,State,ReleaseName,CreationTime",
   };
-  if (since) params["$filter"] = `CreationTime gt ${new Date(since).toISOString()}`;
+  const clauses: string[] = [];
+  if (since) clauses.push(`CreationTime gt ${new Date(since).toISOString()}`);
+  const needle = processName?.trim();
+  if (needle) clauses.push(`contains(ReleaseName, '${needle.replace(/'/g, "''")}')`);
+  if (clauses.length) params["$filter"] = clauses.join(" and ");
   return odataValues<UiPathJob>(await uipathGet("/odata/Jobs", params, folder));
 }
 
@@ -142,7 +148,7 @@ async function fetchJobDetailsById(jobId: string, folder?: string): Promise<UiPa
   try {
     return (await uipathGet(
       `/odata/Jobs(${jobId})`,
-      { $select: "Id,Key,State,CreationTime,EndTime,OutputArguments,InputArguments" },
+      { $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments" },
       folder,
     )) as UiPathJob;
   } catch {
@@ -162,7 +168,7 @@ export async function fetchJobByKey(jobKey: string, folder?: string): Promise<Ui
       {
         $filter: `Key eq ${key}`,
         $top: "1",
-        $select: "Id,Key,State,CreationTime,EndTime,OutputArguments,InputArguments",
+        $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
       },
       folder,
     );

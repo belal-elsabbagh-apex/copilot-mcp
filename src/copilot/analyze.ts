@@ -24,6 +24,7 @@ export interface JobAnalysis {
   id: string | undefined;
   key: string | undefined;
   state: string | undefined;
+  processName: string | undefined;
   verdict: string;
   creationTime: string | undefined;
   endTime: string | undefined;
@@ -153,6 +154,7 @@ async function toJobAnalysis(
     id: job.Id,
     key: job.Key,
     state: job.State,
+    processName: job.ReleaseName,
     verdict: jobVerdict(job.State, output),
     creationTime: job.CreationTime,
     endTime: job.EndTime,

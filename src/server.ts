@@ -716,7 +716,8 @@ server.registerTool(
     },
     description:
       "List the most recent Orchestrator jobs in a folder (newest first), without order " +
-      "correlation. READ-ONLY. Returns {env, folder, count, jobs:[{id,key,state,creationTime,deepLink}]}.",
+      "correlation. READ-ONLY. Returns {env, folder, count, " +
+      "jobs:[{id,key,state,processName,creationTime,deepLink}]}.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -724,12 +725,16 @@ server.registerTool(
       folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
       since: z.string().optional().describe("ISO date lower bound on CreationTime"),
       top: z.number().int().min(1).max(500).optional().default(50).describe("Max jobs to return"),
+      processName: z
+        .string()
+        .optional()
+        .describe("Substring filter on the process (ReleaseName), e.g. 'OPTUM'"),
     },
   },
-  async ({ env, folder, since, top }) => {
+  async ({ env, folder, since, top, processName }) => {
     try {
       const resolved = resolveFolder(env, folder);
-      const jobs = await listRecentJobs(since, top, resolved);
+      const jobs = await listRecentJobs(since, top, resolved, processName);
       return ok({
         env,
         folder: resolved,
@@ -738,6 +743,7 @@ server.registerTool(
           id: j.Id,
           key: j.Key,
           state: j.State,
+          processName: j.ReleaseName,
           creationTime: j.CreationTime,
           deepLink: j.Key ? jobDeepLink(j.Key) : "",
         })),

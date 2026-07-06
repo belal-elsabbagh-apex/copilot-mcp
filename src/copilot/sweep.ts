@@ -30,7 +30,14 @@ export interface StuckOrder {
   facility?: string | undefined;
   insurance?: string | undefined;
   ageHours: number | null;
-  uipath?: { verdict: string; latestState?: string | undefined; jobCount: number } | undefined;
+  uipath?:
+    | {
+        verdict: string;
+        latestState?: string | undefined;
+        jobCount: number;
+        processNames?: string[] | undefined;
+      }
+    | undefined;
 }
 
 export interface FindStuckArgs {
@@ -68,15 +75,17 @@ function uipathVerdict(jobs: UiPathJob[]): {
   verdict: string;
   latestState?: string | undefined;
   jobCount: number;
+  processNames?: string[] | undefined;
 } {
   if (!jobs.length) return { verdict: "no-job", jobCount: 0 };
   const states = jobs.map((j) => j.State ?? "");
   const latestState = states[0];
+  const processNames = [...new Set(jobs.map((j) => j.ReleaseName).filter((n): n is string => !!n))];
   let verdict = "job-found";
   if (states.some((s) => s === "Faulted" || s === "Stopped")) verdict = "job-faulted";
   else if (states.some((s) => s === "Running" || s === "Pending")) verdict = "job-running";
   else if (states.every((s) => s === "Successful")) verdict = "job-successful-order-stuck";
-  return { verdict, latestState, jobCount: jobs.length };
+  return { verdict, latestState, jobCount: jobs.length, processNames };
 }
 
 export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckResult> {

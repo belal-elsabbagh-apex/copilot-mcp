@@ -124,6 +124,10 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { env: "prod", jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
       invalid: { jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, // env is required
     },
+    list_jobs: {
+      valid: { env: "prod", processName: "OPTUM" },
+      invalid: { processName: "OPTUM" }, // env is required
+    },
   };
 
   for (const [name, c] of Object.entries(cases)) {
