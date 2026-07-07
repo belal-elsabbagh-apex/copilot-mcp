@@ -522,6 +522,7 @@ export const SAFETY_RULES = {
     "Never persist PHI (member names, DOBs, IDs, phones) — redact to placeholders in filenames/docs.",
     "Never commit credentials — bearer/passwords stay in local config, read at runtime.",
     "Dry-run gate: the 'Authorization Dev Clone' folder (434039) skips all BE notifications; only 'Authorization' (231517) fires real BE calls.",
-    "This MCP is read-only against prod: it never submits orders, never POSTs queue items, and never repins releases.",
+    "This MCP never writes to prod: queue-item POSTs/deletes and job starts are pre_prod-only (dev clone 434039, schema-enforced) and it never repins releases.",
+    "Every posted queue item passes the test-safety guard: IsApproved forced false, serverURL/queueUrl/NoteBucketPath pinned to the configured pre-prod values, <TO-FILL> placeholders rejected.",
   ],
 } as const;

@@ -15,6 +15,7 @@ import {
   resolvePortal,
   resolvePortalByDefId,
 } from "../mcp/reference.js";
+import { guardQueueItemSafety } from "./safety.js";
 import {
   type FolderScope,
   getQueueDefinitionName,
@@ -124,7 +125,7 @@ export async function pullQueueItem(args: PullQueueItemArgs): Promise<PullQueueI
   }
   const portal = resolvePortal(queueName);
 
-  const specificContent: Record<string, unknown> = { ...item.specificContent, IsApproved: false };
+  const specificContent = guardQueueItemSafety(item.specificContent, "force").specificContent;
 
   return {
     item: {

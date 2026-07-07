@@ -13,6 +13,13 @@
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
+//   - list_queues              list queue definitions in a folder (read-only; discovers dev-clone queue ids)
+//   - list_processes           list releases/processes in a folder (read-only; releaseKey + pin verification)
+//   - list_triggers            list triggers in a folder (read-only; verify queue trigger -> release wiring)
+//   - get_job                  fetch one job's state/output by GUID Key (read-only; poll target after start_job)
+//   - add_queue_item           POST one item to a dev-clone queue (pre_prod-only; test-safety guarded)
+//   - delete_queue_item        delete a 'New' queue item from the dev clone (pre_prod-only; fetch-first)
+//   - start_job                start job(s) for a dev-clone release (pre_prod-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/groups the settings tools can scope to (read-only, no network)
 //   - get_settings             fetch one env's settings sections (read-only)
@@ -44,6 +51,7 @@ import {
 import { runDoctor } from "./copilot/doctor.js";
 import { type MirrorResult, mirrorOne } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
+import { normalizeOutput } from "./copilot/output-schema.js";
 import {
   applySettingsSync,
   diffSettings,
@@ -65,15 +73,21 @@ import {
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
 import { envelopeRows, stringProp } from "./shared/util.js";
+import { addQueueItem, deleteQueueItem, startJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
+  fetchJobByKey,
   fetchJobLogs,
   fetchJobVideoUrl,
   jobDeepLink,
+  listQueueDefinitions,
   listRecentJobs,
+  listReleases,
+  listTriggers,
   resolveFolder,
+  scopeForEnv,
 } from "./uipath/uipath.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
@@ -132,7 +146,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.9.0";
+const VERSION = "1.10.0";
 
 export const server = new McpServer(
   { name: "copilot", version: VERSION },
@@ -841,6 +855,324 @@ server.registerTool(
       return ok(await buildFaultedJobIssue(env, jobKey, { folder, repo, labels }));
     } catch (e) {
       return toolError("build_faulted_job_issue", e, VERSION);
+    }
+  },
+);
+
+// ---- list_queues -----------------------------------------------------------
+server.registerTool(
+  "list_queues",
+  {
+    title: "List UiPath queue definitions in a folder",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "List the queue definitions (the queues themselves) in an env's Orchestrator folder, " +
+      "sorted by name. READ-ONLY. Use this to discover a queueDefId for list_queue_items / " +
+      "the exact queue Name for add_queue_item — dev-clone (pre_prod) queue ids differ from " +
+      "the prod ids in the static portal registry. Queue CREATION is deliberately not a tool " +
+      "(rare one-time setup — do it in the Orchestrator UI). Returns " +
+      "{env, count, queues:[{id,name,description,creationTime}]}.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      nameContains: z.string().optional().describe("Substring filter on the queue name"),
+      top: z.number().int().min(1).max(200).optional().default(100).describe("Max queues"),
+    },
+  },
+  async ({ env, nameContains, top }) => {
+    try {
+      const queues = await listQueueDefinitions(scopeForEnv(env), nameContains ?? "", top);
+      return ok({ env, count: queues.length, queues });
+    } catch (e) {
+      return toolError("list_queues", e, VERSION);
+    }
+  },
+);
+
+// ---- list_processes --------------------------------------------------------
+server.registerTool(
+  "list_processes",
+  {
+    title: "List UiPath releases (processes) in a folder",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "List the releases ('processes' in the Orchestrator UI) in an env's folder, sorted by " +
+      "name. READ-ONLY. `key` is the ReleaseKey that start_job takes; `processVersion` is the " +
+      "pinned package version — a job resolves it at START, so verify the pin here right before " +
+      "starting (repinning is manual in the Orchestrator UI; this MCP never repins). Returns " +
+      "{env, count, processes:[{id,key,name,processKey,processVersion,isLatestVersion}]}.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      nameContains: z.string().optional().describe("Substring filter on the release name"),
+      top: z.number().int().min(1).max(200).optional().default(100).describe("Max releases"),
+    },
+  },
+  async ({ env, nameContains, top }) => {
+    try {
+      const processes = await listReleases(scopeForEnv(env), nameContains ?? "", top);
+      return ok({ env, count: processes.length, processes });
+    } catch (e) {
+      return toolError("list_processes", e, VERSION);
+    }
+  },
+);
+
+// ---- list_triggers ---------------------------------------------------------
+server.registerTool(
+  "list_triggers",
+  {
+    title: "List UiPath triggers (queue + time) in a folder",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "List the triggers (ProcessSchedules) in an env's folder. READ-ONLY. Queue triggers carry " +
+      "a queueDefinitionId + the releaseId/releaseName they start — use this to verify a queue's " +
+      "trigger points at YOUR dev release before enqueueing (cross-check releaseId against " +
+      "list_processes). Time triggers have queueDefinitionId 0. Returns {env, count, " +
+      "triggers:[{id,name,enabled,releaseId,releaseKey,releaseName,queueDefinitionId," +
+      "queueDefinitionName,itemsActivationThreshold,maxJobsForActivation}]}.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      queueDefinitionId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Only triggers watching this queue"),
+      top: z.number().int().min(1).max(200).optional().default(100).describe("Max triggers"),
+    },
+  },
+  async ({ env, queueDefinitionId, top }) => {
+    try {
+      let triggers = await listTriggers(scopeForEnv(env), top);
+      if (queueDefinitionId) {
+        triggers = triggers.filter((t) => t.queueDefinitionId === queueDefinitionId);
+      }
+      return ok({ env, count: triggers.length, triggers });
+    } catch (e) {
+      return toolError("list_triggers", e, VERSION);
+    }
+  },
+);
+
+// ---- get_job ---------------------------------------------------------------
+server.registerTool(
+  "get_job",
+  {
+    title: "Get a single UiPath job's state by Key",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job " +
+      "(list_jobs is an unkeyed scan; analyze_order_execution is order-correlated and heavy). " +
+      "READ-ONLY. `output` is the job's parsed OutputArguments with token/callbackContext " +
+      "stripped. Returns {env, folder, found, job:{id,key,state,processName,creationTime," +
+      "endTime,deepLink,output}}.",
+    inputSchema: {
+      env: z
+        .enum(["prod", "pre_prod"])
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      jobKey: z.string().min(8).describe("The job's GUID Key (from start_job / list_jobs)"),
+      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+    },
+  },
+  async ({ env, jobKey, folder }) => {
+    try {
+      const resolved = resolveFolder(env, folder);
+      const job = await fetchJobByKey(jobKey, resolved);
+      if (!job) return ok({ env, folder: resolved, found: false });
+      let output: unknown = null;
+      if (job.OutputArguments) {
+        try {
+          const parsed = JSON.parse(job.OutputArguments) as Record<string, unknown>;
+          output = Object.fromEntries(normalizeOutput(parsed).fields);
+        } catch {
+          output = job.OutputArguments.slice(0, 500);
+        }
+      }
+      return ok({
+        env,
+        folder: resolved,
+        found: true,
+        job: {
+          id: job.Id,
+          key: job.Key,
+          state: job.State,
+          processName: job.ReleaseName,
+          creationTime: job.CreationTime,
+          endTime: job.EndTime,
+          deepLink: job.Key ? jobDeepLink(job.Key) : "",
+          output,
+        },
+      });
+    } catch (e) {
+      return toolError("get_job", e, VERSION);
+    }
+  },
+);
+
+// ---- add_queue_item --------------------------------------------------------
+server.registerTool(
+  "add_queue_item",
+  {
+    title: "Post a queue item to a dev-clone queue",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false, // additive — creates an item, never overwrites
+      idempotentHint: false, // each call mints a new item
+      openWorldHint: true,
+    },
+    description:
+      "POST one item to a UiPath queue in the DEV-CLONE folder (pre_prod ONLY — the schema " +
+      "rejects prod). Every payload passes the test-safety guard first: IsApproved is forced " +
+      "false; a non-empty serverURL/queueUrl/NoteBucketPath must match the config's pre-prod " +
+      "values; <TO-FILL> placeholders are rejected. To post a build_queue_item result, pass " +
+      "payload.itemData.Name as queueName, payload.itemData.Reference as reference and " +
+      "payload.itemData.SpecificContent as specificContent. When enqueueing many items, pace " +
+      "~1/s. Returns {env, queueName, reference, itemId, status, forced}.",
+    inputSchema: {
+      env: z
+        .literal("pre_prod")
+        .describe(
+          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
+            "'prod' is rejected by the schema (required)",
+        ),
+      queueName: z
+        .string()
+        .min(1)
+        .describe("Exact queue Name in the dev-clone folder (see list_queues)"),
+      reference: z
+        .string()
+        .min(1)
+        .describe("Queue-item Reference, e.g. '<PORTAL>-DEVTEST-<n>-<orderUid8>'"),
+      specificContent: z
+        .record(z.unknown())
+        .describe("The item's SpecificContent (fixture record or build_queue_item output)"),
+      priority: z.enum(["Low", "Normal", "High"]).optional().default("Normal"),
+    },
+  },
+  async ({ env, queueName, reference, specificContent, priority }) => {
+    try {
+      const result = await addQueueItem({ env, queueName, reference, priority, specificContent });
+      // Audit trail: surface every Orchestrator write to the client log.
+      mcpLog(server, "warning", `posted queue item to pre-prod queue '${queueName}'`, {
+        reference,
+        itemId: result.itemId,
+        forced: result.forced,
+      });
+      return ok(result);
+    } catch (e) {
+      return toolError("add_queue_item", e, VERSION);
+    }
+  },
+);
+
+// ---- delete_queue_item -----------------------------------------------------
+server.registerTool(
+  "delete_queue_item",
+  {
+    title: "Delete a New queue item from the dev clone",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true, // deletes an item
+      idempotentHint: true, // re-deleting fails safe (status is no longer New)
+      openWorldHint: true,
+    },
+    description:
+      "Delete one queue item from the DEV-CLONE folder (pre_prod ONLY — the schema rejects " +
+      "prod). Fetch-first: refuses unless the item's current Status is 'New', so InProgress/" +
+      "Successful/Failed history is never destroyed. Use to clear stale test items before " +
+      "re-enqueueing after a re-mint. Returns {env, itemId, deleted, previousStatus, reference}.",
+    inputSchema: {
+      env: z
+        .literal("pre_prod")
+        .describe(
+          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
+            "'prod' is rejected by the schema (required)",
+        ),
+      itemId: z.number().int().positive().describe("Queue item id (from list_queue_items)"),
+    },
+  },
+  async ({ env, itemId }) => {
+    try {
+      const result = await deleteQueueItem(itemId, env);
+      mcpLog(server, "warning", `deleted pre-prod queue item ${itemId}`, {
+        reference: result.reference,
+      });
+      return ok(result);
+    } catch (e) {
+      return toolError("delete_queue_item", e, VERSION);
+    }
+  },
+);
+
+// ---- start_job -------------------------------------------------------------
+server.registerTool(
+  "start_job",
+  {
+    title: "Start a UiPath job on the dev clone",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false, // starts a run; existing state untouched
+      idempotentHint: false, // each call starts new job(s)
+      openWorldHint: true,
+    },
+    description:
+      "Start job(s) for a release in the DEV-CLONE folder (pre_prod ONLY — the schema rejects " +
+      "prod). Get the releaseKey from list_processes. PIN RACE: a job resolves its package " +
+      "version at START, not creation — if others are publishing, verify the release's " +
+      "processVersion via list_processes right before starting (repinning is manual in the " +
+      "Orchestrator UI; this MCP never repins). Poll the result with get_job. Returns " +
+      "{env, jobs:[{id,key,state,releaseName,deepLink}]}.",
+    inputSchema: {
+      env: z
+        .literal("pre_prod")
+        .describe(
+          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
+            "'prod' is rejected by the schema (required)",
+        ),
+      releaseKey: z.string().min(8).describe("Release GUID Key (from list_processes)"),
+      inputArguments: z
+        .record(z.unknown())
+        .optional()
+        .default({})
+        .describe("Job input arguments (omit for none)"),
+      jobsCount: z.number().int().min(1).max(5).optional().default(1).describe("Jobs to start"),
+    },
+  },
+  async ({ env, releaseKey, inputArguments, jobsCount }) => {
+    try {
+      const result = await startJob({ env, releaseKey, inputArguments, jobsCount });
+      mcpLog(server, "warning", `started ${result.jobs.length} dev-clone job(s)`, {
+        releaseKey,
+        keys: result.jobs.map((j) => j.key),
+      });
+      return ok(result);
+    } catch (e) {
+      return toolError("start_job", e, VERSION);
     }
   },
 );

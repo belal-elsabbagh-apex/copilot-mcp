@@ -9,6 +9,7 @@ import type { Env, UipathConfig } from "../config/config.js";
 import { getUipath, resolveCreds } from "../config/config.js";
 import { type BeOrder, fetchOrder, makeClient, pad } from "../copilot/copilot-client.js";
 import { prop, stringProp } from "../shared/util.js";
+import { guardQueueItemSafety } from "./safety.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error).
 export function toMDY(input: string | null | undefined): string {
@@ -129,7 +130,7 @@ export async function buildQueueItem(
   const s = (v: unknown): string => (v == null ? "" : String(v));
   const fromName = s(from["name"]);
   const account = accountSlug(o, profile);
-  const specific = {
+  const built = {
     DOS: dos,
     DescriptionOfService: JSON.stringify(cpts.map((c) => c.description ?? "")),
     Diagnoses: JSON.stringify(icds.map((i) => i.code)),
@@ -180,6 +181,8 @@ export async function buildQueueItem(
     serverURL: uipath.serverUrlByEnv?.[env] ?? envCfg.be,
     token: token ?? "",
   };
+  // Single enforcement point for the IsApproved=false rule (the literal above documents it).
+  const specific = guardQueueItemSafety(built, "force").specificContent;
 
   const payload = {
     itemData: {

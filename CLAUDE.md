@@ -67,14 +67,26 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   (`ossm`, `kafri`, …) plus its other args.** These are **required** tool/prompt parameters — never
   add a default env or default profile, and never silently assume one. `profile` is validated
   against the config at call time by `resolveCreds`. UiPath-only tools (`list_jobs`, `get_job_logs`,
-  `build_faulted_job_issue`) take `env` but **no `profile`** — UiPath authenticates with the single
-  global `uipath.bearer`, not per-profile creds. Still never default `env`.
+  `get_job`, `list_queues`, `list_processes`, `list_triggers`, `build_faulted_job_issue`,
+  `add_queue_item`, `delete_queue_item`, `start_job`) take `env` but **no `profile`** — UiPath
+  authenticates with the single global `uipath.bearer`, not per-profile creds. Still never default `env`.
 - **stdout is the JSON-RPC channel.** A stray `console.log` to stdout corrupts the protocol.
   `console.*` is redirected to stderr in server.ts; use `mcpLog()` for client-visible logs and
   stderr (`LOG_LEVEL=debug` / `COPILOT_MCP_DEBUG=1`) for local diagnostics.
 - **prod/pre-prod isolation**: writes target pre-prod only; `delete_preprod_order` never touches
   prod; `clone_order` is clone-only unless `submit` is explicitly authorized; `build_queue_item` /
   `pull_queue_item` force `IsApproved=false` so a test run can never submit a real auth.
+- **UiPath writes are dev-clone-only and guarded.** `add_queue_item`, `delete_queue_item` and
+  `start_job` (all in `uipath/actions.ts` — the ONLY module that mutates Orchestrator state) take
+  `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` in the domain
+  function. Every posted SpecificContent passes `guardQueueItemSafety` (`uipath/safety.ts`, pure,
+  unit-tested — the single enforcement point also used by `build_queue_item`/`pull_queue_item`):
+  IsApproved forced false; non-empty `serverURL`/`queueUrl`/`NoteBucketPath` must match the
+  configured pre-prod values (fails closed when unconfigured); `<TO-FILL>` placeholders rejected.
+  `delete_queue_item` is fetch-first and refuses any item whose Status isn't `New`. The MCP never
+  repins releases and never creates queues — `list_processes`/`list_queues`/`list_triggers` are
+  the read-side discovery/verification tools (dev-clone queue ids differ from the prod ids in
+  `PORTALS`).
 - **Settings sync is a plan/apply pair — additive, pre-prod-only.** `plan_settings_sync` is
   READ-ONLY and returns the planned actions, each with a stable id (`section:op:typeName:itemName`).
   `apply_settings_sync` never accepts request bodies — it **re-plans server-side** and executes only

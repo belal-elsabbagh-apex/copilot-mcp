@@ -19,8 +19,16 @@ interface RegisteredTool {
 }
 
 // Tools that mutate state (everything else is read-only). apply_settings_sync writes
-// additively to pre-prod only.
-const WRITE_TOOLS = new Set(["clone_order", "delete_preprod_order", "apply_settings_sync"]);
+// additively to pre-prod only; the UiPath writes (add_queue_item, delete_queue_item,
+// start_job) are schema-restricted to the pre_prod dev clone.
+const WRITE_TOOLS = new Set([
+  "clone_order",
+  "delete_preprod_order",
+  "apply_settings_sync",
+  "add_queue_item",
+  "delete_queue_item",
+  "start_job",
+]);
 // Tools that touch no external service (pure/local). All others set openWorldHint=true.
 const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections"]);
 const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
@@ -46,6 +54,13 @@ const EXPECTED = [
   "get_order",
   "get_login_token",
   "doctor",
+  "list_queues",
+  "list_processes",
+  "list_triggers",
+  "get_job",
+  "add_queue_item",
+  "delete_queue_item",
+  "start_job",
 ] as const;
 
 describe("server tool registration", () => {
@@ -141,6 +156,45 @@ describe("tool input schemas accept representative payloads", () => {
     list_jobs: {
       valid: { env: "prod", processName: "OPTUM" },
       invalid: { processName: "OPTUM" }, // env is required
+    },
+    list_queues: {
+      valid: { env: "pre_prod", nameContains: "auth" },
+      invalid: { nameContains: "auth" }, // env is required
+    },
+    list_processes: {
+      valid: { env: "pre_prod" },
+      invalid: {}, // env is required
+    },
+    list_triggers: {
+      valid: { env: "pre_prod", queueDefinitionId: 79926 },
+      invalid: { queueDefinitionId: 79926 }, // env is required
+    },
+    get_job: {
+      valid: { env: "pre_prod", jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+      invalid: { jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, // env is required
+    },
+    add_queue_item: {
+      valid: {
+        env: "pre_prod",
+        queueName: "Scratch queue",
+        reference: "TEST-1-abcd1234",
+        specificContent: { orderUid: "abcd1234" },
+      },
+      // env is a z.literal("pre_prod") — prod must be rejected at the schema layer
+      invalid: {
+        env: "prod",
+        queueName: "Scratch queue",
+        reference: "TEST-1-abcd1234",
+        specificContent: { orderUid: "abcd1234" },
+      },
+    },
+    delete_queue_item: {
+      valid: { env: "pre_prod", itemId: 123 },
+      invalid: { env: "prod", itemId: 123 }, // prod rejected by the schema literal
+    },
+    start_job: {
+      valid: { env: "pre_prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
+      invalid: { releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" }, // env is required
     },
   };
 

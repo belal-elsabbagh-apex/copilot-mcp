@@ -54,41 +54,80 @@ export function resolveFolder(env?: Env, folder?: string): string | undefined {
 const odataValues = <T>(data: unknown): T[] =>
   isRecord(data) && Array.isArray(data["value"]) ? (data["value"] as T[]) : [];
 
-// One Orchestrator OData/REST GET. `params` become the OData querystring; `folder`
-// scopes the request to a UiPath folder (falls back to the legacy config folderPath).
-// `orgUnitId` (numeric folder id) is sent as X-UIPATH-OrganizationUnitId — the
-// QueueItems/QueueDefinitions endpoints are addressed by org-unit id, while Jobs
-// accept the folder-path header. Sending both is harmless.
-// Returns parsed JSON, or throws with status + body snippet on a non-2xx.
-async function uipathGet(
+type HttpMethod = "GET" | "POST" | "DELETE";
+
+interface UipathRequestOpts {
+  params?: Record<string, string>; // become the OData querystring
+  body?: unknown; // JSON.stringify'd; adds Content-Type: application/json
+  folder?: string | undefined; // X-UIPATH-FolderPath (falls back to the legacy config folderPath)
+  orgUnitId?: string | undefined; // X-UIPATH-OrganizationUnitId (numeric folder id)
+}
+
+// One Orchestrator OData/REST call. `folder` scopes the request to a UiPath folder;
+// `orgUnitId` is sent as X-UIPATH-OrganizationUnitId — the QueueItems/QueueDefinitions
+// endpoints are addressed by org-unit id, while Jobs accept the folder-path header.
+// Sending both is harmless. Returns parsed JSON (null for an empty body, e.g. a
+// DELETE 204), or throws with method + status + body snippet on a non-2xx.
+async function uipathRequest(
+  method: HttpMethod,
   path: string,
-  params: Record<string, string> = {},
-  folder?: string,
-  orgUnitId = "",
+  opts: UipathRequestOpts = {},
 ): Promise<unknown> {
   const cfg = getUipath();
-  const qs = new URLSearchParams(params).toString();
+  const qs = new URLSearchParams(opts.params ?? {}).toString();
   const url = base() + path + (qs ? `?${qs}` : "");
-  const folderPath = folder ?? cfg.folderPath;
+  const folderPath = opts.folder ?? cfg.folderPath;
+  const hasBody = opts.body !== undefined;
   const res = await fetch(url, {
+    method,
     headers: {
       Authorization: `Bearer ${cfg.bearer}`,
       Accept: "application/json",
       // Folder scoping — copilot-doctor uses the folder-path header. Jobs live in
       // a per-env folder (prod "Authorization" vs dev "Authorization Dev Clone").
       ...(folderPath ? { "X-UIPATH-FolderPath": folderPath } : {}),
-      ...(orgUnitId ? { "X-UIPATH-OrganizationUnitId": orgUnitId } : {}),
+      ...(opts.orgUnitId ? { "X-UIPATH-OrganizationUnitId": opts.orgUnitId } : {}),
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
     },
+    ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
   });
   const text = await res.text();
   if (res.status >= 400) {
-    throw new Error(`UiPath GET ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(`UiPath ${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
   }
+  if (!text) return null;
   try {
     return JSON.parse(text);
   } catch {
     return text;
   }
+}
+
+async function uipathGet(
+  path: string,
+  params: Record<string, string> = {},
+  folder?: string,
+  orgUnitId = "",
+): Promise<unknown> {
+  return uipathRequest("GET", path, { params, folder, orgUnitId });
+}
+
+// Orchestrator writes always carry an explicit FolderScope — unlike the legacy GET
+// helpers there is no folder fallback, so a write can never land in an implicit folder.
+export async function uipathPost(
+  path: string,
+  body: unknown,
+  scope: FolderScope,
+): Promise<unknown> {
+  return uipathRequest("POST", path, {
+    body,
+    folder: scope.folderPath,
+    orgUnitId: scope.orgUnitId,
+  });
+}
+
+export async function uipathDelete(path: string, scope: FolderScope): Promise<unknown> {
+  return uipathRequest("DELETE", path, { folder: scope.folderPath, orgUnitId: scope.orgUnitId });
 }
 
 // All jobs whose OutputArguments contains `orderId`, newest first (capped at
@@ -290,7 +329,7 @@ const recField = (v: unknown, k: string): Record<string, unknown> => {
   return isRecord(r) ? r : {};
 };
 
-const toQueueItem = (raw: unknown): QueueItem => ({
+export const toQueueItem = (raw: unknown): QueueItem => ({
   id: numField(raw, "Id"),
   status: strField(raw, "Status"),
   reference: strField(raw, "Reference"),
@@ -336,6 +375,126 @@ export async function getQueueDefinitionName(
   } catch {
     return "";
   }
+}
+
+// ---- Queues / releases / triggers (discovery reads) ------------------------
+
+// A queue definition (the queue itself, not its items), normalized total.
+export interface QueueDefinition {
+  id: number;
+  name: string;
+  description: string;
+  creationTime: string;
+}
+
+// Queue definitions in a folder, sorted by name. `nameContains` "" = no filter.
+// Dev-clone queue ids differ from the prod ids in the static PORTALS registry, so
+// this is how pre_prod queueDefIds are discovered.
+export async function listQueueDefinitions(
+  scope: FolderScope,
+  nameContains: string,
+  top: number,
+): Promise<QueueDefinition[]> {
+  const params: Record<string, string> = {
+    $orderby: "Name asc",
+    $top: String(top),
+    $select: "Id,Name,Description,CreationTime",
+  };
+  const needle = nameContains.trim();
+  if (needle) params["$filter"] = `contains(Name, '${needle.replace(/'/g, "''")}')`;
+  const data = await uipathGet(
+    "/odata/QueueDefinitions",
+    params,
+    scope.folderPath,
+    scope.orgUnitId,
+  );
+  return odataValues<unknown>(data).map((raw) => ({
+    id: numField(raw, "Id"),
+    name: strField(raw, "Name"),
+    description: strField(raw, "Description"),
+    creationTime: strField(raw, "CreationTime"),
+  }));
+}
+
+// A release ("process" in the Orchestrator UI) — the startable unit a job runs.
+// ProcessVersion is the package version the release is pinned to (a job resolves
+// it at START time, so verify the pin here before start_job).
+export interface UiPathRelease {
+  id: number;
+  key: string; // GUID — what StartJobs takes as ReleaseKey
+  name: string;
+  processKey: string; // package id
+  processVersion: string;
+  isLatestVersion: boolean;
+}
+
+// Releases (processes) in a folder, sorted by name. `nameContains` "" = no filter.
+export async function listReleases(
+  scope: FolderScope,
+  nameContains: string,
+  top: number,
+): Promise<UiPathRelease[]> {
+  const params: Record<string, string> = {
+    $orderby: "Name asc",
+    $top: String(top),
+    $select: "Id,Key,Name,ProcessKey,ProcessVersion,IsLatestVersion",
+  };
+  const needle = nameContains.trim();
+  if (needle) params["$filter"] = `contains(Name, '${needle.replace(/'/g, "''")}')`;
+  const data = await uipathGet("/odata/Releases", params, scope.folderPath, scope.orgUnitId);
+  return odataValues<unknown>(data).map((raw) => {
+    const r = isRecord(raw) ? raw : {};
+    return {
+      id: numField(raw, "Id"),
+      key: strField(raw, "Key"),
+      name: strField(raw, "Name"),
+      processKey: strField(raw, "ProcessKey"),
+      processVersion: strField(raw, "ProcessVersion"),
+      isLatestVersion: r["IsLatestVersion"] === true,
+    };
+  });
+}
+
+// A trigger (ProcessSchedules row). Queue triggers carry a non-zero
+// queueDefinitionId; time triggers have 0/"" sentinels there.
+export interface UiPathTrigger {
+  id: number;
+  name: string;
+  enabled: boolean;
+  releaseId: number;
+  releaseKey: string;
+  releaseName: string;
+  queueDefinitionId: number;
+  queueDefinitionName: string;
+  itemsActivationThreshold: number;
+  maxJobsForActivation: number;
+}
+
+// Triggers in a folder. There is no separate queue-trigger collection in the OData
+// API — queue triggers are ProcessSchedules rows with a QueueDefinitionId. This is
+// the "does the queue trigger's ReleaseId point at MY dev release?" check.
+export async function listTriggers(scope: FolderScope, top: number): Promise<UiPathTrigger[]> {
+  const data = await uipathGet(
+    "/odata/ProcessSchedules",
+    { $top: String(top) },
+    scope.folderPath,
+    scope.orgUnitId,
+  );
+  return odataValues<unknown>(data).map((raw) => {
+    const r = isRecord(raw) ? raw : {};
+    return {
+      id: numField(raw, "Id"),
+      name: strField(raw, "Name"),
+      enabled: r["Enabled"] === true,
+      releaseId: numField(raw, "ReleaseId"),
+      releaseKey: strField(raw, "ReleaseKey"),
+      releaseName: strField(raw, "ReleaseName"),
+      queueDefinitionId: numField(raw, "QueueDefinitionId"),
+      queueDefinitionName: strField(raw, "QueueDefinitionName"),
+      itemsActivationThreshold: numField(raw, "ItemsActivationThreshold"),
+      maxJobsForActivation: numField(raw, "MaxJobsForActivation"),
+    };
+  });
 }
 
 // Queue items for a queue, newest first. Filtered by QueueDefinitionId and, when
