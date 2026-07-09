@@ -90,23 +90,12 @@ Logging is silent by default so it never corrupts the stdio JSON-RPC stream. Set
 A `pre-commit` hook (lefthook) runs `biome check` + `typecheck` on commit; CI
 (`.github/workflows/ci.yml`) runs typecheck/lint/build/test on every PR and push to `main`.
 
-## Installing from GitHub Packages
+## Installing — run directly from the release asset
 
-The package is public, but GitHub's npm registry requires authentication even for public
-packages — installing needs a GitHub token with the `read:packages` scope.
-
-Add to the **consumer** repo's `.npmrc`:
-
-```ini
-@belal-elsabbagh-apex:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
-```
-
-Then `export NODE_AUTH_TOKEN=<your PAT>` and install:
-
-```bash
-bun add -d @belal-elsabbagh-apex/copilot-mcp
-```
+Every release attaches a self-contained tarball as a GitHub Release asset, and the repo is
+public, so `npx`/`bunx` can run it straight from the download URL — **no registry, no
+`.npmrc`, no auth token**. The `releases/latest/download/copilot-mcp.tgz` URL always points
+at the newest release; swap in a `download/vX.Y.Z/…` URL to pin a version.
 
 ### Wire into `.mcp.json`
 
@@ -115,7 +104,10 @@ bun add -d @belal-elsabbagh-apex/copilot-mcp
   "mcpServers": {
     "copilot": {
       "command": "npx",
-      "args": ["-y", "@belal-elsabbagh-apex/copilot-mcp"],
+      "args": [
+        "-y",
+        "https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest/download/copilot-mcp.tgz"
+      ],
       "env": {
         "COPILOT_MCP_CONFIG": "/abs/path/to/config.local.json"
       }
@@ -124,9 +116,13 @@ bun add -d @belal-elsabbagh-apex/copilot-mcp
 }
 ```
 
-`npx` and `bunx` are interchangeable here (the published bin, `dist/server.js`, is a
-plain node ESM entry). Use `COPILOT_MCP_LOCAL_DIR` instead of `COPILOT_MCP_CONFIG` for
-the split legacy files.
+`npx` and `bunx` are interchangeable here (the published bin, `dist/server.js`, is a plain
+node ESM entry). To pin a specific version, use the version-stamped asset instead of
+`latest`, e.g. `.../releases/download/v1.14.0/belal-elsabbagh-apex-copilot-mcp-1.14.0.tgz`.
+Use `COPILOT_MCP_LOCAL_DIR` instead of `COPILOT_MCP_CONFIG` for the split legacy files.
+
+The package is also published to this repo's GitHub Packages registry (see below), but that
+path needs a `read:packages` token; the release-asset URL above is the zero-auth default.
 
 ## Publishing
 
@@ -141,7 +137,10 @@ git push origin v1.2.0
 That one tag push fans out to two workflows (both keyed off the tag, because a
 `GITHUB_TOKEN`-created release does not trigger other workflows):
 
-- **Release on tag** (`release.yml`) — creates a GitHub Release with auto-generated notes.
+- **Release on tag** (`release.yml`) — builds the bundle, `npm pack`s it, and creates a GitHub
+  Release with auto-generated notes. It attaches two tarball assets: the version-stamped
+  `belal-elsabbagh-apex-copilot-mcp-X.Y.Z.tgz` (for pinning) and a stable-named
+  `copilot-mcp.tgz` that backs the `releases/latest/download/copilot-mcp.tgz` URL used above.
 - **Publish** (`publish.yml`) — typechecks, builds, and runs `bun publish` to GitHub
   Packages using the repo's `GITHUB_TOKEN` (`packages: write`); the package inherits the
   repository's public visibility. Also runnable manually via **workflow_dispatch**.
