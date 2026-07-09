@@ -31,7 +31,7 @@ const WRITE_TOOLS = new Set([
   "start_job",
 ]);
 // Tools that touch no external service (pure/local). All others set openWorldHint=true.
-const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections"]);
+const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections", "build_mcp_issue"]);
 const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
   ._registeredTools;
 
@@ -63,6 +63,7 @@ const EXPECTED = [
   "add_queue_item",
   "delete_queue_item",
   "start_job",
+  "build_mcp_issue",
 ] as const;
 
 describe("server tool registration", () => {
@@ -217,6 +218,15 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { env: "pre_prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
       // prod rejected by the schema literal (env is also required)
       invalid: { env: "prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
+    },
+    build_mcp_issue: {
+      valid: {
+        kind: "feedback",
+        title: "clone_order output is hard to scan",
+        details:
+          "The per-order rows mix successes and failures; a split summary would read better.",
+      },
+      invalid: { kind: "complaint", title: "x", details: "too short" },
     },
   };
 

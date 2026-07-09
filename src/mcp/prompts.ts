@@ -168,6 +168,35 @@ export function registerPrompts(server: McpServer): void {
     },
   );
 
+  // ---- send-mcp-feedback ---------------------------------------------------
+  server.registerPrompt(
+    "send-mcp-feedback",
+    {
+      title: "File feedback or a bug on this MCP server",
+      description:
+        "Turn the user's report about copilot-mcp itself — a bug or general feedback (idea, " +
+        "friction, docs gap) — into a GitHub issue on the server's feedback repo.",
+      argsSchema: {
+        summary: z.string().min(1).describe("One-line summary of the feedback or bug"),
+        kind: completable(
+          z.string().optional().describe("bug | feedback (default: feedback)"),
+          () => ["bug", "feedback"],
+        ),
+      },
+    },
+    ({ summary, kind }) => {
+      const k = kind === "bug" ? "bug" : "feedback";
+      return userText(
+        `File ${k === "bug" ? "a bug report" : "feedback"} about the copilot-mcp server itself: "${summary}".\n` +
+          `1. Gather the substance from the user/conversation: what happened or what they want changed, expected vs actual, and the related tool name if any. Never include credentials or PHI.\n` +
+          `2. Call build_mcp_issue with kind="${k}", a short title, and those details. It returns {repo, title, body, labels, url} and posts NOTHING.\n` +
+          `3. If a GitHub MCP server (or gh) with access to that repo is connected, search for an existing open issue on the same topic first — comment there instead of duplicating — else create the issue from the payload's title/body/labels and report its number/URL.\n` +
+          `4. If no GitHub tooling is available, give the user the prefilled \`url\` to open (filing requires their GitHub account to have access to the repo).\n` +
+          `Only write to GitHub — take no Copilot/UiPath action.`,
+      );
+    },
+  );
+
   // ---- report-faulted-uipath-jobs ----------------------------------------
   server.registerPrompt(
     "report-faulted-uipath-jobs",

@@ -179,7 +179,7 @@ export function loadConfig(): Config {
     } catch (e2) {
       if (e2 instanceof ConfigMissing) {
         throw new Error(
-          `No config found. Put a config.local.json in the project root (${process.cwd()}), or set COPILOT_MCP_CONFIG to a config file (see config.example.json), or COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Missing: ${e2.message}`,
+          `No config found. Set COPILOT_MCP_CONFIG to a JSON config file, or put a config.local.json in the working directory (${process.cwd()}), or set COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Read the MCP resource copilot://reference/config-guide for the exact shape, field docs, and setup steps. The config is re-read on the next call — no server restart needed. Verify with the doctor tool once written. Missing: ${e2.message}`,
         );
       }
       throw e2;
@@ -199,6 +199,17 @@ export function loadConfig(): Config {
 // Clear the memoized config. Intended for tests that swap COPILOT_MCP_CONFIG.
 export function resetConfigCache(): void {
   _config = undefined;
+}
+
+// Non-throwing config probe for startup guidance (server instructions / doctor).
+// `ok:false` carries the same actionable message loadConfig would throw.
+export function configStatus(): { ok: boolean; error?: string } {
+  try {
+    loadConfig();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export const getUipath = (): UipathConfig => loadConfig().uipath;

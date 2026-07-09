@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetConfigCache } from "../config/config.js";
 import { NotImplementedError } from "../copilot/settings.js";
-import { classify, ExpectedError, issueUrl, REPO_URL, toolError } from "./feedback.js";
+import {
+  classify,
+  ExpectedError,
+  formatMcpIssue,
+  issueUrl,
+  REPO_URL,
+  toolError,
+} from "./feedback.js";
 
 // Parse the JSON body that toolError() emits and pull out the reportIssue block (if any).
 function decode(res: { content: { text: string }[] }): {
@@ -61,6 +68,44 @@ describe("issueUrl", () => {
       repositoryUrl: "https://github.com/acme/repo/",
     });
     expect(url.startsWith("https://github.com/acme/repo/issues/new?")).toBe(true);
+  });
+});
+
+describe("formatMcpIssue", () => {
+  test("bug kind: bug label, [bug] title, tool + version in body, matching url", () => {
+    const p = formatMcpIssue({
+      kind: "bug",
+      title: "clone_order loses ICD codes",
+      details: "Cloned order abc had 3 ICDs in prod but 0 in pre-prod.",
+      tool: "clone_order",
+      version: "9.9.9",
+    });
+    expect(p.repo).toBe(REPO_URL);
+    expect(p.labels).toEqual(["bug"]);
+    expect(p.title).toBe("[bug] clone_order loses ICD codes");
+    expect(p.body).toContain("`clone_order`");
+    expect(p.body).toContain("9.9.9");
+    expect(p.body).toContain("0 in pre-prod");
+    const params = new URLSearchParams(p.url.split("?")[1]);
+    expect(p.url.startsWith(`${REPO_URL}/issues/new?`)).toBe(true);
+    expect(params.get("title")).toBe(p.title);
+    expect(params.get("body")).toBe(p.body);
+    expect(params.get("labels")).toBe("bug");
+  });
+
+  test("feedback kind: enhancement label, no tool line, repositoryUrl override", () => {
+    const p = formatMcpIssue({
+      kind: "feedback",
+      title: "add a dry-run flag to apply_settings_sync",
+      details: "A dry-run would let us preview exact request bodies before applying.",
+      version: "1.0.0",
+      repositoryUrl: "https://github.com/acme/repo/",
+    });
+    expect(p.repo).toBe("https://github.com/acme/repo");
+    expect(p.labels).toEqual(["enhancement"]);
+    expect(p.title).toBe("[feedback] add a dry-run flag to apply_settings_sync");
+    expect(p.body).not.toContain("**Tool:**");
+    expect(p.url.startsWith("https://github.com/acme/repo/issues/new?")).toBe(true);
   });
 });
 

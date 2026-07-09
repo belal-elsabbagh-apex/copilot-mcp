@@ -45,6 +45,11 @@ export function classify(e: unknown): "expected" | "unknown" {
 
 const firstLine = (s: string): string => (s.split("\n")[0] ?? s).slice(0, 120);
 
+const newIssueUrl = (repo: string, title: string, body: string, labels: string[]): string => {
+  const q = `title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${encodeURIComponent(labels.join(","))}`;
+  return `${repo}/issues/new?${q}`;
+};
+
 /**
  * Build a prefilled GitHub new-issue URL (title + body + bug label). Carries only the
  * tool name, the error message, and the server version — no tool args, no credentials.
@@ -68,8 +73,46 @@ export function issueUrl(opts: {
     "",
     "_Auto-suggested by copilot-mcp on an unexpected tool failure. Please add what you were doing._",
   ].join("\n");
-  const q = `title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=bug`;
-  return `${base}/issues/new?${q}`;
+  return newIssueUrl(base, title, body, ["bug"]);
+}
+
+export type McpIssueKind = "bug" | "feedback";
+
+export interface McpIssuePayload {
+  repo: string;
+  title: string;
+  body: string;
+  labels: string[];
+  url: string; // prefilled new-issue link — works with no GitHub tooling in the host
+}
+
+/**
+ * Build a GitHub issue payload for a user-initiated report about this MCP server —
+ * a bug OR general feedback (idea, friction, docs gap); no tool failure required.
+ * BUILD ONLY — posting is the host's job (GitHub MCP / gh), or the user clicks `url`.
+ * Deliberately independent of feedback.enabled: that flag only gates the automatic
+ * nudge on failures, never an explicit ask.
+ */
+export function formatMcpIssue(opts: {
+  kind: McpIssueKind;
+  title: string;
+  details: string;
+  tool?: string;
+  version: string;
+  repositoryUrl?: string;
+}): McpIssuePayload {
+  const repo = (opts.repositoryUrl ?? REPO_URL).replace(/\/+$/, "");
+  const labels = opts.kind === "bug" ? ["bug"] : ["enhancement"];
+  const title = `[${opts.kind}] ${firstLine(opts.title)}`;
+  const body = [
+    ...(opts.tool ? [`**Tool:** \`${opts.tool}\``] : []),
+    `**Server version:** ${opts.version}`,
+    "",
+    opts.details,
+    "",
+    "_Filed via copilot-mcp build_mcp_issue._",
+  ].join("\n");
+  return { repo, title, body, labels, url: newIssueUrl(repo, title, body, labels) };
 }
 
 type ErrorResponse = {

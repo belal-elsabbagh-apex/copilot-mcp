@@ -525,3 +525,70 @@ export const SAFETY_RULES = {
     "Every posted queue item passes the test-safety guard: IsApproved forced false, serverURL/queueUrl pinned to the configured pre-prod values, <TO-FILL> placeholders rejected.",
   ],
 } as const;
+
+// ---- Config setup guide ----------------------------------------------------
+// Everything an agent needs to write a working config from scratch when the
+// server starts without one. Mirrors config.example.json + config.ts schema —
+// keep the three in sync. Placeholders only; never put real values here.
+
+export const CONFIG_GUIDE = {
+  howItLoads: [
+    "The server reads ONE JSON config file, checked in this order: the file at $COPILOT_MCP_CONFIG; else config.local.json in the server's working directory; else the legacy split files in $COPILOT_MCP_LOCAL_DIR (order-copy-credentials.json + uipath-config.json).",
+    "The config is loaded lazily on the first tool call and retried on every call until it loads — after writing the file you do NOT need to restart the server.",
+    "Validation errors name the exact field and path; a missing file lists all three lookup options.",
+  ],
+  steps: [
+    "1. Ask the user for the values marked <ASK-USER> below — credentials and tokens cannot be guessed and must never be invented.",
+    "2. Write the JSON file (template below) somewhere private and gitignored, e.g. ~/.config/copilot-mcp/config.json or config.local.json next to the server.",
+    "3. If not using the default config.local.json location, set COPILOT_MCP_CONFIG to the file's absolute path in the MCP host's server config (the `env` block of this server's entry).",
+    "4. Call the doctor tool (profile=<one of copilot.profiles>) to verify: it logs into the Copilot BE for both envs and probes both UiPath folders.",
+  ],
+  template: {
+    copilot: {
+      profiles: {
+        "<account-name>": {
+          prod: {
+            be: "https://prod-be-batch.ehrcopilotbe.com",
+            email: "<ASK-USER: prod physician login email>",
+            password: "<ASK-USER: prod password>",
+            fe: "https://copilot.apexmedical.ai",
+          },
+          pre_prod: {
+            be: "https://pre-prod-be-batch.ehrcopilotbe.com",
+            email: "<ASK-USER: pre-prod physician login email>",
+            password: "<ASK-USER: pre-prod password>",
+            fe: "https://pre-prod-copilot.apexmedicalai.com",
+          },
+        },
+      },
+    },
+    uipath: {
+      orchestratorUrl: "https://cloud.uipath.com/<org>/<tenant>/orchestrator_",
+      bearer: "<ASK-USER: UiPath PAT with OR.Jobs/OR.Queues read scope>",
+      folderPathByEnv: { prod: "Authorization", pre_prod: "Authorization Dev Clone" },
+    },
+  },
+  fields: {
+    "copilot.profiles":
+      "Named credential sets ('profiles') — every Copilot tool takes a required `profile` arg that must match a key here. Each profile needs BOTH prod and pre_prod creds.",
+    "copilot.prod / copilot.pre_prod":
+      "Optional top-level fallback creds used only when a caller could pass no profile; profiles are the normal path.",
+    "uipath.orchestratorUrl":
+      "Tenant Orchestrator base — https://cloud.uipath.com/{org}/{tenant}/orchestrator_",
+    "uipath.bearer": "Single global UiPath token; UiPath tools take env but no profile.",
+    "uipath.folderPathByEnv":
+      "Folder per env; defaults exist for the Authorization folders if omitted.",
+    "uipath.folderIdByEnv":
+      "Optional numeric OrganizationUnitId per env (defaults: prod 231517 / pre_prod 434039).",
+    "uipath.queueUrl / uipath.addQueueItemPath / uipath.serverUrlByEnv":
+      "Only needed for build_queue_item / add_queue_item; the safety guard pins posted items to these pre-prod values.",
+    overrides: "Optional per-prodUid clone remaps (cross-env reference uids) for clone_order.",
+    feedback:
+      "Optional on-failure GitHub-issue feedback; on by default (feedback.enabled=false disables). When a tool fails in a way that looks like a bug in this server, the error payload carries reportIssue.url — a prefilled GitHub new-issue link (tool name + error + server version only, no args/credentials) targeting feedback.repositoryUrl (default: this server's repo). Surface or open it so bugs get reported.",
+  },
+  rules: [
+    "NEVER invent credentials, tokens, or emails — every <ASK-USER> value must come from the user.",
+    "The config holds secrets: keep it out of version control and never echo passwords/bearer back in chat or logs.",
+    "Prod creds grant READ access paths only in practice here: this server's write tools are hard-wired to pre-prod / the dev clone and refuse prod at both the schema and domain layer.",
+  ],
+} as const;

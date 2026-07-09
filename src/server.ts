@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { resolveCreds } from "./config/config.js";
+import { configStatus, getFeedbackConfig, resolveCreds } from "./config/config.js";
 import { analyzeOrderExecution } from "./copilot/analyze.js";
 import {
   assertPreProdClient,
@@ -63,10 +63,11 @@ import {
   planSettingsSyncOp,
 } from "./copilot/settings.js";
 import { findStuckOrders } from "./copilot/sweep.js";
-import { toolError } from "./mcp/feedback.js";
+import { formatMcpIssue, toolError } from "./mcp/feedback.js";
 import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
 import { registerPrompts } from "./mcp/prompts.js";
 import {
+  CONFIG_GUIDE,
   ORDER_LIFECYCLE,
   PORTALS,
   type PortalEntry,
@@ -151,11 +152,42 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // sync with package.json on release.
 const VERSION = "1.12.0";
 
+// Initialize-time guidance for the connected agent. Instructions are static per
+// session, so probe the config once at startup: an unconfigured server announces
+// the self-setup path (config-guide resource -> write file -> doctor) instead of
+// letting every tool fail cryptically. Config loading itself stays lazy and is
+// retried on each call, so setup completes without a restart.
+function buildInstructions(): string {
+  const base =
+    "EHR Copilot order operations + UiPath Orchestrator execution analysis. " +
+    "Every Copilot tool requires an explicit env (prod | pre_prod) and a profile from the config — never assume either.\n\n" +
+    "PROD IS READ-ONLY BY DESIGN. This server cannot mutate prod: every write path — order minting/deletes, " +
+    "settings sync, queue-item posts/deletes, job starts — targets pre-prod / the UiPath dev-clone folder only, " +
+    "enforced at the tool schema AND asserted again in the domain layer. Posted queue items additionally pass a " +
+    "safety guard (IsApproved forced false, callback URLs pinned to pre-prod). Reading prod is normal and safe; " +
+    "never work around a pre-prod-only refusal — it is the design, not a bug.\n\n" +
+    "FEEDBACK: when a tool fails for a reason that looks like a bug in this server (not bad input, config, or an " +
+    "upstream HTTP error), the error payload includes a `reportIssue` block with a prefilled GitHub new-issue URL " +
+    "(carries only the tool name, error message, and server version — no args or credentials). Surface that link " +
+    "to the user or open the issue directly so the bug gets reported; expected/user-actionable failures carry no such block. " +
+    "The user can also ask to file a bug or general feedback about this server at any time — no failure required: " +
+    "use build_mcp_issue (or the send-mcp-feedback prompt) to compose the issue, then post it via the host's GitHub tooling or hand over the prefilled URL.\n\n" +
+    "Stable facts (portals, folders, schemas, safety rules, config guide) are resources under copilot://.";
+  const cfg = configStatus();
+  if (cfg.ok) return base;
+  return (
+    `${base}\n\nNO CONFIG IS LOADED — every tool will fail until one is provided (${cfg.error ?? "no config found"}).\n` +
+    "To set this server up: read the copilot://reference/config-guide resource, ask the user for the credential/token values (never invent them), " +
+    "write the JSON config file it describes, then call the doctor tool to verify connectivity. " +
+    "The config is re-read on the next call — no restart needed."
+  );
+}
+
 export const server = new McpServer(
   { name: "copilot", version: VERSION },
   // `logging` must be declared explicitly for notifications/message + logging/setLevel
   // to be advertised; tools/resources/prompts/completions are auto-negotiated by McpServer.
-  { capabilities: { logging: {} } },
+  { capabilities: { logging: {} }, instructions: buildInstructions() },
 );
 
 // Wire the logging/setLevel handler and register the workflow prompts. Tool/resource
@@ -674,6 +706,13 @@ jsonResource(
   "Safety rules",
   "Invariants that keep test/dev activity from touching prod (IsApproved=false, dry-run gate, ...).",
   SAFETY_RULES,
+);
+jsonResource(
+  "config-guide",
+  "copilot://reference/config-guide",
+  "Config setup guide",
+  "How to configure this server from scratch: load order, JSON template with <ASK-USER> placeholders, field docs, and verification steps (doctor).",
+  CONFIG_GUIDE,
 );
 
 // ---- Resource template: per-portal lookup --------------------------------
@@ -1745,6 +1784,66 @@ server.registerTool(
       return ok({ env, profile, token });
     } catch (e) {
       return toolError("get_login_token", e, VERSION);
+    }
+  },
+);
+
+// ---- build_mcp_issue -------------------------------------------------------
+server.registerTool(
+  "build_mcp_issue",
+  {
+    title: "Build a GitHub issue for feedback on this MCP server",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false, // pure string building — touches no external service
+    },
+    description:
+      "Compose a GitHub issue about THIS MCP server from a user's report — a bug OR general " +
+      "feedback (ideas, friction, docs gaps); no tool failure required. BUILD ONLY — posts " +
+      "nothing and holds no GitHub credentials: create the issue via the host's GitHub tooling " +
+      "(GitHub MCP server / gh) from the returned title/body/labels, or give the user `url` (a " +
+      "prefilled new-issue link; filing needs a GitHub account with access to the target repo). " +
+      "Targets feedback.repositoryUrl (default: the copilot-mcp repo); works even with no config " +
+      "loaded. Never put credentials or PHI in the details. Returns {repo, title, body, labels, url}.",
+    inputSchema: {
+      kind: z
+        .enum(["bug", "feedback"])
+        .describe("bug = something is wrong; feedback = idea / improvement / general comment"),
+      title: z.string().min(8).describe("Short issue summary"),
+      details: z
+        .string()
+        .min(20)
+        .describe(
+          "The report itself: what happened or what is wanted, expected vs actual, steps if relevant. No credentials or PHI.",
+        ),
+      tool: z
+        .string()
+        .optional()
+        .describe("Related copilot-mcp tool name, if the report concerns one"),
+    },
+  },
+  async ({ kind, title, details, tool }) => {
+    try {
+      let repositoryUrl: string | undefined;
+      try {
+        repositoryUrl = getFeedbackConfig().repositoryUrl;
+      } catch {
+        // no config loaded — feedback must still work; fall back to the default repo
+      }
+      return ok(
+        formatMcpIssue({
+          kind,
+          title,
+          details,
+          version: VERSION,
+          ...(tool ? { tool } : {}),
+          ...(repositoryUrl ? { repositoryUrl } : {}),
+        }),
+      );
+    } catch (e) {
+      return toolError("build_mcp_issue", e, VERSION);
     }
   },
 );
