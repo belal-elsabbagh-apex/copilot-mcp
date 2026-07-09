@@ -50,7 +50,7 @@ args. Two ways to provide it:
 2. **Split legacy files:** set `COPILOT_MCP_LOCAL_DIR` to a directory containing
    `order-copy-credentials.json` + `uipath-config.json` (+ optional `overrides.json`).
 
-The `uipath.noteBucket / queueUrl / addQueueItemPath / serverUrlByEnv` fields are only
+The `uipath.queueUrl / addQueueItemPath / serverUrlByEnv` fields are only
 required by `build_queue_item`. `overrides` (per-prodUid clone remaps) is optional.
 
 When a tool fails for a reason that looks like a bug in this server (an unexpected

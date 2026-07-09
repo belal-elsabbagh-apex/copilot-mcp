@@ -4,10 +4,9 @@ import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
 const LIMITS: QueueSafetyLimits = {
   preProdServerUrl: "https://pre-prod-be-batch.example.com",
   queueUrl: "https://sqs.example.com/dev-queue",
-  noteBucket: "dev-notes",
 };
 
-const NO_LIMITS: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "", noteBucket: "" };
+const NO_LIMITS: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "" };
 
 describe("guardQueueItemSafety — force mode", () => {
   test("forces IsApproved=false and reports it in forced", () => {
@@ -44,7 +43,6 @@ describe("guardQueueItemSafety — force mode", () => {
     const sc = {
       serverURL: "https://prod.example.com",
       queueUrl: "https://sqs.example.com/prod",
-      NoteBucketPath: "s3://prod-bucket/x.pdf",
       orderUid: "<TO-FILL>",
     };
     expect(() => guardQueueItemSafety(sc, "force", LIMITS)).not.toThrow();
@@ -59,7 +57,6 @@ describe("guardQueueItemSafety — preProdPost mode", () => {
         orderUid: "abc-123",
         serverURL: LIMITS.preProdServerUrl,
         queueUrl: LIMITS.queueUrl,
-        NoteBucketPath: "s3://dev-notes/acct/orders/abc-123/auth/fax/authFax.pdf",
       },
       "preProdPost",
       LIMITS,
@@ -68,9 +65,9 @@ describe("guardQueueItemSafety — preProdPost mode", () => {
     expect(out.specificContent["IsApproved"]).toBe(false);
   });
 
-  test("accepts empty serverURL/queueUrl/NoteBucketPath (skill fixtures keep them blank)", () => {
+  test("accepts empty serverURL/queueUrl (skill fixtures keep them blank)", () => {
     const out = guardQueueItemSafety(
-      { IsApproved: false, orderUid: "abc", serverURL: "", queueUrl: "", NoteBucketPath: "" },
+      { IsApproved: false, orderUid: "abc", serverURL: "", queueUrl: "" },
       "preProdPost",
       NO_LIMITS,
     );
@@ -105,18 +102,6 @@ describe("guardQueueItemSafety — preProdPost mode", () => {
     expect(() =>
       guardQueueItemSafety({ queueUrl: "https://sqs.example.com/dev" }, "preProdPost", NO_LIMITS),
     ).toThrow(/queueUrl .* must be empty/);
-  });
-
-  test("rejects a NoteBucketPath outside the configured bucket", () => {
-    expect(() =>
-      guardQueueItemSafety({ NoteBucketPath: "s3://prod-bucket/x.pdf" }, "preProdPost", LIMITS),
-    ).toThrow(/outside the configured bucket 's3:\/\/dev-notes\/'/);
-  });
-
-  test("rejects any NoteBucketPath when uipath.noteBucket is unconfigured", () => {
-    expect(() =>
-      guardQueueItemSafety({ NoteBucketPath: "s3://dev-notes/x.pdf" }, "preProdPost", NO_LIMITS),
-    ).toThrow(/NoteBucketPath .* must be empty/);
   });
 
   test("rejects <TO-FILL> placeholders and names the keys", () => {

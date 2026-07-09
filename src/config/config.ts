@@ -60,7 +60,6 @@ const UipathSchema = z
       .partial()
       .optional(),
     // Extra fields used ONLY by build_queue_item (optional for analyze-only setups):
-    noteBucket: z.string().min(1).optional(),
     queueUrl: z.string().min(1).optional(),
     addQueueItemPath: z.string().min(1).optional(),
     serverUrlByEnv: z

@@ -3,15 +3,14 @@
 //   - "force" (env-agnostic): pull_queue_item / build_queue_item — force IsApproved=false
 //     so a test run can never submit a real auth.
 //   - "preProdPost" (add_queue_item): force, PLUS hard asserts that the item cannot
-//     point a dev-clone robot at prod — serverURL/queueUrl/NoteBucketPath must match
-//     the configured pre-prod values, and no `<TO-FILL>` placeholders may remain.
+//     point a dev-clone robot at prod — serverURL/queueUrl must match the configured
+//     pre-prod values, and no `<TO-FILL>` placeholders may remain.
 //
 // Pure and config-free: the caller injects the configured limits.
 
 export interface QueueSafetyLimits {
   preProdServerUrl: string; // config uipath.serverUrlByEnv?.pre_prod ?? ""
   queueUrl: string; // config uipath.queueUrl ?? ""
-  noteBucket: string; // config uipath.noteBucket ?? ""
 }
 
 export type SafetyMode = "force" | "preProdPost";
@@ -31,7 +30,7 @@ const PLACEHOLDER_RE = /<\s*TO[-_ ]?FILL/i;
 export function guardQueueItemSafety(
   sc: Record<string, unknown>,
   mode: SafetyMode,
-  limits: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "", noteBucket: "" },
+  limits: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "" },
 ): GuardedContent {
   const forced: string[] = [];
   if (sc["IsApproved"] !== false) forced.push("IsApproved");
@@ -65,19 +64,6 @@ export function guardQueueItemSafety(
         ? `queueUrl '${queueUrl}' is neither empty nor the configured uipath.queueUrl`
         : `queueUrl '${queueUrl}' must be empty (uipath.queueUrl is not configured)`,
     );
-  }
-
-  const notePath = str("NoteBucketPath");
-  if (notePath) {
-    if (!limits.noteBucket) {
-      violations.push(
-        `NoteBucketPath '${notePath}' must be empty (uipath.noteBucket is not configured)`,
-      );
-    } else if (!notePath.startsWith(`s3://${limits.noteBucket}/`)) {
-      violations.push(
-        `NoteBucketPath '${notePath}' is outside the configured bucket 's3://${limits.noteBucket}/'`,
-      );
-    }
   }
 
   const placeholderKeys = Object.keys(sc).filter((k) => {

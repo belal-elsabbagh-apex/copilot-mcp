@@ -51,21 +51,12 @@ export function splitName(full: string | undefined): { last: string; first: stri
   return { last, first };
 }
 
-// account slug for the S3 path: parse the clinic-logo CDN url, else fall back to profile name
-function accountSlug(o: BeOrder, profile: string | null): string {
-  const url = o.faxCoverJSON?.logoURL ?? o.referralFormJSON?.logoURL ?? "";
-  const m = String(url).match(/ehrcopilotbe\.com\/([^/]+)\//);
-  return m?.[1] ?? (profile ?? "").toLowerCase() ?? "default";
-}
-
 // Require the queue-build-specific UiPath fields (only needed by this tool).
 function requireQueueFields(
   u: UipathConfig,
 ): asserts u is UipathConfig &
-  Required<Pick<UipathConfig, "noteBucket" | "queueUrl" | "addQueueItemPath" | "folderPath">> {
-  const missing = (["noteBucket", "queueUrl", "addQueueItemPath", "folderPath"] as const).filter(
-    (k) => !u[k],
-  );
+  Required<Pick<UipathConfig, "queueUrl" | "addQueueItemPath" | "folderPath">> {
+  const missing = (["queueUrl", "addQueueItemPath", "folderPath"] as const).filter((k) => !u[k]);
   if (missing.length)
     throw new Error(
       `uipath config is missing fields required for build_queue_item: ${missing.join(", ")}. ` +
@@ -129,7 +120,6 @@ export async function buildQueueItem(
 
   const s = (v: unknown): string => (v == null ? "" : String(v));
   const fromName = s(from["name"]);
-  const account = accountSlug(o, profile);
   const built = {
     DOS: dos,
     DescriptionOfService: JSON.stringify(cpts.map((c) => c.description ?? "")),
@@ -147,7 +137,6 @@ export async function buildQueueItem(
     MemberID: o.insurance?.memberId ?? "",
     MemberLastName: member.last,
     MemberPhone: s(form.patient?.phoneNumber) || o.patient?.patientPhoneNumber || "",
-    NoteBucketPath: `s3://${uipath.noteBucket}/${account}/orders/${orderUid}/auth/fax/authFax.pdf`,
     OfficeComments: o.comments ?? "",
     ProviderAddress: s(from["address"]),
     ProviderCity: "",
@@ -209,7 +198,6 @@ export async function buildQueueItem(
     meta: {
       profile: profile ?? "(default)",
       env,
-      account,
       physicianId,
       queueName: payload.itemData.Name,
       orderStatus: o.status,

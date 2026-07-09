@@ -1157,8 +1157,8 @@ server.registerTool(
     description:
       "POST one item to a UiPath queue in the DEV-CLONE folder (pre_prod ONLY — the schema " +
       "rejects prod). Every payload passes the test-safety guard first: IsApproved is forced " +
-      "false; a non-empty serverURL/queueUrl/NoteBucketPath must match the config's pre-prod " +
-      "values; <TO-FILL> placeholders are rejected. To post a build_queue_item result, pass " +
+      "false; a non-empty serverURL/queueUrl must match the config's pre-prod values; " +
+      "<TO-FILL> placeholders are rejected. To post a build_queue_item result, pass " +
       "payload.itemData.Name as queueName, payload.itemData.Reference as reference and " +
       "payload.itemData.SpecificContent as specificContent. When enqueueing many items, pace " +
       "~1/s. Returns {env, queueName, reference, itemId, status, forced}.",

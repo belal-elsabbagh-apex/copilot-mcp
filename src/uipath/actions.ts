@@ -35,7 +35,6 @@ function safetyLimits(): QueueSafetyLimits {
   return {
     preProdServerUrl: cfg.serverUrlByEnv?.pre_prod ?? "",
     queueUrl: cfg.queueUrl ?? "",
-    noteBucket: cfg.noteBucket ?? "",
   };
 }
 
@@ -78,8 +77,8 @@ export function buildAddQueueItemBody(
 }
 
 // POST one item to a dev-clone queue. Every payload passes the test-safety guard
-// first (IsApproved forced false; serverURL/queueUrl/NoteBucketPath pinned to the
-// configured pre-prod values; <TO-FILL> placeholders rejected).
+// first (IsApproved forced false; serverURL/queueUrl pinned to the configured
+// pre-prod values; <TO-FILL> placeholders rejected).
 export async function addQueueItem(args: AddQueueItemArgs): Promise<AddQueueItemResult> {
   assertPreProd(args.env);
   if (!args.queueName.trim()) throw new Error("queueName is required");

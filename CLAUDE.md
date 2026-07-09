@@ -93,8 +93,8 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` in the domain
   function. Every posted SpecificContent passes `guardQueueItemSafety` (`uipath/safety.ts`, pure,
   unit-tested — the single enforcement point also used by `build_queue_item`/`pull_queue_item`):
-  IsApproved forced false; non-empty `serverURL`/`queueUrl`/`NoteBucketPath` must match the
-  configured pre-prod values (fails closed when unconfigured); `<TO-FILL>` placeholders rejected.
+  IsApproved forced false; non-empty `serverURL`/`queueUrl` must match the configured pre-prod
+  values (fails closed when unconfigured); `<TO-FILL>` placeholders rejected.
   `delete_queue_item` is fetch-first and refuses any item whose Status isn't `New`. The MCP never
   repins releases and never creates queues — `list_processes`/`list_queues`/`list_triggers` are
   the read-side discovery/verification tools (dev-clone queue ids differ from the prod ids in
