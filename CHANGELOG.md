@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-07-09
+
+### Added
+
+- **`build_mcp_issue` tool + `send-mcp-feedback` prompt** — turn a user's report about this
+  MCP server itself (a bug or general feedback: idea, friction, docs gap) into a GitHub
+  issue payload (`repo`/`title`/`body`/`labels` + a prefilled new-issue `url`). BUILD ONLY —
+  posting stays with the host's GitHub tooling, or the user opens the prefilled URL.
+  Independent of `feedback.enabled`, which only gates the automatic nudge on failures.
+- **Config self-setup guide** — new `copilot://reference/config-guide` resource (config
+  template with placeholders, field docs, verification steps), and the server's initialize
+  instructions now probe the config at startup: an unconfigured server announces the
+  self-setup path (read guide → write config → verify with `doctor`) instead of letting
+  every tool fail cryptically. The config is re-read on the next call — no restart needed.
+- **`get_job_logs` filters** — all opt-in; the default call still returns the full
+  (capped 500) log set, oldest first:
+  - `minLevel` (`warn` | `error`) and `contains` (substring on Message) are pushed into the
+    OData `$filter`, so the 500-row window is spent on matching rows.
+  - `onlyFailures` — semantic failure filter: keeps logs at error/fatal level OR whose
+    message mentions failure indicators (exception, failed, timeout, "unable to", denied, …),
+    catching failures worded at Info level.
+  - `tail: N` — last N matching logs; fetches newest-first so it reaches the end of a
+    >500-row job, still returned oldest first.
+  - Results now include `returned`, `totalMatching`, and `truncated`, so a capped response
+    is never mistaken for the whole log.
+
 ## [1.4.0] - 2026-06-23
 
 ### Added
