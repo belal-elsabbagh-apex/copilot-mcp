@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-07-09
+
+### Added
+
+- **Condensed log digest for failure diagnosis** (`src/uipath/log-digest.ts`, pure) — instead
+  of returning up to 500 raw robot-log lines per job, the diagnostic tools now return a
+  digest: per-level counts, failure-only lines with consecutive near-duplicates collapsed
+  into `{message, count, firstAt, lastAt}` (retry loops), the top inter-log stall gaps, and a
+  `droppedFailures` count so truncation is never silent.
+  - **`analyze_order_execution`** — each matched job now carries `durationMs`,
+    `gapSincePreviousJobMs` (retry cadence), a structured `fault` (headline error, stable
+    `normalizeError` signature — the same dedupe key as `build_faulted_job_issue` — and parsed
+    exception type) for non-SUCCESS jobs, and `logDigest` in place of the raw `logs` array.
+  - **`get_job`** gains `includeLogDigest` — returns the same structured `fault` + digest so a
+    job found by Key alone (no orderUid) can be diagnosed without the heavy order-correlated
+    path; `durationMs` is always returned.
+  - **`list_jobs`** returns `endTime` + `durationMs` per job.
+- The digest is deliberately concise; the tool descriptions and a `note` inside every digest
+  direct the agent to **`get_job_logs`** (with `minLevel`/`contains`/`onlyFailures`/`tail`)
+  when the full raw logs are needed.
+
 ## [1.13.0] - 2026-07-09
 
 ### Added
