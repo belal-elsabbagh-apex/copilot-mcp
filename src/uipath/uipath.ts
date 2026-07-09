@@ -3,6 +3,7 @@
 // (chrome background-proxy removed — direct fetch with the bearer from config.ts).
 
 import { type Env, getUipath } from "../config/config.js";
+import { isFailureLog } from "../copilot/output-analysis.js";
 import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
 import { isRecord } from "../shared/util.js";
@@ -244,25 +245,87 @@ export async function confirmJobsForOrder(
   return confirmed;
 }
 
+// Optional narrowing for job-log fetches. All fields default off — an empty
+// filter returns the full (capped 500) log set, oldest first, as before.
+export interface JobLogFilter {
+  minLevel?: "warn" | "error"; // at-or-above; pushed into the OData $filter
+  contains?: string; // server-side substring match on Message (case-sensitive)
+  onlyFailures?: boolean; // semantic post-filter — see isFailureLog
+  tail?: number; // keep only the last N logs after all other filters
+}
+
+const LOG_LEVELS_AT_LEAST: Record<"warn" | "error", string[]> = {
+  warn: ["Warn", "Error", "Fatal"],
+  error: ["Error", "Fatal"],
+};
+
+// OData query for a job's RobotLogs under `filter`. Level/contains narrow
+// server-side so the 500-row cap spends its budget on matching rows. `tail`
+// flips the fetch to newest-first so the window covers the END of a >500-row
+// job; refineJobLogs restores oldest-first. With onlyFailures the tail cut
+// happens client-side (after the semantic filter), so keep $top at 500.
+export function jobLogQueryParams(
+  jobKey: string,
+  filter: JobLogFilter = {},
+): Record<string, string> {
+  const clauses = [`JobKey eq ${jobKey}`];
+  if (filter.minLevel) {
+    const ors = LOG_LEVELS_AT_LEAST[filter.minLevel].map((l) => `Level eq '${l}'`).join(" or ");
+    clauses.push(`(${ors})`);
+  }
+  if (filter.contains) {
+    clauses.push(`contains(Message, '${filter.contains.replace(/'/g, "''")}')`); // OData single-quote escaping
+  }
+  const newestFirst = filter.tail !== undefined;
+  const top = filter.tail !== undefined && !filter.onlyFailures ? Math.min(filter.tail, 500) : 500;
+  return {
+    $filter: clauses.join(" and "),
+    $orderby: `TimeStamp ${newestFirst ? "desc" : "asc"}`,
+    $top: String(top),
+    $select: "Level,Message,TimeStamp",
+    $count: "true",
+  };
+}
+
+// Client-side refinement matching jobLogQueryParams: restore oldest-first order
+// (a tail fetch comes back newest-first), apply the semantic failure filter,
+// then keep the last `tail` rows.
+export function refineJobLogs(logs: JobLog[], filter: JobLogFilter = {}): JobLog[] {
+  let out = filter.tail !== undefined ? [...logs].reverse() : logs;
+  if (filter.onlyFailures) out = out.filter(isFailureLog);
+  if (filter.tail !== undefined) out = out.slice(-filter.tail);
+  return out;
+}
+
+export interface JobLogResult {
+  logs: JobLog[];
+  // Rows matching the server-side filters (@odata.count), before the 500 cap
+  // and before onlyFailures/tail. null when Orchestrator omits the count.
+  totalMatching: number | null;
+}
+
 // Robot execution logs for a single job, oldest first. RobotLogs is keyed by the
 // job's GUID `Key` (not its numeric Id).
-export async function fetchJobLogs(jobKey: string, folder?: string): Promise<JobLog[]> {
-  if (!jobKey) return [];
+export async function fetchFilteredJobLogs(
+  jobKey: string,
+  folder?: string,
+  filter: JobLogFilter = {},
+): Promise<JobLogResult> {
+  if (!jobKey) return { logs: [], totalMatching: null };
   try {
-    const data = await uipathGet(
-      "/odata/RobotLogs",
-      {
-        $filter: `JobKey eq ${jobKey}`,
-        $orderby: "TimeStamp asc",
-        $top: "500",
-        $select: "Level,Message,TimeStamp",
-      },
-      folder,
-    );
-    return odataValues<JobLog>(data);
+    const data = await uipathGet("/odata/RobotLogs", jobLogQueryParams(jobKey, filter), folder);
+    const count = isRecord(data) ? data["@odata.count"] : undefined;
+    return {
+      logs: refineJobLogs(odataValues<JobLog>(data), filter),
+      totalMatching: typeof count === "number" ? count : null,
+    };
   } catch {
-    return [];
+    return { logs: [], totalMatching: null };
   }
+}
+
+export async function fetchJobLogs(jobKey: string, folder?: string): Promise<JobLog[]> {
+  return (await fetchFilteredJobLogs(jobKey, folder)).logs;
 }
 
 // Video recording uri for a job (the entry whose uri points at recording.webm).

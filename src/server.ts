@@ -82,9 +82,10 @@ import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
+  fetchFilteredJobLogs,
   fetchJobByKey,
-  fetchJobLogs,
   fetchJobVideoUrl,
+  type JobLogFilter,
   jobDeepLink,
   listQueueDefinitions,
   listRecentJobs,
@@ -937,7 +938,9 @@ server.registerTool(
     },
     description:
       "Fetch robot execution logs (oldest first, capped 500) for a single job by its GUID Key, " +
-      "optionally with the video-recording URL. READ-ONLY. Returns {jobKey, folder, logs[], videoUrl?}.",
+      "optionally with the video-recording URL. All filters are opt-in — by default the full " +
+      "(capped) log set is returned. READ-ONLY. " +
+      "Returns {jobKey, folder, logs[], returned, totalMatching?, truncated, videoUrl?}.",
     inputSchema: {
       jobKey: z
         .string()
@@ -952,13 +955,56 @@ server.registerTool(
         .optional()
         .default(false)
         .describe("Also fetch the job's video-recording URL (extra round-trip)"),
+      minLevel: z
+        .enum(["warn", "error"])
+        .optional()
+        .describe(
+          "Only logs at or above this level (warn=Warn/Error/Fatal, error=Error/Fatal). " +
+            "Filtered server-side. Default: all levels",
+        ),
+      contains: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Only logs whose Message contains this substring (server-side, case-sensitive)"),
+      onlyFailures: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Semantic failure filter: keep only logs at error/fatal level OR whose message " +
+            "mentions failure indicators (exception, failed, timeout, 'unable to', denied, …) " +
+            "regardless of level. Catches failures logged at Info",
+        ),
+      tail: z
+        .number()
+        .int()
+        .positive()
+        .max(500)
+        .optional()
+        .describe("Only the last N matching logs (still returned oldest first)"),
     },
   },
-  async ({ jobKey, env, folder, includeVideo }) => {
+  async ({ jobKey, env, folder, includeVideo, minLevel, contains, onlyFailures, tail }) => {
     try {
       const resolved = resolveFolder(env, folder);
-      const logs = await fetchJobLogs(jobKey, resolved);
-      const out: Record<string, unknown> = { jobKey, folder: resolved, logs };
+      const filter: JobLogFilter = {
+        onlyFailures,
+        ...(minLevel !== undefined ? { minLevel } : {}),
+        ...(contains !== undefined ? { contains } : {}),
+        ...(tail !== undefined ? { tail } : {}),
+      };
+      const { logs, totalMatching } = await fetchFilteredJobLogs(jobKey, resolved, filter);
+      const out: Record<string, unknown> = {
+        jobKey,
+        folder: resolved,
+        logs,
+        returned: logs.length,
+        // truncated = the 500-row fetch window didn't cover every matching row
+        // (a requested `tail` shorter than the total is not truncation).
+        truncated: totalMatching !== null && totalMatching > 500,
+      };
+      if (totalMatching !== null) out["totalMatching"] = totalMatching;
       if (includeVideo) out["videoUrl"] = await fetchJobVideoUrl(jobKey, resolved);
       return ok(out);
     } catch (e) {
