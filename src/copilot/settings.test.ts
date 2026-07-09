@@ -401,9 +401,11 @@ describe("sync_settings (pure)", () => {
     expect(merge?.itemName).toBe("CT");
     expect(merge?.method).toBe("PUT");
     expect(merge?.path).toBe("/api/v1/settings/specialities/pre-sp-ct");
-    expect(
-      (merge?.body["referredFacilities"] as unknown[]).map((f) => (f as { name: string }).name),
-    ).toEqual(["Shared", "ProdOnlyFac"]);
+    const mergedFacilities = (merge?.body["referredFacilities"] ?? []) as unknown[];
+    expect(mergedFacilities.map((f) => (f as { name: string }).name)).toEqual([
+      "Shared",
+      "ProdOnlyFac",
+    ]);
 
     // US is identical -> no action for it
     expect(actions.filter((a) => a.itemName === "US")).toHaveLength(0);
