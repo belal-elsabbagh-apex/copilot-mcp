@@ -21,3 +21,11 @@ export const stringProp = (v: unknown, key: string): string | undefined => {
   const got = prop(v, key);
   return typeof got === "string" ? got : undefined;
 };
+
+// Milliseconds between two ISO timestamps, null when either is missing/unparseable.
+export function msBetween(start: string | undefined, end: string | undefined): number | null {
+  if (!(start && end)) return null;
+  const a = Date.parse(start);
+  const b = Date.parse(end);
+  return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
+}

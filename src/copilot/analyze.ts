@@ -2,7 +2,7 @@
 // diagnose the run. Ported from copilot-doctor src/jobMatcher.ts, extended with a
 // recent-scan fallback for when Orchestrator rejects the OutputArguments filter.
 
-import { isRecord } from "../shared/util.js";
+import { isRecord, msBetween } from "../shared/util.js";
 import {
   digestLogs,
   extractFault,
@@ -87,15 +87,6 @@ const parseOutput = (oa: string | undefined): Record<string, unknown> => {
     return {};
   }
 };
-
-// Milliseconds between two ISO timestamps, null when either is missing/unparseable.
-function msBetween(start: string | undefined, end: string | undefined): number | null {
-  if (!(start && end)) return null;
-  const a = Date.parse(start);
-  const b = Date.parse(end);
-  return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
-}
-
 type SearchMode = "contains" | "recent-scan";
 interface Acquired {
   candidates: UiPathJob[];

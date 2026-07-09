@@ -76,14 +76,16 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
-import { envelopeRows, stringProp } from "./shared/util.js";
+import { envelopeRows, msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
+import { digestLogs, extractFault } from "./uipath/log-digest.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
   fetchFilteredJobLogs,
   fetchJobByKey,
+  fetchJobLogs,
   fetchJobVideoUrl,
   type JobLogFilter,
   jobDeepLink,
@@ -897,8 +899,9 @@ server.registerTool(
     },
     description:
       "List the most recent Orchestrator jobs in a folder (newest first), without order " +
-      "correlation. READ-ONLY. Returns {env, folder, count, " +
-      "jobs:[{id,key,state,processName,creationTime,deepLink}]}.",
+      "correlation. READ-ONLY. To diagnose a job from the list, call get_job with " +
+      "includeLogDigest=true (condensed failure digest + fault signature). Returns {env, folder, count, " +
+      "jobs:[{id,key,state,processName,creationTime,endTime,durationMs,deepLink}]}.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -926,6 +929,8 @@ server.registerTool(
           state: j.State,
           processName: j.ReleaseName,
           creationTime: j.CreationTime,
+          endTime: j.EndTime,
+          durationMs: msBetween(j.CreationTime, j.EndTime),
           deepLink: j.Key ? jobDeepLink(j.Key) : "",
         })),
       });
@@ -1190,20 +1195,33 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job " +
+      "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job, and " +
+      "the job-first diagnostic when you have a Key but no orderUid " +
       "(list_jobs is an unkeyed scan; analyze_order_execution is order-correlated and heavy). " +
       "READ-ONLY. `output` is the job's parsed OutputArguments with token/callbackContext " +
-      "stripped. Returns {env, folder, found, job:{id,key,state,processName,creationTime," +
-      "endTime,deepLink,output}}.",
+      "stripped. With includeLogDigest=true it also returns a structured fault (headline error, " +
+      "stable signature, exception type) and a condensed failure-focused log digest — if the " +
+      "digest is not enough, call get_job_logs with this Key for the complete raw logs. " +
+      "Returns {env, folder, found, job:{id,key,state,processName,creationTime," +
+      "endTime,durationMs,deepLink,output,fault?,logDigest?}}.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
         .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
       jobKey: z.string().min(8).describe("The job's GUID Key (from start_job / list_jobs)"),
       folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      includeLogDigest: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Also fetch the job's robot logs (extra round-trip) and return a condensed " +
+            "failure digest + structured fault (signature, exception type) — " +
+            "use get_job_logs for the complete raw logs",
+        ),
     },
   },
-  async ({ env, jobKey, folder }) => {
+  async ({ env, jobKey, folder, includeLogDigest }) => {
     try {
       const resolved = resolveFolder(env, folder);
       const job = await fetchJobByKey(jobKey, resolved);
@@ -1217,6 +1235,7 @@ server.registerTool(
           output = job.OutputArguments.slice(0, 500);
         }
       }
+      const logs = includeLogDigest ? await fetchJobLogs(jobKey, resolved) : [];
       return ok({
         env,
         folder: resolved,
@@ -1228,8 +1247,15 @@ server.registerTool(
           processName: job.ReleaseName,
           creationTime: job.CreationTime,
           endTime: job.EndTime,
+          durationMs: msBetween(job.CreationTime, job.EndTime),
           deepLink: job.Key ? jobDeepLink(job.Key) : "",
           output,
+          ...(includeLogDigest
+            ? {
+                fault: job.State === "Successful" ? null : extractFault(job, logs),
+                logDigest: digestLogs(logs),
+              }
+            : {}),
         },
       });
     } catch (e) {

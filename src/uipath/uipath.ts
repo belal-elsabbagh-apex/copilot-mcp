@@ -171,7 +171,7 @@ export async function listRecentJobs(
   const params: Record<string, string> = {
     $orderby: "CreationTime desc",
     $top: String(top),
-    $select: "Id,Key,State,ReleaseName,CreationTime",
+    $select: "Id,Key,State,ReleaseName,CreationTime,EndTime",
   };
   const clauses: string[] = [];
   if (since) clauses.push(`CreationTime gt ${new Date(since).toISOString()}`);
