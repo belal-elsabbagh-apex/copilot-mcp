@@ -82,17 +82,17 @@ export interface QueueItemResult {
 
 export async function buildQueueItem(
   orderUid: string,
-  opts: { profile?: string | null; env?: Env } = {},
+  opts: { profile?: string | null; env: Env }, // env is required — never defaulted (repo invariant)
 ): Promise<QueueItemResult> {
   const profile = opts.profile ?? null;
-  const env: Env = opts.env ?? "pre_prod";
+  const env: Env = opts.env;
   const uipath = getUipath();
   requireQueueFields(uipath);
 
   const creds = resolveCreds(profile);
   const envCfg = creds[env];
   if (!envCfg) throw new Error(`env '${env}' not in profile (expected 'prod' or 'pre_prod')`);
-  const client = makeClient(envCfg.be);
+  const client = makeClient(envCfg.be, env);
   // login captures the BE JWT (used as SpecificContent.token) and sets the cookie jar
   const lr = await client.req("POST", "/api/v1/copilot/physician/login", {
     json: { email: envCfg.email, password: envCfg.password },

@@ -12,7 +12,7 @@
 import { resolveCreds } from "../config/config.js";
 import { ExpectedError } from "../mcp/feedback.js";
 import { envelopeRows, isRecord, prop, stringProp } from "../shared/util.js";
-import { type HttpClient, login, makeClient } from "./copilot-client.js";
+import { assertPreProdClient, type HttpClient, login, makeClient } from "./copilot-client.js";
 
 // ---- Section catalog (derived from the captured HAR) ----------------------
 
@@ -566,8 +566,8 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
   const chosen = selectSections(opts.sections, opts.groups, opts.emr);
 
   const creds = resolveCreds(opts.profile ?? null);
-  const prod = makeClient(creds.prod.be);
-  const pre = makeClient(creds.pre_prod.be);
+  const prod = makeClient(creds.prod.be, "prod");
+  const pre = makeClient(creds.pre_prod.be, "pre_prod");
   await Promise.all([
     login(prod, creds.prod.email, creds.prod.password),
     login(pre, creds.pre_prod.email, creds.pre_prod.password),
@@ -652,7 +652,7 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
   const chosen = selectSections(opts.sections, opts.groups, opts.emr);
 
   const creds = resolveCreds(opts.profile ?? null)[opts.env];
-  const client = makeClient(creds.be);
+  const client = makeClient(creds.be, opts.env);
   await login(client, creds.email, creds.password);
 
   const sections: GetSettingsSection[] = [];
@@ -1403,8 +1403,8 @@ async function buildSyncPlan(opts: {
   };
   if (!runSpeciality && !runOrderNames) return ctx; // nothing syncable selected — report skipped only
 
-  const prod = makeClient(creds.prod.be);
-  const pre = makeClient(creds.pre_prod.be);
+  const prod = makeClient(creds.prod.be, "prod");
+  const pre = makeClient(creds.pre_prod.be, "pre_prod");
   await Promise.all([
     login(prod, creds.prod.email, creds.prod.password),
     login(pre, creds.pre_prod.email, creds.pre_prod.password),
@@ -1530,6 +1530,7 @@ export async function applySettingsSync(
   // Execute against PRE-PROD only. Additive: POST new specialities/orders / PUT
   // existing-plus-additions (specialities merge only).
   const executed: ExecutedAction[] = [];
+  if (selected.length && ctx.pre) assertPreProdClient(ctx.pre, "apply_settings_sync");
   for (const a of selected) {
     if (!ctx.pre) break; // unreachable: actions imply a logged-in pre client
     const r = await ctx.pre.req(a.method, a.path, { json: a.body });

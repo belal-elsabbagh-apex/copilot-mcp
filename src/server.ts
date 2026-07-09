@@ -10,6 +10,7 @@
 //   - clone_order              mirror prod order(s) into pre-prod (clone-only by default; submit opt-in)
 //   - find_clone_candidates    list recent prod orders that are actually cloneable
 //   - delete_preprod_order     delete pre-prod order(s)
+//   - create_preprod_order     mint a fresh pre-prod order from an explicit spec (stops at forReview, never submits)
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
@@ -40,16 +41,18 @@ import { z } from "zod";
 import { resolveCreds } from "./config/config.js";
 import { analyzeOrderExecution } from "./copilot/analyze.js";
 import {
+  assertPreProdClient,
   fetchOrder,
   login,
   loginToken,
   makeClient,
   normalizeOrder,
   ORDER_MODE,
+  toMDY,
   verify,
 } from "./copilot/copilot-client.js";
 import { runDoctor } from "./copilot/doctor.js";
-import { type MirrorResult, mirrorOne } from "./copilot/mirror.js";
+import { type MintSpec, type MirrorResult, mintPreprodOrder, mirrorOne } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
 import { normalizeOutput } from "./copilot/output-schema.js";
 import {
@@ -279,7 +282,7 @@ server.registerTool(
   async ({ profile, limit, scanPages }) => {
     try {
       const creds = resolveCreds(profile ?? null);
-      const prod = makeClient(creds.prod.be);
+      const prod = makeClient(creds.prod.be, "prod");
       await login(prod, creds.prod.email, creds.prod.password);
       const candidates: Record<string, unknown>[] = [];
       let scanned = 0;
@@ -333,7 +336,8 @@ server.registerTool(
   async ({ uids, profile }) => {
     try {
       const creds = resolveCreds(profile ?? null);
-      const pre = makeClient(creds.pre_prod.be);
+      const pre = makeClient(creds.pre_prod.be, "pre_prod");
+      assertPreProdClient(pre, "delete_preprod_order");
       await login(pre, creds.pre_prod.email, creds.pre_prod.password);
       const results = [];
       for (const uid of uids) {
@@ -354,6 +358,111 @@ server.registerTool(
       });
     } catch (e) {
       return toolError("delete_preprod_order", e, VERSION);
+    }
+  },
+);
+
+// ---- create_preprod_order --------------------------------------------------
+server.registerTool(
+  "create_preprod_order",
+  {
+    title: "Mint a pre-prod order from an explicit spec",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false, // creates a new order; existing state untouched
+      idempotentHint: false, // each call mints a new order
+      openWorldHint: true,
+    },
+    description:
+      "Create a fresh order in the PRE-PROD tenant from explicit data (no prod source order " +
+      "needed — use clone_order to copy an existing prod order instead) and drive it to " +
+      "forReview. NEVER submits — hand-minted test orders stop at forReview by design. The " +
+      "sequence quirks (order names reset speciality/provider; placeOfService applied last, " +
+      "post-forReview; /process retry loop) are handled internally. Reference uids (typeUid, " +
+      "orderNamesUids, specialityUid, facility/provider uids) are the PRE-PROD tenant's own — " +
+      "discover them via get_settings (orders/specialties groups); never reuse prod uids. " +
+      "The result composes with build_queue_item -> add_queue_item for dev-clone robot tests. " +
+      "Returns {profile, newUid, submitted:false, verify}.",
+    inputSchema: {
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      patientName: z.string().min(1).describe("Patient name, 'Last, First' preferred"),
+      patientBirthDate: z.string().min(6).describe("Patient DOB (MM/DD/YYYY or ISO)"),
+      patientPhoneNumber: z
+        .string()
+        .optional()
+        .describe("Patient phone (normalized; dummy used when omitted)"),
+      insuranceName: z
+        .string()
+        .min(1)
+        .describe("Insurance name — must be activated on the pre-prod tenant"),
+      insuranceMemberId: z.string().optional().describe("Member id"),
+      typeUid: z.string().min(8).describe("PRE-PROD order type uid (see get_settings)"),
+      orderNamesUids: z
+        .array(z.string().min(8))
+        .min(1)
+        .describe("PRE-PROD order name uid(s) — auto-seed CPTs; set BEFORE speciality/provider"),
+      specialityUid: z.string().min(8).optional().describe("PRE-PROD speciality uid"),
+      referredFacilityUid: z.string().min(8).optional().describe("PRE-PROD referred facility uid"),
+      referredProviderUid: z
+        .string()
+        .min(8)
+        .optional()
+        .describe("PRE-PROD referred provider uid (referral orders)"),
+      location: z.string().optional().describe("Clinic location string"),
+      appointmentDate: z.string().optional().describe("Appointment date (MM/DD/YYYY or ISO)"),
+      icdCodes: z
+        .array(z.object({ code: z.string().min(1), description: z.string().optional() }))
+        .optional()
+        .describe("ICD codes to set after the note upload"),
+      retro: z.boolean().optional().default(false).describe("Retro flag"),
+      placeOfService: z
+        .string()
+        .optional()
+        .describe("Place of service — applied LAST, post-forReview"),
+    },
+  },
+  async (a) => {
+    try {
+      const creds = resolveCreds(a.profile);
+      const pre = makeClient(creds.pre_prod.be, "pre_prod");
+      await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+      const spec: MintSpec = {
+        patientName: a.patientName,
+        patientBirthDate: toMDY(a.patientBirthDate) ?? "",
+        patientPhoneNumber: a.patientPhoneNumber ?? "",
+        insuranceName: a.insuranceName,
+        insuranceMemberId: a.insuranceMemberId ?? "",
+        location: a.location ?? "",
+        typeUid: a.typeUid,
+        specialityUid: a.specialityUid ?? null,
+        referredFacilityUid: a.referredFacilityUid ?? "",
+        referredProviderUid: a.referredProviderUid ?? "",
+        clinicProviderUid: "", // left to the FE default (no cross-account mapping here)
+        orderNamesUids: a.orderNamesUids,
+        cptCodes: [], // order names auto-seed CPTs
+        uploadAuth: false,
+        uploadFax: false,
+        retro: a.retro,
+        authorization: null,
+        appointmentDate: a.appointmentDate ? (toMDY(a.appointmentDate) ?? "") : "",
+        icdCodes: (a.icdCodes ?? []).map((i) => ({
+          code: i.code,
+          description: i.description ?? "",
+        })),
+        placeOfService: a.placeOfService ?? "",
+      };
+      const result = await mintPreprodOrder(pre, spec, { submit: false });
+      // Audit trail: surface every pre-prod order mint to the client log.
+      mcpLog(server, "warning", `minted pre-prod order ${result.newUid}`, {
+        profile: a.profile,
+        status: result.verify?.status,
+      });
+      return ok({ profile: a.profile, ...result });
+    } catch (e) {
+      return toolError("create_preprod_order", e, VERSION);
     }
   },
 );
@@ -414,7 +523,7 @@ server.registerTool(
       "and a deep link into Orchestrator. READ-ONLY — never writes to UiPath or the BE. Correlates via " +
       "the job's OutputArguments (handles both the flat out_* schema and the transactionItem schema); " +
       "token/callbackContext are stripped from the returned output. Jobs live in a per-env UiPath folder " +
-      "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (default prod) " +
+      "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
       "or an explicit folder. If Orchestrator rejects the OutputArguments filter, it falls back to scanning " +
       "the `top` most-recent jobs — pass `since` for prod. Optionally enrich with the order's current BE " +
       "status (same env). Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, jobs:[...]}.",
@@ -487,7 +596,7 @@ server.registerTool(
       if (enrichOrderState) {
         try {
           const envCreds = resolveCreds(profile ?? null)[env];
-          const client = makeClient(envCreds.be);
+          const client = makeClient(envCreds.be, env);
           await login(client, envCreds.email, envCreds.password);
           out["currentOrderState"] = await verify(client, orderUid);
         } catch (e) {
@@ -622,8 +731,8 @@ server.registerTool(
     description:
       "Fetch a single UiPath queue item (by Orchestrator URL or transaction id) and return its " +
       "SpecificContent as a ready-to-run test payload, mapped to its portal. READ-ONLY. " +
-      "IsApproved is ALWAYS forced false so a test run can never submit a real auth. If no env is " +
-      "given it is derived from the URL's fid (else defaults to pre_prod). Returns " +
+      "IsApproved is ALWAYS forced false so a test run can never submit a real auth. env is " +
+      "derived from the URL's fid when a url is given; pulling by txnId requires env. Returns " +
       "{item, env, queueName, portal, specificContent, suggestedFilename}.",
     inputSchema: {
       url: z
@@ -788,7 +897,7 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch robot execution logs (oldest first, capped 200) for a single job by its GUID Key, " +
+      "Fetch robot execution logs (oldest first, capped 500) for a single job by its GUID Key, " +
       "optionally with the video-recording URL. READ-ONLY. Returns {jobKey, folder, logs[], videoUrl?}.",
     inputSchema: {
       jobKey: z
@@ -1593,7 +1702,7 @@ server.registerTool(
   async ({ orderUid, env, profile }) => {
     try {
       const creds = resolveCreds(profile ?? null)[env];
-      const client = makeClient(creds.be);
+      const client = makeClient(creds.be, env);
       await login(client, creds.email, creds.password);
       const order = await fetchOrder(client, orderUid);
       const detail = normalizeOrder(order);
@@ -1631,7 +1740,7 @@ server.registerTool(
   async ({ env, profile }) => {
     try {
       const creds = resolveCreds(profile ?? null)[env];
-      const client = makeClient(creds.be);
+      const client = makeClient(creds.be, env);
       const token = await loginToken(client, creds.email, creds.password);
       return ok({ env, profile, token });
     } catch (e) {

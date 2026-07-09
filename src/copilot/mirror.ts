@@ -13,6 +13,7 @@ import type { ResolvedCreds } from "../config/config.js";
 import { getOverrides, type OrderOverride } from "../config/config.js";
 import { envelopeRows, prop, stringProp } from "../shared/util.js";
 import {
+  assertPreProdClient,
   type BeFacility,
   type BeOrder,
   type BeSpeciality,
@@ -125,7 +126,7 @@ async function processUntilForReview(
   return body;
 }
 
-interface FacilityRemap {
+export interface FacilityRemap {
   referredFacilityUid?: string | undefined;
   specialityUid?: string | undefined;
   placeOfService?: string | undefined;
@@ -184,23 +185,110 @@ function dumpProdOrder(prodUid: string, src: BeOrder): void {
   }
 }
 
-export async function mirrorOne(
-  prodUid: string,
-  opts: { submit: boolean; creds: ResolvedCreds },
-): Promise<MirrorResult> {
-  const { submit, creds } = opts;
-  const ov: OrderOverride = getOverrides()[prodUid] ?? {};
-  console.log(
-    `\n=== mirror ${prodUid}${submit ? " (+submit)" : ""}${Object.keys(ov).length ? " [overrides]" : ""} ===`,
-  );
-  const prod = makeClient(creds.prod.be);
-  const pre = makeClient(creds.pre_prod.be);
-  await login(prod, creds.prod.email, creds.prod.password);
-  const src = await fetchProd(prod, prodUid);
-  dumpProdOrder(prodUid, src);
-  console.log(`  extracted prod order: ${src.patient?.patientName} / ${src.orderType?.name}`);
+// ---- Mint spec --------------------------------------------------------------
 
-  await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+// Everything the pre-prod mint engine needs, as plain data — no reference to a
+// prod source order. TOTAL shape ("" / null / [] sentinels) so both producers
+// (specFromProdOrder for the clone, create_preprod_order's explicit payload)
+// normalize at the boundary.
+export interface MintSpec {
+  patientName: string;
+  patientBirthDate: string; // MM/DD/YYYY, "" = unset
+  patientPhoneNumber: string; // raw; normalized at PUT time ("" -> dummy)
+  insuranceName: string;
+  insuranceMemberId: string;
+  location: string; // "" = skip
+  typeUid: string; // order type uid ("" = omitted — /process will stall)
+  specialityUid: string | null;
+  referredFacilityUid: string; // "" = skip
+  referredProviderUid: string; // "" = skip (referral orders; PUT after facility —
+  // must come after orderNames, which reset it)
+  clinicProviderUid: string; // "" = leave to FE default
+  orderNamesUids: string[]; // auto-seed CPTs on the BE
+  cptCodes: { code: string; units: unknown; description: string; treatments: unknown }[]; // [] = rely on orderNames auto-seed
+  uploadAuth: boolean;
+  uploadFax: boolean;
+  retro: boolean;
+  authorization: Record<string, unknown> | null;
+  appointmentDate: string; // MM/DD/YYYY, "" = none
+  icdCodes: { code: string; description: string }[];
+  placeOfService: string; // "" = none; applied LAST, post-forReview
+}
+
+// Derive the mint spec for a prod order: override > facility remap > prod value.
+// Pure — the (network) facility remap happens before this and is passed in.
+export function specFromProdOrder(
+  src: BeOrder,
+  ov: OrderOverride,
+  facMap: FacilityRemap | null,
+): MintSpec {
+  // sent-by only maps when an override provides a valid pre-prod uid, or the prod
+  // uid is carried as-is when no facility override forces a different account.
+  const clinicProviderUid =
+    ov.clinicProviderUid ?? (ov.referredFacilityUid ? null : src.clinicProvider?.clinicProviderUid);
+  return {
+    patientName: src.patient?.patientName ?? "",
+    patientBirthDate: toMDY(src.patient?.patientBirthDate) ?? "",
+    patientPhoneNumber: src.patient?.patientPhoneNumber ?? "",
+    insuranceName: src.insurance?.name ?? "",
+    insuranceMemberId: src.insurance?.memberId ?? "",
+    location: src.location ?? "",
+    typeUid: ov.typeUid ?? src.orderType?.typeUid ?? "",
+    specialityUid: ov.specialityUid ?? facMap?.specialityUid ?? null,
+    referredFacilityUid:
+      ov.referredFacilityUid ??
+      facMap?.referredFacilityUid ??
+      src.referredFacility?.referredFacilityUid ??
+      "",
+    referredProviderUid: "", // the mirror never re-links a referred provider (facility-based orders)
+    clinicProviderUid: clinicProviderUid ?? "",
+    orderNamesUids:
+      ov.orderNamesUids ??
+      (src.orderNames ?? []).map((n) => n.nameUid).filter((u): u is string => !!u),
+    cptCodes: ov.injectCPTs
+      ? (src.CPTCodes ?? []).map((c) => ({
+          code: c.code ?? "",
+          units: c.units,
+          description: c.description ?? "",
+          treatments: c.treatments ?? null,
+        }))
+      : [],
+    uploadAuth: !!src.uploadAuth,
+    uploadFax: !!src.uploadFax,
+    retro: !!src.retro,
+    authorization: src.authorization ? { ...src.authorization, sendReferralAfterAuth: true } : null,
+    appointmentDate: src.appointmentDate ? shiftIfPast(toMDY(src.appointmentDate) ?? "") : "",
+    icdCodes: (src.ICDCodes ?? []).map((i) => ({
+      code: i.code ?? "",
+      description: i.description ?? "",
+    })),
+    placeOfService: ov.placeOfService ?? src.placeOfService ?? facMap?.placeOfService ?? "",
+  };
+}
+
+// ---- Mint engine -------------------------------------------------------------
+
+export interface MintResult {
+  newUid: string;
+  submitted: boolean;
+  verify: OrderVerify | null;
+}
+
+// Create a pre-prod draft and drive it to forReview from a MintSpec, preserving
+// the sequence invariants: order names auto-seed CPTs and RESET speciality/
+// referredProvider (names after type, speciality/provider after names);
+// placeOfService is applied LAST, post-forReview; /process runs an E6001-tolerant
+// retry loop (async note OCR blocks it). `pre` must already be logged in to the
+// pre-prod tenant. Callers other than the mirror should pass submit:false —
+// hand-minted test orders stop at forReview.
+export async function mintPreprodOrder(
+  pre: HttpClient,
+  spec: MintSpec,
+  opts: { submit: boolean },
+): Promise<MintResult> {
+  assertPreProdClient(pre, "mintPreprodOrder");
+  // "" sentinels -> omitted keys, so the wire bodies match the legacy mirror exactly.
+  const orUndef = (s: string): string | undefined => s || undefined;
 
   // Step 1: empty draft
   const draftRes = await pre.req("POST", "/api/v1/orders");
@@ -211,76 +299,57 @@ export async function mirrorOne(
   console.log(`  new draft: ${newUid}`);
   const put = mkPut(pre, newUid);
 
-  // Resolve facility/speciality up front: prefer explicit override, else faithful
-  // NPI/name remap (same facility, re-keyed uid), else prod's uid as-is.
-  const typeUid = ov.typeUid ?? src.orderType?.typeUid;
-  let facMap: FacilityRemap | null = null;
-  if (!ov.referredFacilityUid && src.referredFacility) {
-    facMap = await resolvePreprodFacility(pre, typeUid, src.referredFacility);
-    if (facMap)
-      console.log(
-        `  facility remapped (NPI ${facMap.npi}): ${facMap.name} ${src.referredFacility.referredFacilityUid} -> ${facMap.referredFacilityUid}`,
-      );
-    else console.log("  (no pre-prod facility match by NPI/name — will try prod uid, may 404)");
-  }
-  const specialityUid = ov.specialityUid ?? facMap?.specialityUid ?? null;
-  const referredFacilityUid =
-    ov.referredFacilityUid ??
-    facMap?.referredFacilityUid ??
-    src.referredFacility?.referredFacilityUid;
-
   // Step 2: patient
   await put(
     {
       emrPatientId: "",
-      patientName: src.patient?.patientName,
-      patientBirthDate: toMDY(src.patient?.patientBirthDate),
+      patientName: orUndef(spec.patientName),
+      patientBirthDate: spec.patientBirthDate || null,
     },
     "patient",
   );
   // Step 3: phone (always non-empty)
-  await put({ patientPhoneNumber: normPhone(src.patient?.patientPhoneNumber) }, "phone");
+  await put({ patientPhoneNumber: normPhone(spec.patientPhoneNumber) }, "phone");
   // Step 4: insurance
   await put(
-    { insurance: { name: src.insurance?.name, memberId: src.insurance?.memberId } },
+    { insurance: { name: orUndef(spec.insuranceName), memberId: orUndef(spec.insuranceMemberId) } },
     "insurance",
   );
   // Step 5: location
-  if (src.location) await put({ location: src.location }, "location");
-  // Step 6: order type + speciality (resolved above; orderDate = today)
+  if (spec.location) await put({ location: spec.location }, "location");
+  // Step 6: order type + speciality (orderDate = today)
   await put(
     {
-      typeUid,
-      specialityUid,
+      typeUid: orUndef(spec.typeUid),
+      specialityUid: spec.specialityUid,
       referredProviderUid: null,
       referredFacilityUid: null,
       orderDate: todayMDY(),
     },
     "type",
   );
-  // Step 7: order names (auto-seeds CPTs; overridable nameUids)
-  const orderNamesUids =
-    ov.orderNamesUids ?? (src.orderNames ?? []).map((n) => n.nameUid).filter(Boolean);
+  // Step 7: order names (auto-seeds CPTs; RESETS speciality/provider — hence re-sent here)
   await put(
-    { orderNamesUids, specialityUid, referredProviderUid: null, referredFacilityUid: null },
+    {
+      orderNamesUids: spec.orderNamesUids,
+      specialityUid: spec.specialityUid,
+      referredProviderUid: null,
+      referredFacilityUid: null,
+    },
     "orderNames",
   );
-  // Step 8: sent by — only if override provides a valid pre-prod uid (prod's "OSSM" may not exist)
-  const clinicProviderUid =
-    ov.clinicProviderUid ?? (ov.referredFacilityUid ? null : src.clinicProvider?.clinicProviderUid);
-  if (clinicProviderUid) await put({ clinicProviderUid }, "sentBy");
-  else console.log("  (sentBy: left to FE default — prod clinicProvider not mapped)");
-  // Step 9: facility (auto-sets POS + fax; resolved above)
-  if (referredFacilityUid) await put({ referredFacilityUid }, "facility");
-  // Step 9b: best-effort CPT injection (override) — "Other" orderName won't auto-seed PT CPTs
-  if (ov.injectCPTs && (src.CPTCodes ?? []).length) {
-    const cpts = (src.CPTCodes ?? []).map((c) => ({
-      code: c.code,
-      units: c.units,
-      description: c.description ?? "",
-      treatments: c.treatments ?? null,
-      evidences: [],
-    }));
+  // Step 8: sent by — only when a valid pre-prod uid is known (prod's may not exist)
+  if (spec.clinicProviderUid) await put({ clinicProviderUid: spec.clinicProviderUid }, "sentBy");
+  else console.log("  (sentBy: left to FE default — clinicProvider not mapped)");
+  // Step 9: facility (auto-sets POS + fax)
+  if (spec.referredFacilityUid)
+    await put({ referredFacilityUid: spec.referredFacilityUid }, "facility");
+  // Step 9a: referred provider (referral orders) — after names/speciality, which reset it
+  if (spec.referredProviderUid)
+    await put({ referredProviderUid: spec.referredProviderUid }, "referredProvider");
+  // Step 9b: best-effort CPT injection — "Other" orderName won't auto-seed PT CPTs
+  if (spec.cptCodes.length) {
+    const cpts = spec.cptCodes.map((c) => ({ ...c, evidences: [] }));
     try {
       await put({ CPTCodes: cpts }, "CPTCodes (injected)");
     } catch (e) {
@@ -288,23 +357,18 @@ export async function mirrorOne(
     }
   }
   // Step 10: yes/no flags
-  await put({ uploadAuth: !!src.uploadAuth }, "uploadAuth");
-  await put({ uploadFax: !!src.uploadFax }, "uploadFax");
-  await put({ retro: !!src.retro }, "retro");
-  if (src.authorization)
-    await put(
-      { authorization: { ...src.authorization, sendReferralAfterAuth: true } },
-      "authorization",
-    );
+  await put({ uploadAuth: spec.uploadAuth }, "uploadAuth");
+  await put({ uploadFax: spec.uploadFax }, "uploadFax");
+  await put({ retro: spec.retro }, "retro");
+  if (spec.authorization) await put({ authorization: spec.authorization }, "authorization");
   // Step 11: direct processing
   await put({ directProcessingEnabled: true }, "directProcessingEnabled");
   // Step 12: first /process (usually incomplete: appointmentDate missing)
   let proc = await postProcess(pre, newUid);
   console.log(`  /process (1st): ${proc.msg}`);
   // Step 14: appointment date
-  const appt = src.appointmentDate ? shiftIfPast(toMDY(src.appointmentDate) ?? "") : null;
-  if (appt) {
-    await put({ appointmentDate: appt }, "appointmentDate");
+  if (spec.appointmentDate) {
+    await put({ appointmentDate: spec.appointmentDate }, "appointmentDate");
     if (/incomplete/i.test(proc.msg ?? "")) {
       proc = await postProcess(pre, newUid);
       console.log(`  /process (after appt): ${proc.msg}`);
@@ -322,11 +386,7 @@ export async function mirrorOne(
     throw new Error(`/note/upload failed ${up.status}: ${up.text.slice(0, 300)}`);
   console.log("  /note/upload: ok");
   // Step 16: ICDs (manual; OCR can't read dummy PDF)
-  const icds = (src.ICDCodes ?? []).map((i) => ({
-    code: i.code,
-    description: i.description ?? "",
-    evidences: [],
-  }));
+  const icds = spec.icdCodes.map((i) => ({ ...i, evidences: [] }));
   if (icds.length) await put({ ICDCodes: icds }, "ICDCodes");
   // Final /process retry loop until forReview (note upload async-blocks it)
   proc = await processUntilForReview(pre, newUid);
@@ -334,13 +394,11 @@ export async function mirrorOne(
     console.warn(`  !! order did not reach forReview: ${proc.msg}`);
   // Step 13: post-forReview corrections — requiredAuthorization FIRST, placeOfService LAST.
   await put({ requiredAuthorization: true }, "requiredAuthorization (final)");
-  const pos = ov.placeOfService ?? src.placeOfService ?? facMap?.placeOfService;
-  if (pos) await put({ placeOfService: pos }, "placeOfService (final, must be last)");
+  if (spec.placeOfService)
+    await put({ placeOfService: spec.placeOfService }, "placeOfService (final, must be last)");
 
-  console.log(`\n  prod_uid:     ${prodUid}\n  pre_prod_uid: ${newUid}`);
-
-  // Step 17: submit (opt-in)
-  if (submit) {
+  // Step 17: submit (opt-in — only the mirror ever passes true)
+  if (opts.submit) {
     let r = await pre.req("POST", `/api/v1/orders/${newUid}/submit`, {
       json: { actionsHistory: ["submit_action"] },
     });
@@ -356,7 +414,46 @@ export async function mirrorOne(
   }
   const v = await verify(pre, newUid);
   console.log(`  verify: ${JSON.stringify(v, null, 2)}`);
-  return { prodUid, newUid, submitted: !!submit, verify: v };
+  return { newUid, submitted: opts.submit, verify: v };
+}
+
+// ---- Mirror (prod -> pre-prod clone) ------------------------------------------
+
+export async function mirrorOne(
+  prodUid: string,
+  opts: { submit: boolean; creds: ResolvedCreds },
+): Promise<MirrorResult> {
+  const { submit, creds } = opts;
+  const ov: OrderOverride = getOverrides()[prodUid] ?? {};
+  console.log(
+    `\n=== mirror ${prodUid}${submit ? " (+submit)" : ""}${Object.keys(ov).length ? " [overrides]" : ""} ===`,
+  );
+  const prod = makeClient(creds.prod.be, "prod");
+  const pre = makeClient(creds.pre_prod.be, "pre_prod");
+  await login(prod, creds.prod.email, creds.prod.password);
+  const src = await fetchProd(prod, prodUid);
+  dumpProdOrder(prodUid, src);
+  console.log(`  extracted prod order: ${src.patient?.patientName} / ${src.orderType?.name}`);
+
+  await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+
+  // Faithful cross-env facility remap (network) before the pure spec derivation:
+  // prefer an explicit override, else NPI/name lookup, else prod's uid as-is.
+  let facMap: FacilityRemap | null = null;
+  if (!ov.referredFacilityUid && src.referredFacility) {
+    const typeUid = ov.typeUid ?? src.orderType?.typeUid;
+    facMap = await resolvePreprodFacility(pre, typeUid, src.referredFacility);
+    if (facMap)
+      console.log(
+        `  facility remapped (NPI ${facMap.npi}): ${facMap.name} ${src.referredFacility.referredFacilityUid} -> ${facMap.referredFacilityUid}`,
+      );
+    else console.log("  (no pre-prod facility match by NPI/name — will try prod uid, may 404)");
+  }
+
+  const spec = specFromProdOrder(src, ov, facMap);
+  const minted = await mintPreprodOrder(pre, spec, { submit });
+  console.log(`\n  prod_uid:     ${prodUid}\n  pre_prod_uid: ${minted.newUid}`);
+  return { prodUid, newUid: minted.newUid, submitted: minted.submitted, verify: minted.verify };
 }
 
 // Extract a prod order (same /orders/filter call as fetchOrder, kept distinct for the clearer error).

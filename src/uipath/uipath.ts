@@ -254,7 +254,7 @@ export async function fetchJobLogs(jobKey: string, folder?: string): Promise<Job
       {
         $filter: `JobKey eq ${jobKey}`,
         $orderby: "TimeStamp asc",
-        $top: "200",
+        $top: "500",
         $select: "Level,Message,TimeStamp",
       },
       folder,

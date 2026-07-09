@@ -95,7 +95,7 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
   const olderThanHours = args.olderThanHours ?? 0;
 
   const creds = resolveCreds(args.profile ?? null)[env];
-  const client = makeClient(creds.be);
+  const client = makeClient(creds.be, env);
   await login(client, creds.email, creds.password);
 
   const stuck: StuckOrder[] = [];

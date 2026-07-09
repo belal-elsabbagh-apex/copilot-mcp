@@ -4,6 +4,7 @@
 // the legacy `.planning/copy_order_prod_to_preprod.mjs` harness. The order mirror
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
+import type { Env } from "../config/config.js";
 import { envelopeRows, stringProp } from "../shared/util.js";
 
 // orderMode sent on every /orders/filter call (orders + pcp notes).
@@ -105,11 +106,25 @@ export interface ReqBody {
 }
 export interface HttpClient {
   base: string;
+  env?: Env; // which tenant this client points at; write engines refuse anything but a tagged pre_prod client
   req(method: string, path: string, body?: ReqBody): Promise<HttpResponse>;
 }
 
+// Fail-closed guard for the BE write engines (mint, order delete, settings apply):
+// only a client explicitly tagged "pre_prod" may write. An untagged client is
+// refused too, so a future call site can't silently write to the wrong tenant.
+export function assertPreProdClient(c: HttpClient, what: string): void {
+  if (c.env !== "pre_prod") {
+    throw new Error(
+      `${what} writes are pre_prod-only — refusing client tagged '${c.env ?? "untagged"}' (${c.base})`,
+    );
+  }
+}
+
 // Minimal cookie-jar fetch client (mirrors the BE's set-cookie session flow).
-export function makeClient(base: string): HttpClient {
+// Pass `env` to tag the client with its tenant — required for clients handed
+// to a write engine (see assertPreProdClient).
+export function makeClient(base: string, env?: Env): HttpClient {
   const jar = new Map<string, string>();
   async function req(
     method: string,
@@ -146,7 +161,7 @@ export function makeClient(base: string): HttpClient {
     }
     return { status: res.status, data, text };
   }
-  return { base, req };
+  return env ? { base, env, req } : { base, req };
 }
 
 export async function login(c: HttpClient, email: string, password: string): Promise<void> {

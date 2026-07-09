@@ -76,6 +76,18 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **prod/pre-prod isolation**: writes target pre-prod only; `delete_preprod_order` never touches
   prod; `clone_order` is clone-only unless `submit` is explicitly authorized; `build_queue_item` /
   `pull_queue_item` force `IsApproved=false` so a test run can never submit a real auth.
+  BE clients are env-tagged (`makeClient(base, env)`) and every BE write engine
+  (`mintPreprodOrder`, the `delete_preprod_order` handler, `applySettingsSync`) calls
+  `assertPreProdClient`, which refuses prod-tagged AND untagged clients (fails closed) —
+  tag any new client at construction and assert before any new write path.
+- **Order minting is one engine, two producers.** `copilot/mirror.ts` splits into a pure
+  `specFromProdOrder` (prod order + overrides + facility remap -> `MintSpec`, unit-tested) and
+  `mintPreprodOrder(pre, spec, {submit})` — the engine owning the sequence invariants (order names
+  reset speciality/provider; placeOfService LAST, post-forReview; E6001-tolerant `/process` retry).
+  `clone_order` composes extract -> spec -> mint; `create_preprod_order` mints from an explicit
+  spec and **always passes `submit:false`** (hand-minted test orders stop at forReview — only
+  `clone_order` may submit, explicitly). Do NOT expose the raw atoms (create draft / PUT field /
+  process) as tools — the tool boundary is the safe transaction, not the HTTP verb.
 - **UiPath writes are dev-clone-only and guarded.** `add_queue_item`, `delete_queue_item` and
   `start_job` (all in `uipath/actions.ts` — the ONLY module that mutates Orchestrator state) take
   `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` in the domain

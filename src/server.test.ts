@@ -24,6 +24,7 @@ interface RegisteredTool {
 const WRITE_TOOLS = new Set([
   "clone_order",
   "delete_preprod_order",
+  "create_preprod_order",
   "apply_settings_sync",
   "add_queue_item",
   "delete_queue_item",
@@ -38,6 +39,7 @@ const EXPECTED = [
   "clone_order",
   "find_clone_candidates",
   "delete_preprod_order",
+  "create_preprod_order",
   "build_queue_item",
   "analyze_order_execution",
   "pull_queue_item",
@@ -117,6 +119,25 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { uids: ["abcdefgh"], profile: "ossm" },
       invalid: { uids: [], profile: "ossm" },
     },
+    create_preprod_order: {
+      valid: {
+        profile: "ossm",
+        patientName: "DOE, JOHN",
+        patientBirthDate: "01/02/1980",
+        insuranceName: "Acme Health",
+        typeUid: "abcdefgh-type",
+        orderNamesUids: ["abcdefgh-name"],
+        icdCodes: [{ code: "M54.5" }],
+      },
+      invalid: {
+        // profile is required
+        patientName: "DOE, JOHN",
+        patientBirthDate: "01/02/1980",
+        insuranceName: "Acme Health",
+        typeUid: "abcdefgh-type",
+        orderNamesUids: ["abcdefgh-name"],
+      },
+    },
     build_queue_item: {
       valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
@@ -194,7 +215,8 @@ describe("tool input schemas accept representative payloads", () => {
     },
     start_job: {
       valid: { env: "pre_prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
-      invalid: { releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" }, // env is required
+      // prod rejected by the schema literal (env is also required)
+      invalid: { env: "prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
     },
   };
 

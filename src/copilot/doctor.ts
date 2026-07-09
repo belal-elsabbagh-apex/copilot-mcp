@@ -59,7 +59,7 @@ export async function runDoctor(opts: { profile?: string | null }): Promise<Doct
   const checks = await Promise.all([
     ...ENVS.map((env) =>
       probe(`copilot ${env} login`, creds[env].be, async () => {
-        const client = makeClient(creds[env].be);
+        const client = makeClient(creds[env].be, env);
         await login(client, creds[env].email, creds[env].password);
         return "login OK";
       }),
