@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An MCP server (`@modelcontextprotocol/sdk`, `McpServer` over **stdio**) exposing EHR Copilot
 order operations + UiPath Orchestrator execution analysis. Built with Bun; `bun build` bundles
-`src/` into a node-runnable `dist/server.js` that runs under `npx` or `bunx`. Published private
+`src/` into a node-runnable `dist/server.js` that runs under `npx` or `bunx`. Published
 on GitHub Packages.
 
 ## Commands

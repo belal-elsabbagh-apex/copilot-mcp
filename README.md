@@ -2,7 +2,7 @@
 
 MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://bun.sh)
 (`bun build` bundles `src/` → a node-runnable `dist/server.js`), so it runs under either
-`bunx` **or** `npx`. Published as a **private** package on GitHub Packages.
+`bunx` **or** `npx`. Published on GitHub Packages.
 
 ## Tools
 
@@ -90,9 +90,10 @@ Logging is silent by default so it never corrupts the stdio JSON-RPC stream. Set
 A `pre-commit` hook (lefthook) runs `biome check` + `typecheck` on commit; CI
 (`.github/workflows/ci.yml`) runs typecheck/lint/build/test on every PR and push to `main`.
 
-## Installing from GitHub Packages (private)
+## Installing from GitHub Packages
 
-The package is private, so installing requires a GitHub token with `read:packages`.
+The package is public, but GitHub's npm registry requires authentication even for public
+packages — installing needs a GitHub token with the `read:packages` scope.
 
 Add to the **consumer** repo's `.npmrc`:
 
@@ -141,6 +142,6 @@ That one tag push fans out to two workflows (both keyed off the tag, because a
 `GITHUB_TOKEN`-created release does not trigger other workflows):
 
 - **Release on tag** (`release.yml`) — creates a GitHub Release with auto-generated notes.
-- **Publish** (`publish.yml`) — typechecks, builds, and runs `bun publish --access
-  restricted` using the repo's `GITHUB_TOKEN` (`packages: write`), keeping the package
-  private. Also runnable manually via **workflow_dispatch**.
+- **Publish** (`publish.yml`) — typechecks, builds, and runs `bun publish` to GitHub
+  Packages using the repo's `GITHUB_TOKEN` (`packages: write`); the package inherits the
+  repository's public visibility. Also runnable manually via **workflow_dispatch**.
