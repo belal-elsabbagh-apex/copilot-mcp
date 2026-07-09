@@ -123,4 +123,5 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 ## Releasing
 
 Tag-driven: bump `version` in `package.json` (and the `McpServer` version string in `server.ts`),
-commit, push a matching `vX.Y.Z` tag → `release.yml` + `publish.yml` fan out from the tag.
+add the release's `CHANGELOG.md` entry (Keep a Changelog format), commit, push a matching
+`vX.Y.Z` tag → `release.yml` + `publish.yml` fan out from the tag.
