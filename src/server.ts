@@ -552,14 +552,20 @@ server.registerTool(
     },
     description:
       "Given a Copilot orderUid, find the matching UiPath Orchestrator job(s) and diagnose the run: " +
-      "job State, output result, error/warning robot logs, failure-language heuristics, a video link, " +
-      "and a deep link into Orchestrator. READ-ONLY — never writes to UiPath or the BE. Correlates via " +
+      "job State + verdict, computed durations and retry gaps, a structured fault (headline error, " +
+      "stable signature, exception type), failure-language heuristics, a condensed log digest " +
+      "(per-level counts, collapsed failure lines, stall gaps), a video link, and a deep link into " +
+      "Orchestrator. The digest is deliberately concise — benign lines are omitted and messages " +
+      "truncated. IF THE DIGEST IS NOT ENOUGH to explain the failure, call get_job_logs with the " +
+      "job's `key` for the complete raw logs (filters: minLevel/contains/onlyFailures/tail). " +
+      "READ-ONLY — never writes to UiPath or the BE. Correlates via " +
       "the job's OutputArguments (handles both the flat out_* schema and the transactionItem schema); " +
       "token/callbackContext are stripped from the returned output. Jobs live in a per-env UiPath folder " +
       "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
       "or an explicit folder. If Orchestrator rejects the OutputArguments filter, it falls back to scanning " +
       "the `top` most-recent jobs — pass `since` for prod. Optionally enrich with the order's current BE " +
-      "status (same env). Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, jobs:[...]}.",
+      "status (same env). Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, " +
+      "jobs:[{key, state, verdict, durationMs, gapSincePreviousJobMs, fault, logDigest, ...}]}.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Copilot orderUid to trace"),
       env: z
@@ -589,7 +595,11 @@ server.registerTool(
         .boolean()
         .optional()
         .default(true)
-        .describe("Fetch robot logs (up to 200) per matched job"),
+        .describe(
+          "Fetch robot logs (up to 500) per matched job and return them as a condensed " +
+            "failure-focused digest (level counts, collapsed failure lines, stall gaps) — " +
+            "use get_job_logs for the complete raw logs",
+        ),
       includeVideo: z
         .boolean()
         .optional()

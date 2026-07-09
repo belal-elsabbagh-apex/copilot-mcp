@@ -4,11 +4,16 @@
 
 import { isRecord } from "../shared/util.js";
 import {
+  digestLogs,
+  extractFault,
+  type JobFault,
+  type JobLogDigest,
+} from "../uipath/log-digest.js";
+import {
   confirmJobsForOrder,
   type Env,
   fetchJobLogs,
   fetchJobVideoUrl,
-  type JobLog,
   jobDeepLink,
   listRecentJobs,
   resolveFolder,
@@ -28,13 +33,16 @@ export interface JobAnalysis {
   verdict: string;
   creationTime: string | undefined;
   endTime: string | undefined;
+  durationMs: number | null; // creationTime -> endTime
+  gapSincePreviousJobMs: number | null; // previous (older) run's end -> this run's start
   orchestratorUrl: string;
   schema: OutputSchemaId;
   result: string | null;
   output: Record<string, unknown>;
   analysis: OutputComment[];
+  fault: JobFault | null; // structured headline error for non-SUCCESS jobs
   videoUrl?: string | null;
-  logs?: JobLog[];
+  logDigest?: JobLogDigest; // condensed logs — the raw dump stays in get_job_logs
 }
 
 export interface AnalyzeResult {
@@ -79,6 +87,14 @@ const parseOutput = (oa: string | undefined): Record<string, unknown> => {
     return {};
   }
 };
+
+// Milliseconds between two ISO timestamps, null when either is missing/unparseable.
+function msBetween(start: string | undefined, end: string | undefined): number | null {
+  if (!(start && end)) return null;
+  const a = Date.parse(start);
+  const b = Date.parse(end);
+  return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
+}
 
 type SearchMode = "contains" | "recent-scan";
 interface Acquired {
@@ -138,7 +154,7 @@ async function acquireCandidates(
 }
 
 // Hydrate one confirmed job into its diagnosis (state, verdict, normalized output,
-// analysis comments, and optionally logs + video).
+// analysis comments, structured fault, and optionally a condensed log digest + video).
 async function toJobAnalysis(
   job: UiPathJob,
   scope: string | undefined,
@@ -150,21 +166,25 @@ async function toJobAnalysis(
   const logs = includeLogs ? await fetchJobLogs(job.Key ?? "", scope) : [];
   const videoUrl = includeVideo ? await fetchJobVideoUrl(job.Key ?? "", scope) : "";
   const resultRaw = output["out_Result"];
+  const verdict = jobVerdict(job.State, output);
   return {
     id: job.Id,
     key: job.Key,
     state: job.State,
     processName: job.ReleaseName,
-    verdict: jobVerdict(job.State, output),
+    verdict,
     creationTime: job.CreationTime,
     endTime: job.EndTime,
+    durationMs: msBetween(job.CreationTime, job.EndTime),
+    gapSincePreviousJobMs: null, // filled once all jobs are sorted
     orchestratorUrl: jobDeepLink(job.Key ?? ""),
     schema: norm.schema,
     result: typeof resultRaw === "string" ? resultRaw : null,
     output: Object.fromEntries(norm.fields), // token/callbackContext already stripped
     analysis: analyzeOutput(output, logs),
+    fault: verdict === "SUCCESS" ? null : extractFault(job, logs),
     ...(includeVideo ? { videoUrl: videoUrl || null } : {}),
-    ...(includeLogs ? { logs } : {}),
+    ...(includeLogs ? { logDigest: digestLogs(logs) } : {}),
   };
 }
 
@@ -204,6 +224,13 @@ export async function analyzeOrderExecution(
 
   // Newest first (search ordered desc, but confirm batches can reorder).
   jobs.sort((a, b) => (b.creationTime ?? "").localeCompare(a.creationTime ?? ""));
+  // Retry cadence: how long after the previous (older) run's end each run started.
+  for (let i = 0; i < jobs.length; i++) {
+    const cur = jobs[i];
+    const prev = jobs[i + 1]; // older neighbour
+    if (!(cur && prev)) continue;
+    cur.gapSincePreviousJobMs = msBetween(prev.endTime ?? prev.creationTime, cur.creationTime);
+  }
   const latest = jobs[0];
 
   return {

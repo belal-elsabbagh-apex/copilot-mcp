@@ -59,7 +59,7 @@ export function normalizeError(msg: string): string {
 
 // The headline error: the first Error-level log, else the last non-empty log line,
 // else a synthetic line from the job State.
-function topError(job: UiPathJob, logs: JobLog[]): string {
+export function topError(job: UiPathJob, logs: JobLog[]): string {
   const firstErr = logs.find((l) => l.Level?.toLowerCase() === "error" && l.Message?.trim());
   if (firstErr) return firstErr.Message.trim();
   const lastLine = [...logs].reverse().find((l) => l.Message?.trim());
