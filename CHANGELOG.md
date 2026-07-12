@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-07-12
+
+### Changed
+
+- **`get_settings` curates by default** — `normalized` now defaults to `true` (the same
+  UID/timestamp/per-section noise-stripping `diff_settings` already applies). Pass
+  `normalized: false` for the raw payload with real UIDs/timestamps visible.
+- **`get_job_logs` truncates long messages by default** — each `Message` is capped at 400
+  chars (reusing the log digest's cap) unless `fullMessages: true` is passed for the
+  untruncated text (e.g. a complete stack trace).
+
+### Fixed
+
+- **`build_queue_item` no longer leaks a live Orchestrator bearer token.** Its `curl` field
+  re-serialized the full ~40-field payload a second time *and* embedded the live
+  `uipath.bearer` token in plaintext inside the tool result — i.e. into the model's
+  context/conversation transcript. `curl` is removed; the response now carries
+  `meta.postUrl`/`meta.folderPath` plus a note on submitting the payload with your own token.
+
 ## [1.14.0] - 2026-07-09
 
 ### Added
