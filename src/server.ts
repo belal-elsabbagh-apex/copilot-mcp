@@ -79,7 +79,7 @@ import {
 import { envelopeRows, msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
-import { digestLogs, extractFault } from "./uipath/log-digest.js";
+import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
@@ -515,8 +515,9 @@ server.registerTool(
     }, // BUILD ONLY — fetches an order, never POSTs
     description:
       "Fetch an EHR Copilot order (prod or pre-prod) and build the UiPath AddQueueItem request " +
-      "(payload + ready-to-run curl) from its details. BUILD ONLY — never POSTs to UiPath; run the " +
-      "returned curl yourself. IsApproved is always false. Returns {payload, curl, notes, meta}.",
+      "payload from its details. BUILD ONLY — never POSTs to UiPath; submit it yourself using " +
+      "meta.postUrl and your own Orchestrator bearer token (see notes). IsApproved is always " +
+      "false. Returns {payload, notes, meta}.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Order UID to fetch (must exist in the chosen env)"),
       env: z
@@ -953,8 +954,10 @@ server.registerTool(
     },
     description:
       "Fetch robot execution logs (oldest first, capped 500) for a single job by its GUID Key, " +
-      "optionally with the video-recording URL. All filters are opt-in — by default the full " +
-      "(capped) log set is returned. READ-ONLY. " +
+      "optionally with the video-recording URL. All row filters are opt-in — by default the full " +
+      "(capped) log set is returned, but each Message is truncated to 400 chars (pass " +
+      "fullMessages=true for the untruncated text, e.g. to read a complete stack trace). " +
+      "READ-ONLY. " +
       "Returns {jobKey, folder, logs[], returned, totalMatching?, truncated, videoUrl?}.",
     inputSchema: {
       jobKey: z
@@ -998,9 +1001,27 @@ server.registerTool(
         .max(500)
         .optional()
         .describe("Only the last N matching logs (still returned oldest first)"),
+      fullMessages: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Return full untruncated Message text (default: truncated to 400 chars, matching " +
+            "analyze_order_execution's log digest). Use when you need a complete stack trace.",
+        ),
     },
   },
-  async ({ jobKey, env, folder, includeVideo, minLevel, contains, onlyFailures, tail }) => {
+  async ({
+    jobKey,
+    env,
+    folder,
+    includeVideo,
+    minLevel,
+    contains,
+    onlyFailures,
+    tail,
+    fullMessages,
+  }) => {
     try {
       const resolved = resolveFolder(env, folder);
       const filter: JobLogFilter = {
@@ -1013,7 +1034,7 @@ server.registerTool(
       const out: Record<string, unknown> = {
         jobKey,
         folder: resolved,
-        logs,
+        logs: fullMessages ? logs : logs.map((l) => ({ ...l, Message: truncate(l.Message) })),
         returned: logs.length,
         // truncated = the 500-row fetch window didn't cover every matching row
         // (a requested `tail` shorter than the total is not truncation).
@@ -1611,11 +1632,12 @@ server.registerTool(
     description:
       "Fetch an account's EHR Copilot settings from ONE env (prod or pre_prod) — the single-env " +
       "counterpart to diff_settings. Logs into that env only and returns each selected section's " +
-      "raw payload (list sections also report a row count). READ-ONLY — never writes. Scope with " +
+      "payload, stripped of env-specific noise (UIDs, timestamps, per-section ignore fields) by " +
+      "default (list sections also report a row count). READ-ONLY — never writes. Scope with " +
       "groups (top-level) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
       "to discover them; crawled sections (specialties / referred-* / orders) are heavier. Pass " +
-      "normalized=true to strip env-specific noise (UIDs, timestamps, per-section ignore fields) " +
-      "for cross-env comparison; default is raw so real UIDs stay visible. Returns " +
+      "normalized=false for the raw payload with real UIDs/timestamps visible (e.g. to copy a UID " +
+      "for another call). Returns " +
       "{account, env, base, sectionsFetched, sections:[{key,label,group,kind,count?,data|error}]}.",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to read (required — never assumed)"),
@@ -1638,8 +1660,11 @@ server.registerTool(
       normalized: z
         .boolean()
         .optional()
-        .default(false)
-        .describe("Strip UID/timestamp noise like diff_settings does (default false = raw)"),
+        .default(true)
+        .describe(
+          "Strip UID/timestamp noise like diff_settings does (default true). Pass false for " +
+            "raw payloads with real UIDs/timestamps visible (e.g. to copy a UID for another call).",
+        ),
     },
   },
   async ({ env, profile, groups, sections, emr, normalized }) => {

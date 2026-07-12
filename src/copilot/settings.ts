@@ -623,7 +623,7 @@ export interface GetSettingsOpts {
   sections?: string[];
   groups?: string[];
   emr?: string;
-  normalized?: boolean; // default false = raw payloads (UIDs/timestamps visible)
+  normalized?: boolean; // default true = stripped like diff_settings; false = raw
 }
 
 export interface GetSettingsSection {
@@ -645,8 +645,8 @@ export interface GetSettingsResult {
 }
 
 // Fetch the selected settings sections from ONE env — the single-env counterpart to
-// diffSettings. Read-only. Raw by default so real UIDs/timestamps stay visible for
-// inspection; normalized=true applies the diff's noise-stripping instead.
+// diffSettings. Read-only. Stripped by default (same noise-stripping as diffSettings);
+// normalized=false returns the raw payload with real UIDs/timestamps visible.
 export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsResult> {
   // Select first so an unknown group/section fails fast (no needless login).
   const chosen = selectSections(opts.sections, opts.groups, opts.emr);

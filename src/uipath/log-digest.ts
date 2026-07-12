@@ -38,12 +38,12 @@ export interface JobLogDigest {
   note: string; // escalation pointer for the agent
 }
 
-const MESSAGE_CAP = 400;
+export const MESSAGE_CAP = 400;
 const FAILURE_CAP = 25;
 const STALL_MIN_MS = 15_000;
 const STALL_TOP = 3;
 
-const truncate = (s: string, cap = MESSAGE_CAP): string =>
+export const truncate = (s: string, cap = MESSAGE_CAP): string =>
   s.length > cap ? `${s.slice(0, cap)}…` : s;
 
 // Consecutive logs collapse when level + normalized message match — retry loops

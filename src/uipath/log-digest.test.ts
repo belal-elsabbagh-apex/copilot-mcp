@@ -1,11 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { collapseLogs, digestLogs, extractFault, findLogStalls } from "./log-digest.js";
+import {
+  collapseLogs,
+  digestLogs,
+  extractFault,
+  findLogStalls,
+  MESSAGE_CAP,
+  truncate,
+} from "./log-digest.js";
 import type { JobLog, UiPathJob } from "./uipath.js";
 
 const log = (Level: string, Message: string, TimeStamp: string): JobLog => ({
   Level,
   Message,
   TimeStamp,
+});
+
+describe("truncate", () => {
+  test("leaves short strings untouched", () => {
+    expect(truncate("short message")).toBe("short message");
+  });
+  test("cuts long strings at MESSAGE_CAP and appends an ellipsis", () => {
+    const long = "x".repeat(MESSAGE_CAP + 50);
+    const out = truncate(long);
+    expect(out).toBe(`${"x".repeat(MESSAGE_CAP)}…`);
+    expect(out.length).toBe(MESSAGE_CAP + 1);
+  });
 });
 
 describe("collapseLogs", () => {

@@ -1,7 +1,8 @@
 // Build a UiPath AddQueueItem request from an EHR Copilot order (prod or pre-prod).
 // Ported natively from `.planning/build_queue_item.mjs` (logic unchanged; config + types only).
 // Fetch the order via /orders/filter, log in to capture the BE callback JWT + physicianId,
-// map order details -> SpecificContent, return { payload, curl, notes, meta }.
+// map order details -> SpecificContent, return { payload, notes, meta }. The caller submits it
+// themselves with their own bearer token — this module never embeds a live credential in output.
 // BUILD ONLY — never POSTs. IsApproved is ALWAYS false (see repo CLAUDE.md rule).
 
 import { randomUUID } from "node:crypto";
@@ -66,7 +67,6 @@ function requireQueueFields(
 
 export interface QueueItemResult {
   payload: unknown;
-  curl: string;
   notes: string[];
   meta: Record<string, unknown>;
 }
@@ -182,18 +182,15 @@ export async function buildQueueItem(
     },
   };
 
-  const url = uipath.orchestratorUrl.replace(/\/$/, "") + uipath.addQueueItemPath;
-  const curl = [
-    `curl --location '${url}' \\`,
-    `--header 'Authorization: Bearer ${uipath.bearer}' \\`,
-    "--header 'Content-Type: application/json' \\",
-    `--header 'X-UIPATH-FolderPath: ${uipath.folderPath}' \\`,
-    `--data-raw '${JSON.stringify(payload).replace(/'/g, "'\\''")}'`,
-  ].join("\n");
+  const postUrl = uipath.orchestratorUrl.replace(/\/$/, "") + uipath.addQueueItemPath;
+  notes.push(
+    "To submit: POST payload.itemData as JSON to meta.postUrl with headers " +
+      "'Authorization: Bearer <your uipath.bearer>' and " +
+      `'X-UIPATH-FolderPath: ${uipath.folderPath}'. Never done automatically by this tool.`,
+  );
 
   return {
     payload,
-    curl,
     notes,
     meta: {
       profile: profile ?? "(default)",
@@ -201,6 +198,8 @@ export async function buildQueueItem(
       physicianId,
       queueName: payload.itemData.Name,
       orderStatus: o.status,
+      postUrl,
+      folderPath: uipath.folderPath,
     },
   };
 }
