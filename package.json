@@ -15,7 +15,7 @@
   },
   "files": [
     "dist",
-    "config.example.json",
+    "copilot-mcp.config.example.json",
     "README.md"
   ],
   "engines": {

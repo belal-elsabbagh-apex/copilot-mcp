@@ -2,14 +2,21 @@
 //
 // One file holds BOTH the Copilot BE credentials and the UiPath Orchestrator
 // args: { copilot: {...}, uipath: {...} }. The path is taken from the
-// COPILOT_MCP_CONFIG env var, else `config.local.json` in the project root (cwd).
+// COPILOT_MCP_CONFIG env var, else `copilot-mcp.config.json` in the project root
+// (cwd), else the older `config.local.json` name for existing setups.
+//
+// The config is live: loadConfig() cheaply stats the backing file(s) on every call
+// and re-reads/re-validates only when they changed, so editing the file while the
+// server is running takes effect on the next call — no restart needed. Subscribe via
+// onConfigReload() to react to that (server.ts turns it into an MCP notification).
 //
 // Migration fallback: if no single-file config exists, this assembles the same
 // shape from a split `order-copy-credentials.json` + `uipath-config.json` (+ optional
 // `overrides.json`) found in COPILOT_MCP_LOCAL_DIR, so the legacy `.planning/.local`
-// setup keeps working — point COPILOT_MCP_LOCAL_DIR at it (see config.example.json).
+// setup keeps working — point COPILOT_MCP_LOCAL_DIR at it (see
+// copilot-mcp.config.example.json).
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -110,10 +117,33 @@ export interface ResolvedCreds {
 
 // ---- Loading -------------------------------------------------------------
 
+const DEFAULT_CONFIG_NAME = "copilot-mcp.config.json";
+// Pre-rename default filename. Still honored (with a warning) so existing
+// deployments relying on the cwd default keep working without a restart.
+const OLD_DEFAULT_CONFIG_NAME = "config.local.json";
+let warnedOldDefaultConfigName = false;
+
 // Resolved lazily (per loadConfig call) so the env var is honored even if it is set
-// after this module is first evaluated — notably under the test runner.
-const configPath = (): string =>
-  process.env["COPILOT_MCP_CONFIG"] ?? join(process.cwd(), "config.local.json");
+// after this module is first evaluated — notably under the test runner. When neither
+// env var nor the new default filename is present, falls back to the old default
+// filename for one release cycle.
+const configPath = (): string => {
+  const fromEnv = process.env["COPILOT_MCP_CONFIG"];
+  if (fromEnv) return fromEnv;
+  const preferred = join(process.cwd(), DEFAULT_CONFIG_NAME);
+  if (existsSync(preferred)) return preferred;
+  const legacy = join(process.cwd(), OLD_DEFAULT_CONFIG_NAME);
+  if (existsSync(legacy)) {
+    if (!warnedOldDefaultConfigName) {
+      warnedOldDefaultConfigName = true;
+      console.warn(
+        `copilot-mcp: using legacy default config filename ${OLD_DEFAULT_CONFIG_NAME}; rename it to ${DEFAULT_CONFIG_NAME} (the new default) when convenient.`,
+      );
+    }
+    return legacy;
+  }
+  return preferred;
+};
 // Split legacy config lives in COPILOT_MCP_LOCAL_DIR (falls back to a `.local` dir
 // next to the package for in-tree/dev use).
 const LOCAL_DIR = process.env["COPILOT_MCP_LOCAL_DIR"];
@@ -157,11 +187,55 @@ function loadLegacy(): unknown {
 }
 
 let _config: Config | undefined;
+let _statKey: string | undefined;
 
-// Read + validate the config once. Tries the single file first, then the legacy
-// pair. Validation errors name the exact field + path so misconfig is obvious.
+// mtime of whichever file(s) currently back the config, cheap to check (stat only,
+// no read/parse) so loadConfig can compare against it on every call without the cost
+// of re-reading JSON when nothing changed.
+function tryMtime(path: string): number | undefined {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+function computeStatKey(): string {
+  const cfgPath = configPath();
+  const single = tryMtime(cfgPath);
+  if (single !== undefined) return `single:${cfgPath}:${single}`;
+  const parts = [LEGACY_CREDS, LEGACY_UIPATH, LEGACY_OVERRIDES]
+    .map((p) => `${p}:${tryMtime(p) ?? "missing"}`)
+    .join("|");
+  return `legacy:${parts}`;
+}
+
+type ConfigReloadListener = (info: { source: string }) => void;
+const reloadListeners: ConfigReloadListener[] = [];
+
+// Subscribe to successful config reloads (fired after the *first* load only on
+// later changes, never on initial startup). Listeners must not throw; errors are
+// swallowed so a bad listener can never break config loading. Returns an
+// unsubscribe function.
+export function onConfigReload(listener: ConfigReloadListener): () => void {
+  reloadListeners.push(listener);
+  return () => {
+    const i = reloadListeners.indexOf(listener);
+    if (i !== -1) reloadListeners.splice(i, 1);
+  };
+}
+
+// Read + validate the config, live: every call cheaply stats the backing file(s)
+// and only re-reads/re-validates when they changed, so editing the config while the
+// server is running takes effect on the next call — no restart needed. Tries the
+// single file first, then the legacy pair. Validation errors name the exact field +
+// path so misconfig is obvious. If a previously-valid config is edited into
+// something invalid, this throws (fails closed) rather than silently keeping the
+// stale value — the next call retries the read.
 export function loadConfig(): Config {
-  if (_config) return _config;
+  const statKey = computeStatKey();
+  if (_config && statKey === _statKey) return _config;
+
   const cfgPath = configPath();
   let parsed: unknown;
   let source: string;
@@ -174,12 +248,12 @@ export function loadConfig(): Config {
       parsed = loadLegacy();
       source = `legacy split config (${LEGACY_CREDS} + ${LEGACY_UIPATH})`;
       console.warn(
-        `copilot-mcp: ${cfgPath} not found; using ${source}. Migrate to a single config — see config.example.json.`,
+        `copilot-mcp: ${cfgPath} not found; using ${source}. Migrate to a single config — see copilot-mcp.config.example.json.`,
       );
     } catch (e2) {
       if (e2 instanceof ConfigMissing) {
         throw new Error(
-          `No config found. Set COPILOT_MCP_CONFIG to a JSON config file, or put a config.local.json in the working directory (${process.cwd()}), or set COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Read the MCP resource copilot://reference/config-guide for the exact shape, field docs, and setup steps. The config is re-read on the next call — no server restart needed. Verify with the doctor tool once written. Missing: ${e2.message}`,
+          `No config found. Set COPILOT_MCP_CONFIG to a JSON config file, or put a ${DEFAULT_CONFIG_NAME} in the working directory (${process.cwd()}), or set COPILOT_MCP_LOCAL_DIR to a dir with the split legacy files. Read the MCP resource copilot://reference/config-guide for the exact shape, field docs, and setup steps. Config edits are picked up automatically on the next call — no server restart needed. Verify with the doctor tool once written. Missing: ${e2.message}`,
         );
       }
       throw e2;
@@ -192,13 +266,25 @@ export function loadConfig(): Config {
       .join("\n");
     throw new Error(`Config from ${source} is invalid:\n${issues}`);
   }
+  const isReload = _config !== undefined;
   _config = result.data;
+  _statKey = statKey;
+  if (isReload) {
+    for (const listener of reloadListeners) {
+      try {
+        listener({ source });
+      } catch {
+        // a bad listener must never break config loading
+      }
+    }
+  }
   return _config;
 }
 
 // Clear the memoized config. Intended for tests that swap COPILOT_MCP_CONFIG.
 export function resetConfigCache(): void {
   _config = undefined;
+  _statKey = undefined;
 }
 
 // Non-throwing config probe for startup guidance (server instructions / doctor).

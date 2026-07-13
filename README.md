@@ -46,12 +46,18 @@ The server reads one validated config holding both the Copilot BE creds and the 
 args. Two ways to provide it:
 
 1. **Single file (preferred):** set `COPILOT_MCP_CONFIG` to a JSON file shaped like
-   [`config.example.json`](./config.example.json).
+   [`copilot-mcp.config.example.json`](./copilot-mcp.config.example.json). If
+   `COPILOT_MCP_CONFIG` isn't set, the server looks for `copilot-mcp.config.json` in its
+   working directory (falling back to the older `config.local.json` name if that's what
+   you already have).
 2. **Split legacy files:** set `COPILOT_MCP_LOCAL_DIR` to a directory containing
    `order-copy-credentials.json` + `uipath-config.json` (+ optional `overrides.json`).
 
 The `uipath.queueUrl / addQueueItemPath / serverUrlByEnv` fields are only
 required by `build_queue_item`. `overrides` (per-prodUid clone remaps) is optional.
+Editing the config file while the server is running takes effect on the next tool
+call — no restart needed — and the server sends an MCP logging notification when it
+reloads.
 
 When a tool fails for a reason that looks like a bug in this server (an unexpected
 exception — not a bad profile, missing/invalid config, not-found, auth, or any HTTP error
@@ -109,7 +115,7 @@ at the newest release; swap in a `download/vX.Y.Z/…` URL to pin a version.
         "https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest/download/copilot-mcp.tgz"
       ],
       "env": {
-        "COPILOT_MCP_CONFIG": "/abs/path/to/config.local.json"
+        "COPILOT_MCP_CONFIG": "/abs/path/to/copilot-mcp.config.json"
       }
     }
   }

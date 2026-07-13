@@ -528,19 +528,19 @@ export const SAFETY_RULES = {
 
 // ---- Config setup guide ----------------------------------------------------
 // Everything an agent needs to write a working config from scratch when the
-// server starts without one. Mirrors config.example.json + config.ts schema —
+// server starts without one. Mirrors copilot-mcp.config.example.json + config.ts schema —
 // keep the three in sync. Placeholders only; never put real values here.
 
 export const CONFIG_GUIDE = {
   howItLoads: [
-    "The server reads ONE JSON config file, checked in this order: the file at $COPILOT_MCP_CONFIG; else config.local.json in the server's working directory; else the legacy split files in $COPILOT_MCP_LOCAL_DIR (order-copy-credentials.json + uipath-config.json).",
-    "The config is loaded lazily on the first tool call and retried on every call until it loads — after writing the file you do NOT need to restart the server.",
-    "Validation errors name the exact field and path; a missing file lists all three lookup options.",
+    "The server reads ONE JSON config file, checked in this order: the file at $COPILOT_MCP_CONFIG; else copilot-mcp.config.json in the server's working directory (falling back to the older config.local.json name if that's what exists); else the legacy split files in $COPILOT_MCP_LOCAL_DIR (order-copy-credentials.json + uipath-config.json).",
+    "The config is live: every tool call cheaply checks the file's mtime and re-reads + re-validates it when it changed, so editing the file takes effect on the next call — no server restart needed, ever, not just before the first successful load. The server sends an MCP logging notification (notifications/message) each time it picks up a change.",
+    "Validation errors name the exact field and path; a missing file lists all three lookup options. If an already-loaded config is edited into something invalid, calls fail with that same validation error (fail closed) rather than silently keeping the old values.",
   ],
   steps: [
     "1. Ask the user for the values marked <ASK-USER> below — credentials and tokens cannot be guessed and must never be invented.",
-    "2. Write the JSON file (template below) somewhere private and gitignored, e.g. ~/.config/copilot-mcp/config.json or config.local.json next to the server.",
-    "3. If not using the default config.local.json location, set COPILOT_MCP_CONFIG to the file's absolute path in the MCP host's server config (the `env` block of this server's entry).",
+    "2. Write the JSON file (template below) somewhere private and gitignored, e.g. ~/.config/copilot-mcp/config.json or copilot-mcp.config.json next to the server.",
+    "3. If not using the default copilot-mcp.config.json location, set COPILOT_MCP_CONFIG to the file's absolute path in the MCP host's server config (the `env` block of this server's entry).",
     "4. Call the doctor tool (profile=<one of copilot.profiles>) to verify: it logs into the Copilot BE for both envs and probes both UiPath folders.",
   ],
   template: {

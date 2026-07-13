@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getUipath, resetConfigCache, resolveCreds } from "./config.js";
+import { getUipath, onConfigReload, resetConfigCache, resolveCreds } from "./config.js";
 
 const envCreds = (name: string) => ({
   be: `https://be.${name}.example.com`,
@@ -63,5 +63,103 @@ describe("getUipath", () => {
   test("returns the validated uipath block", () => {
     expect(getUipath().bearer).toBe("test-bearer");
     expect(getUipath().orchestratorUrl).toContain("cloud.uipath.com");
+  });
+});
+
+describe("live reload", () => {
+  let liveDir: string;
+  let liveConfigPath: string;
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    liveDir = mkdtempSync(join(tmpdir(), "copilot-mcp-live-"));
+    liveConfigPath = join(liveDir, "config.json");
+    writeFileSync(liveConfigPath, JSON.stringify(FIXTURE));
+    prevEnv = process.env["COPILOT_MCP_CONFIG"];
+    process.env["COPILOT_MCP_CONFIG"] = liveConfigPath;
+    resetConfigCache();
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env["COPILOT_MCP_CONFIG"];
+    else process.env["COPILOT_MCP_CONFIG"] = prevEnv;
+    resetConfigCache();
+    rmSync(liveDir, { recursive: true, force: true });
+  });
+
+  // Force a detectable mtime change regardless of the filesystem's timestamp
+  // resolution, rather than relying on real wall-clock elapsing between writes.
+  const touch = (path: string) => {
+    const future = new Date(Date.now() + 2000);
+    utimesSync(path, future, future);
+  };
+
+  test("picks up an edited file on the next call, without resetConfigCache()", () => {
+    expect(resolveCreds().prod.email).toBe("prod@example.com");
+    writeFileSync(
+      liveConfigPath,
+      JSON.stringify({ ...FIXTURE, copilot: { ...FIXTURE.copilot, prod: envCreds("prod-v2") } }),
+    );
+    touch(liveConfigPath);
+    expect(resolveCreds().prod.email).toBe("prod-v2@example.com");
+  });
+
+  test("notifies onConfigReload listeners on a reload, but not on the first load", () => {
+    const events: Array<{ source: string }> = [];
+    const unsubscribe = onConfigReload((info) => events.push(info));
+    try {
+      resolveCreds();
+      expect(events).toHaveLength(0);
+      writeFileSync(liveConfigPath, JSON.stringify(FIXTURE));
+      touch(liveConfigPath);
+      resolveCreds();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.source).toBe(liveConfigPath);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("fails closed on an invalid edit, then recovers once fixed", () => {
+    expect(resolveCreds().prod.email).toBe("prod@example.com");
+    writeFileSync(liveConfigPath, "{ not valid json");
+    touch(liveConfigPath);
+    expect(() => resolveCreds()).toThrow(/not valid JSON/);
+    writeFileSync(liveConfigPath, JSON.stringify(FIXTURE));
+    touch(liveConfigPath);
+    expect(resolveCreds().prod.email).toBe("prod@example.com");
+  });
+});
+
+describe("default filename", () => {
+  let tmp: string;
+  let prevEnv: string | undefined;
+  let prevCwd: string;
+
+  beforeEach(() => {
+    prevEnv = process.env["COPILOT_MCP_CONFIG"];
+    delete process.env["COPILOT_MCP_CONFIG"];
+    prevCwd = process.cwd();
+    tmp = mkdtempSync(join(tmpdir(), "copilot-mcp-default-"));
+    process.chdir(tmp);
+    resetConfigCache();
+  });
+
+  afterEach(() => {
+    process.chdir(prevCwd);
+    if (prevEnv === undefined) delete process.env["COPILOT_MCP_CONFIG"];
+    else process.env["COPILOT_MCP_CONFIG"] = prevEnv;
+    resetConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("prefers copilot-mcp.config.json when present", () => {
+    writeFileSync(join(tmp, "copilot-mcp.config.json"), JSON.stringify(FIXTURE));
+    expect(resolveCreds().prod.email).toBe("prod@example.com");
+  });
+
+  test("falls back to the legacy config.local.json name when the new one is absent", () => {
+    writeFileSync(join(tmp, "config.local.json"), JSON.stringify(FIXTURE));
+    expect(resolveCreds().prod.email).toBe("prod@example.com");
   });
 });

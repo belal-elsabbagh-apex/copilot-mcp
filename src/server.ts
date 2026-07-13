@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { configStatus, getFeedbackConfig, resolveCreds } from "./config/config.js";
+import { configStatus, getFeedbackConfig, onConfigReload, resolveCreds } from "./config/config.js";
 import { analyzeOrderExecution } from "./copilot/analyze.js";
 import {
   assertPreProdClient,
@@ -197,6 +197,12 @@ export const server = new McpServer(
 // registration follows below in this module.
 registerLogging(server);
 registerPrompts(server);
+
+// Config is live-reloaded (see config.ts) — tell the client via a logging
+// notification whenever an edit on disk is picked up.
+onConfigReload(({ source }) =>
+  mcpLog(server, "info", `Configuration reloaded from ${source}`, { source }),
+);
 
 // ---- clone_order ---------------------------------------------------------
 server.registerTool(

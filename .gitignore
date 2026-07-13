@@ -4,6 +4,7 @@ bun.lock
 dist/
 # secrets / local config — never commit
 .local/
+copilot-mcp.config.json
 config.local.json
 *.env
 .env*

@@ -61,7 +61,7 @@ function requireQueueFields(
   if (missing.length)
     throw new Error(
       `uipath config is missing fields required for build_queue_item: ${missing.join(", ")}. ` +
-        "Add them to your COPILOT_MCP_CONFIG uipath block (see config.example.json).",
+        "Add them to your COPILOT_MCP_CONFIG uipath block (see copilot-mcp.config.example.json).",
     );
 }
 
