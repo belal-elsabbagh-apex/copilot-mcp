@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-07-13
+
+### Added
+
+- **Live config reload** — the config file is now re-read automatically when it
+  changes on disk (checked cheaply via file mtime on every call) instead of being
+  cached in memory forever after the first successful load, so editing credentials,
+  profiles, or overrides takes effect on the next tool call with no server restart.
+  The server sends an MCP `notifications/message` each time a reload happens. An
+  edit that fails validation fails closed (throws, matching a cold-start error)
+  rather than silently continuing to serve stale credentials.
+
+### Changed
+
+- **Default config filename is now `copilot-mcp.config.json`** (used when
+  `COPILOT_MCP_CONFIG` isn't set), so it's obviously this server's config rather than
+  a generic `config.local.json`. The old `config.local.json` name still works as a
+  fallback (with a one-time warning) so existing setups aren't broken.
+
 ## [1.15.0] - 2026-07-12
 
 ### Changed
