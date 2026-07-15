@@ -6,6 +6,7 @@ import {
   buildMergedSpecialityBody,
   buildOrderNameCreateBody,
   buildSpecialityCreateBody,
+  cleanReferralForWrite,
   diffList,
   diffObjects,
   type FieldDiff,
@@ -331,6 +332,82 @@ describe("sync_settings (pure)", () => {
       name: "New Fac",
       payersProviderId: [{ payerUid: "pre-payer-B", providerId: "1", linked: true }],
     });
+  });
+
+  // Full field set verified two ways: a captured HAR of the Settings UI's "edit referred
+  // facility" PUT (specialities/{uid}, full-replace body) and a live GET .../specialities
+  // read. Field NAMES/shape below are real; values are synthetic (no real
+  // provider/facility PII belongs in a committed fixture). This pins that
+  // cleanReferralForWrite's generic "copy everything except uid-suffixed keys +
+  // createdAt/updatedAt/updatedBy" strategy actually preserves every one of them — not
+  // just the couple of fields the smaller tests above use.
+  const FULL_FACILITY = {
+    referredFacilityUid: "00000000-0000-0000-0000-000000000f01", // own uid — must be stripped
+    name: "Synthetic Rehab Center",
+    NPI: "1000000001",
+    faxNumber: "(555) 010-0001",
+    isFaxVerified: true,
+    phone: "(555) 010-0002",
+    address: "1 Test Way, Sampletown, CA 90000",
+    zipCode: "90000",
+    placeOfService: "11 - Office",
+    comment: "",
+    external: false,
+    isSpeciality: false,
+    includeReferralForm: true,
+    isAdditionAllowed: false,
+    milesThreshold: null,
+    createdAt: "2026-06-28T16:12:37.801Z", // noise — must be stripped
+    updatedAt: "2026-06-28T16:16:07.011Z", // noise — must be stripped
+    specialityUid: "00000000-0000-0000-0000-000000000s01", // own uid — must be stripped
+    specialityName: null,
+    payersProviderId: [{ payerUid: "prod-payer-A", providerId: "42", linked: true }],
+  };
+
+  test("cleanReferralForWrite preserves every referred-facility field except uid/timestamp noise", () => {
+    const { item, droppedPayers } = cleanReferralForWrite(FULL_FACILITY, payerMap);
+    expect(droppedPayers).toEqual([]);
+    const { referredFacilityUid, createdAt, updatedAt, specialityUid, ...rest } = FULL_FACILITY;
+    expect(item).toEqual({
+      ...rest,
+      payersProviderId: [{ payerUid: "pre-payer-A", providerId: "42", linked: true }],
+    });
+  });
+
+  // referredProviders carry one extra field (emrProviderId) and no `comment`; the create
+  // body builder must preserve those just as generically as it does for facilities.
+  // Values are synthetic, matching FULL_FACILITY's approach above.
+  const FULL_PROVIDER = {
+    referredProviderUid: "00000000-0000-0000-0000-000000000p01", // own uid — must be stripped
+    name: "Synthetic Provider",
+    NPI: null,
+    faxNumber: null,
+    isFaxVerified: false,
+    phone: null,
+    address: null,
+    zipCode: null,
+    placeOfService: "11 - Office",
+    emrProviderId: null,
+    external: true,
+    isSpeciality: false,
+    includeReferralForm: false,
+    isAdditionAllowed: false,
+    milesThreshold: null,
+    createdAt: "2026-02-07T08:07:46.754Z", // noise — must be stripped
+    updatedAt: "2026-02-07T08:07:46.754Z", // noise — must be stripped
+    specialityUid: null,
+    specialityName: null,
+    payersProviderId: [],
+  };
+
+  test("buildSpecialityCreateBody preserves the full referredProviders field set (emrProviderId included)", () => {
+    const { body } = buildSpecialityCreateBody(
+      { name: "PCP", referredFacilities: [], referredProviders: [FULL_PROVIDER] },
+      payerMap,
+    );
+    const prov = (body["referredProviders"] as Record<string, unknown>[])[0] ?? {};
+    const { referredProviderUid, createdAt, updatedAt, specialityUid, ...rest } = FULL_PROVIDER;
+    expect(prov).toEqual(rest);
   });
 
   test("planSpecialitySync emits create + merge, skips unmatched types and in-sync specialties", () => {
