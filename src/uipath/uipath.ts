@@ -6,7 +6,7 @@ import { type Env, getUipath } from "../config/config.js";
 import { isFailureLog } from "../copilot/output-analysis.js";
 import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
-import { isRecord } from "../shared/util.js";
+import { chunk, isRecord } from "../shared/util.js";
 
 export type { Env };
 
@@ -19,7 +19,39 @@ export interface UiPathJob {
   EndTime?: string;
   OutputArguments?: string;
   InputArguments?: string;
+  RobotName?: string; // from $expand=Robot($select=Name) — the robot that ran/is running the job
+  ProcessVersion?: string; // from $expand=Release($select=ProcessVersion) — the pinned package version
 }
+
+const numField = (v: unknown, k: string): number => {
+  const r = isRecord(v) ? v[k] : undefined;
+  return typeof r === "number" ? r : 0;
+};
+const strField = (v: unknown, k: string): string => {
+  const r = isRecord(v) ? v[k] : undefined;
+  return typeof r === "string" ? r : "";
+};
+const recField = (v: unknown, k: string): Record<string, unknown> => {
+  const r = isRecord(v) ? v[k] : undefined;
+  return isRecord(r) ? r : {};
+};
+
+// Flatten the $expand=Robot($select=Name),Release($select=ProcessVersion) nav objects
+// onto the flat UiPathJob shape; every other field passes through unchanged.
+export const toUiPathJob = (raw: unknown): UiPathJob => {
+  const robotName = strField(recField(raw, "Robot"), "Name");
+  const processVersion = strField(recField(raw, "Release"), "ProcessVersion");
+  return {
+    ...(raw as UiPathJob),
+    ...(robotName ? { RobotName: robotName } : {}),
+    ...(processVersion ? { ProcessVersion: processVersion } : {}),
+  };
+};
+
+// Nav properties folded into every Jobs query below — confirmed via live $metadata
+// that Robot/Release are valid Jobs nav properties; nested $select keeps the
+// expanded payload down to just the two fields we flatten in toUiPathJob.
+const JOB_EXPAND = "Robot($select=Name),Release($select=ProcessVersion)";
 
 export interface JobLog {
   Level: string;
@@ -152,10 +184,11 @@ export async function searchJobsByOrderId(
       $orderby: "CreationTime desc",
       $top: String(top),
       $select: "Id,Key,State,ReleaseName,CreationTime",
+      $expand: JOB_EXPAND,
     },
     folder,
   );
-  return odataValues<UiPathJob>(data);
+  return odataValues<unknown>(data).map(toUiPathJob);
 }
 
 // Recent jobs in a folder, newest first — bounded by `since`/`top`, with NO
@@ -172,25 +205,32 @@ export async function listRecentJobs(
     $orderby: "CreationTime desc",
     $top: String(top),
     $select: "Id,Key,State,ReleaseName,CreationTime,EndTime",
+    $expand: JOB_EXPAND,
   };
   const clauses: string[] = [];
   if (since) clauses.push(`CreationTime gt ${new Date(since).toISOString()}`);
   const needle = processName?.trim();
   if (needle) clauses.push(`contains(ReleaseName, '${needle.replace(/'/g, "''")}')`);
   if (clauses.length) params["$filter"] = clauses.join(" and ");
-  return odataValues<UiPathJob>(await uipathGet("/odata/Jobs", params, folder));
+  return odataValues<unknown>(await uipathGet("/odata/Jobs", params, folder)).map(toUiPathJob);
 }
 
 // Single job detail — the single-job endpoint returns OutputArguments where the
-// collection omits it.
+// collection omits it (confirmed: the collection nulls it even with an explicit
+// $select, regardless of folder/permissions — a platform limitation, not a bug here).
 async function fetchJobDetailsById(jobId: string, folder?: string): Promise<UiPathJob | null> {
   if (!jobId) return null;
   try {
-    return (await uipathGet(
-      `/odata/Jobs(${jobId})`,
-      { $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments" },
-      folder,
-    )) as UiPathJob;
+    return toUiPathJob(
+      await uipathGet(
+        `/odata/Jobs(${jobId})`,
+        {
+          $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
+          $expand: JOB_EXPAND,
+        },
+        folder,
+      ),
+    );
   } catch {
     return null;
   }
@@ -209,13 +249,35 @@ export async function fetchJobByKey(jobKey: string, folder?: string): Promise<Ui
         $filter: `Key eq ${key}`,
         $top: "1",
         $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
+        $expand: JOB_EXPAND,
       },
       folder,
     );
-    return odataValues<UiPathJob>(data)[0] ?? null;
+    const job = odataValues<unknown>(data)[0];
+    return job !== undefined ? toUiPathJob(job) : null;
   } catch {
     return null;
   }
+}
+
+// Fetch several jobs by GUID Key in one MCP round-trip. Each key still costs its
+// own HTTP call — confirmed live that the Jobs collection endpoint DOES support
+// `Key in (...)`/`or` correctly, but only the single-entity endpoint ever returns
+// OutputArguments (collection nulls it regardless of $select), so a collection
+// batch call can't replace this when detail is needed. Bounded concurrency (chunks
+// of 10, matching confirmJobsForOrder) keeps a large batch from hammering Orchestrator.
+export async function fetchJobsForKeys(
+  jobKeys: string[],
+  folder?: string,
+): Promise<Record<string, UiPathJob | null>> {
+  const out: Record<string, UiPathJob | null> = {};
+  for (const batch of chunk(jobKeys, 10)) {
+    const results = await Promise.all(batch.map((key) => fetchJobByKey(key, folder)));
+    batch.forEach((key, i) => {
+      out[key] = results[i] ?? null;
+    });
+  }
+  return out;
 }
 
 // Narrow search candidates to jobs whose normalized output truly belongs to
@@ -227,8 +289,7 @@ export async function confirmJobsForOrder(
   folder?: string,
 ): Promise<UiPathJob[]> {
   const confirmed: UiPathJob[] = [];
-  for (let i = 0; i < jobs.length; i += 10) {
-    const batch = jobs.slice(i, i + 10);
+  for (const batch of chunk(jobs, 10)) {
     const details = await Promise.allSettled(
       batch.map((job) => fetchJobDetailsById(job.Id ?? "", folder)),
     );
@@ -328,6 +389,29 @@ export async function fetchJobLogs(jobKey: string, folder?: string): Promise<Job
   return (await fetchFilteredJobLogs(jobKey, folder)).logs;
 }
 
+// Fetch logs for several jobs in one MCP round-trip, same `filter` applied to
+// each. RobotLogs has NO way to combine multiple JobKeys server-side — confirmed
+// live that both `JobKey in (...)` and `JobKey eq X or JobKey eq Y` silently
+// return wrong/empty results rather than erroring, so one HTTP call per key is a
+// hard platform limit. What this collapses is MCP round-trips, not HTTP calls:
+// bounded concurrency (chunks of 10) instead of one tool call per job.
+export async function fetchJobLogsForKeys(
+  jobKeys: string[],
+  folder?: string,
+  filter: JobLogFilter = {},
+): Promise<Record<string, JobLogResult>> {
+  const out: Record<string, JobLogResult> = {};
+  for (const batch of chunk(jobKeys, 10)) {
+    const results = await Promise.all(
+      batch.map((key) => fetchFilteredJobLogs(key, folder, filter)),
+    );
+    batch.forEach((key, i) => {
+      out[key] = results[i] ?? { logs: [], totalMatching: null };
+    });
+  }
+  return out;
+}
+
 // Video recording uri for a job (the entry whose uri points at recording.webm).
 export async function fetchJobVideoUrl(jobKey: string, folder?: string): Promise<string> {
   if (!jobKey) return "";
@@ -375,22 +459,19 @@ export interface QueueItem {
   creationTime: string;
   retryNumber: number;
   queueDefinitionId: number;
-  name: string; // queue display name (can be "" / stale — see QueueDefinitions)
+  name: string; // queue display name — from $expand=QueueDefinition (live), else the item's own possibly-stale Name
+  robotName: string; // from $expand=Robot($select=Name); "" if unassigned
   specificContent: Record<string, unknown>;
 }
 
-const numField = (v: unknown, k: string): number => {
-  const r = isRecord(v) ? v[k] : undefined;
-  return typeof r === "number" ? r : 0;
-};
-const strField = (v: unknown, k: string): string => {
-  const r = isRecord(v) ? v[k] : undefined;
-  return typeof r === "string" ? r : "";
-};
-const recField = (v: unknown, k: string): Record<string, unknown> => {
-  const r = isRecord(v) ? v[k] : undefined;
-  return isRecord(r) ? r : {};
-};
+// Nav properties folded into every QueueItems query below — confirmed via live
+// $metadata that QueueDefinition/Robot are valid QueueItems nav properties. MUST
+// stay a bare expand (no nested $select): confirmed live that a nested $select
+// inside $expand on THIS endpoint silently nulls that entity — e.g.
+// `Robot($select=Name)` returns Robot:null even when the item has a robot — while
+// the identical nested-$select pattern works fine on Jobs (see JOB_EXPAND). toQueueItem
+// only reads .Name off the full object, so the larger payload costs nothing downstream.
+const QUEUE_ITEM_EXPAND = "QueueDefinition,Robot";
 
 export const toQueueItem = (raw: unknown): QueueItem => ({
   id: numField(raw, "Id"),
@@ -399,7 +480,8 @@ export const toQueueItem = (raw: unknown): QueueItem => ({
   creationTime: strField(raw, "CreationTime"),
   retryNumber: numField(raw, "RetryNumber"),
   queueDefinitionId: numField(raw, "QueueDefinitionId"),
-  name: strField(raw, "Name"),
+  name: strField(recField(raw, "QueueDefinition"), "Name") || strField(raw, "Name"),
+  robotName: strField(recField(raw, "Robot"), "Name"),
   specificContent: recField(raw, "SpecificContent"),
 });
 
@@ -417,7 +499,12 @@ export const scopeForEnv = (env: Env): FolderScope => ({
 // Single queue item by transaction/item id. Throws on a non-2xx.
 export async function getQueueItem(itemId: number, scope: FolderScope): Promise<QueueItem> {
   return toQueueItem(
-    await uipathGet(`/odata/QueueItems(${itemId})`, {}, scope.folderPath, scope.orgUnitId),
+    await uipathGet(
+      `/odata/QueueItems(${itemId})`,
+      { $expand: QUEUE_ITEM_EXPAND },
+      scope.folderPath,
+      scope.orgUnitId,
+    ),
   );
 }
 
@@ -539,7 +626,16 @@ export interface UiPathTrigger {
 export async function listTriggers(scope: FolderScope, top: number): Promise<UiPathTrigger[]> {
   const data = await uipathGet(
     "/odata/ProcessSchedules",
-    { $top: String(top) },
+    {
+      $top: String(top),
+      // ProcessScheduleDto already denormalizes ReleaseName/QueueDefinitionName as
+      // plain columns (confirmed via $metadata — no $expand needed/available for
+      // Release/QueueDefinition here); $select just trims the rest of the row
+      // (MachineRobots, Tags, cron fields, …) that this shape doesn't use.
+      $select:
+        "Id,Name,Enabled,ReleaseId,ReleaseKey,ReleaseName,QueueDefinitionId," +
+        "QueueDefinitionName,ItemsActivationThreshold,MaxJobsForActivation",
+    },
     scope.folderPath,
     scope.orgUnitId,
   );
@@ -577,6 +673,7 @@ export async function listQueueItems(
       $orderby: "CreationTime desc",
       $top: String(top),
       $select: "Id,Status,Reference,CreationTime,RetryNumber,QueueDefinitionId,SpecificContent",
+      $expand: QUEUE_ITEM_EXPAND,
     },
     scope.folderPath,
     scope.orgUnitId,

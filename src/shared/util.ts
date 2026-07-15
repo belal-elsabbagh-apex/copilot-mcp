@@ -29,3 +29,11 @@ export function msBetween(start: string | undefined, end: string | undefined): n
   const b = Date.parse(end);
   return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
 }
+
+// Split into fixed-size groups (last group may be smaller). Used to bound fan-out
+// concurrency when a batch of independent requests replaces a per-item MCP call.
+export function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}

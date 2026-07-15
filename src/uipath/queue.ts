@@ -169,6 +169,7 @@ export interface ListQueueRow {
   reference: string;
   creationTime: string;
   retryNumber: number;
+  robotName: string; // "" if unassigned/not yet picked up
   memberId: string;
   member: string;
 }
@@ -219,6 +220,7 @@ export async function listQueue(args: ListQueueArgs): Promise<ListQueueResult> {
       reference: r.reference,
       creationTime: r.creationTime,
       retryNumber: r.retryNumber,
+      robotName: r.robotName,
       memberId: str(r.specificContent["MemberID"]),
       member: str(r.specificContent["MemberFullName"]),
     })),

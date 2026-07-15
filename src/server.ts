@@ -17,7 +17,7 @@
 //   - list_queues              list queue definitions in a folder (read-only; discovers dev-clone queue ids)
 //   - list_processes           list releases/processes in a folder (read-only; releaseKey + pin verification)
 //   - list_triggers            list triggers in a folder (read-only; verify queue trigger -> release wiring)
-//   - get_job                  fetch one job's state/output by GUID Key (read-only; poll target after start_job)
+//   - get_job                  fetch one job's state/output by GUID Key, or several via jobKeys (read-only)
 //   - add_queue_item           POST one item to a dev-clone queue (pre_prod-only; test-safety guarded)
 //   - delete_queue_item        delete a 'New' queue item from the dev clone (pre_prod-only; fetch-first)
 //   - start_job                start job(s) for a dev-clone release (pre_prod-only)
@@ -83,11 +83,13 @@ import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
-  fetchFilteredJobLogs,
-  fetchJobByKey,
   fetchJobLogs,
+  fetchJobLogsForKeys,
+  fetchJobsForKeys,
   fetchJobVideoUrl,
+  type JobLog,
   type JobLogFilter,
+  type JobLogResult,
   jobDeepLink,
   listQueueDefinitions,
   listRecentJobs,
@@ -95,6 +97,7 @@ import {
   listTriggers,
   resolveFolder,
   scopeForEnv,
+  type UiPathJob,
 } from "./uipath/uipath.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
@@ -153,7 +156,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.16.0";
+const VERSION = "1.17.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -848,8 +851,8 @@ server.registerTool(
     description:
       "List items in a portal's UiPath queue for triage, newest first. Resolve by queueName " +
       "(prod queue ids only — pass queueDefId for dev) or an explicit queueDefId, optionally " +
-      "filtered by status. READ-ONLY, PHI-light projection (id/status/reference + member id/name). " +
-      "Returns {env, queueName, queueDefinitionId, count, items[]}.",
+      "filtered by status. READ-ONLY, PHI-light projection (id/status/reference/robotName + member " +
+      "id/name). Returns {env, queueName, queueDefinitionId, count, items[]}.",
     inputSchema: {
       queueName: z
         .string()
@@ -907,8 +910,9 @@ server.registerTool(
     description:
       "List the most recent Orchestrator jobs in a folder (newest first), without order " +
       "correlation. READ-ONLY. To diagnose a job from the list, call get_job with " +
-      "includeLogDigest=true (condensed failure digest + fault signature). Returns {env, folder, count, " +
-      "jobs:[{id,key,state,processName,creationTime,endTime,durationMs,deepLink}]}.",
+      "includeLogDigest=true (condensed failure digest + fault signature) — get_job also takes a " +
+      "jobKeys array to diagnose several jobs from this list in one call. Returns {env, folder, count, " +
+      "jobs:[{id,key,state,processName,processVersion,robotName,creationTime,endTime,durationMs,deepLink}]}.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -935,6 +939,8 @@ server.registerTool(
           key: j.Key,
           state: j.State,
           processName: j.ReleaseName,
+          processVersion: j.ProcessVersion ?? "",
+          robotName: j.RobotName ?? "",
           creationTime: j.CreationTime,
           endTime: j.EndTime,
           durationMs: msBetween(j.CreationTime, j.EndTime),
@@ -959,17 +965,35 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch robot execution logs (oldest first, capped 500) for a single job by its GUID Key, " +
-      "optionally with the video-recording URL. All row filters are opt-in — by default the full " +
-      "(capped) log set is returned, but each Message is truncated to 400 chars (pass " +
-      "fullMessages=true for the untruncated text, e.g. to read a complete stack trace). " +
-      "READ-ONLY. " +
-      "Returns {jobKey, folder, logs[], returned, totalMatching?, truncated, videoUrl?}.",
+      "Fetch robot execution logs (oldest first, capped 500 per job) for a job by its GUID Key, " +
+      "optionally with the video-recording URL. Pass jobKeys (up to 25) instead of jobKey to fetch " +
+      "logs for several jobs in ONE call — RobotLogs has no server-side way to combine JobKeys " +
+      "(confirmed: OData 'in'/'or' across JobKey silently misbehave), so this still issues one " +
+      "HTTP call per job under bounded concurrency, but collapses the MCP round-trips: use this " +
+      "instead of looping get_job_logs once per job. All row filters are opt-in and apply to every " +
+      "job in the batch — by default the full (capped) log set is returned, but each Message is " +
+      "truncated to 400 chars (pass fullMessages=true for the untruncated text, e.g. to read a " +
+      "complete stack trace). READ-ONLY. " +
+      "Returns {jobKey,folder,logs[],returned,totalMatching?,truncated,videoUrl?} for a single " +
+      "jobKey, or {env,folder,count,jobs:[{jobKey,logs[],returned,totalMatching?,truncated," +
+      "videoUrl?}]} for jobKeys.",
     inputSchema: {
       jobKey: z
         .string()
         .min(1)
-        .describe("The job's GUID Key (from analyze_order_execution / list_jobs)"),
+        .optional()
+        .describe(
+          "The job's GUID Key (from analyze_order_execution / list_jobs). Provide this OR " +
+            "jobKeys, not both",
+        ),
+      jobKeys: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(25)
+        .optional()
+        .describe(
+          "Batch: fetch logs for several jobs in one call. Provide this OR jobKey, not both",
+        ),
       env: z
         .enum(["prod", "pre_prod"])
         .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
@@ -1019,6 +1043,7 @@ server.registerTool(
   },
   async ({
     jobKey,
+    jobKeys,
     env,
     folder,
     includeVideo,
@@ -1029,6 +1054,8 @@ server.registerTool(
     fullMessages,
   }) => {
     try {
+      if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
+      if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
       const resolved = resolveFolder(env, folder);
       const filter: JobLogFilter = {
         onlyFailures,
@@ -1036,19 +1063,29 @@ server.registerTool(
         ...(contains !== undefined ? { contains } : {}),
         ...(tail !== undefined ? { tail } : {}),
       };
-      const { logs, totalMatching } = await fetchFilteredJobLogs(jobKey, resolved, filter);
-      const out: Record<string, unknown> = {
-        jobKey,
-        folder: resolved,
-        logs: fullMessages ? logs : logs.map((l) => ({ ...l, Message: truncate(l.Message) })),
-        returned: logs.length,
-        // truncated = the 500-row fetch window didn't cover every matching row
-        // (a requested `tail` shorter than the total is not truncation).
-        truncated: totalMatching !== null && totalMatching > 500,
-      };
-      if (totalMatching !== null) out["totalMatching"] = totalMatching;
-      if (includeVideo) out["videoUrl"] = await fetchJobVideoUrl(jobKey, resolved);
-      return ok(out);
+      const keys = jobKeys ?? [jobKey ?? ""];
+      const byKey = await fetchJobLogsForKeys(keys, resolved, filter);
+      const jobs = await Promise.all(
+        keys.map(async (key) => {
+          const { logs, totalMatching }: JobLogResult = byKey[key] ?? {
+            logs: [],
+            totalMatching: null,
+          };
+          const entry: Record<string, unknown> = {
+            jobKey: key,
+            logs: fullMessages ? logs : logs.map((l) => ({ ...l, Message: truncate(l.Message) })),
+            returned: logs.length,
+            // truncated = the 500-row fetch window didn't cover every matching row
+            // (a requested `tail` shorter than the total is not truncation).
+            truncated: totalMatching !== null && totalMatching > 500,
+          };
+          if (totalMatching !== null) entry["totalMatching"] = totalMatching;
+          if (includeVideo) entry["videoUrl"] = await fetchJobVideoUrl(key, resolved);
+          return entry;
+        }),
+      );
+      if (jobKeys) return ok({ env, folder: resolved, count: jobs.length, jobs });
+      return ok({ ...jobs[0], folder: resolved }); // single-jobKey call keeps the original flat shape
     } catch (e) {
       return toolError("get_job_logs", e, VERSION);
     }
@@ -1210,6 +1247,43 @@ server.registerTool(
   },
 );
 
+// Shape one job's detail (output parsed, optional fault + log digest) — shared by
+// get_job's single-jobKey and batched jobKeys paths so they stay in sync.
+function shapeJobDetail(
+  job: UiPathJob,
+  logs: JobLog[],
+  includeLogDigest: boolean,
+): Record<string, unknown> {
+  let output: unknown = null;
+  if (job.OutputArguments) {
+    try {
+      const parsed = JSON.parse(job.OutputArguments) as Record<string, unknown>;
+      output = Object.fromEntries(normalizeOutput(parsed).fields);
+    } catch {
+      output = job.OutputArguments.slice(0, 500);
+    }
+  }
+  return {
+    id: job.Id,
+    key: job.Key,
+    state: job.State,
+    processName: job.ReleaseName,
+    processVersion: job.ProcessVersion ?? "",
+    robotName: job.RobotName ?? "",
+    creationTime: job.CreationTime,
+    endTime: job.EndTime,
+    durationMs: msBetween(job.CreationTime, job.EndTime),
+    deepLink: job.Key ? jobDeepLink(job.Key) : "",
+    output,
+    ...(includeLogDigest
+      ? {
+          fault: job.State === "Successful" ? null : extractFault(job, logs),
+          logDigest: digestLogs(logs),
+        }
+      : {}),
+  };
+}
+
 // ---- get_job ---------------------------------------------------------------
 server.registerTool(
   "get_job",
@@ -1225,66 +1299,63 @@ server.registerTool(
       "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job, and " +
       "the job-first diagnostic when you have a Key but no orderUid " +
       "(list_jobs is an unkeyed scan; analyze_order_execution is order-correlated and heavy). " +
-      "READ-ONLY. `output` is the job's parsed OutputArguments with token/callbackContext " +
-      "stripped. With includeLogDigest=true it also returns a structured fault (headline error, " +
-      "stable signature, exception type) and a condensed failure-focused log digest — if the " +
-      "digest is not enough, call get_job_logs with this Key for the complete raw logs. " +
-      "Returns {env, folder, found, job:{id,key,state,processName,creationTime," +
-      "endTime,durationMs,deepLink,output,fault?,logDigest?}}.",
+      "Pass jobKeys (up to 25) instead of jobKey to diagnose several jobs — e.g. every job list_jobs " +
+      "just returned — in ONE call instead of looping get_job per key. READ-ONLY. `output` is the " +
+      "job's parsed OutputArguments with token/callbackContext stripped. With includeLogDigest=true " +
+      "it also returns a structured fault (headline error, stable signature, exception type) and a " +
+      "condensed failure-focused log digest — if the digest is not enough, call get_job_logs " +
+      "(also batchable via jobKeys) for the complete raw logs. " +
+      "Returns {env, folder, found, job:{id,key,state,processName,processVersion,robotName," +
+      "creationTime,endTime,durationMs,deepLink,output,fault?,logDigest?}} for a single jobKey, or " +
+      "{env, folder, count, jobs:[{key,found,job?}]} for jobKeys.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
         .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      jobKey: z.string().min(8).describe("The job's GUID Key (from start_job / list_jobs)"),
+      jobKey: z
+        .string()
+        .min(8)
+        .optional()
+        .describe(
+          "The job's GUID Key (from start_job / list_jobs). Provide this OR jobKeys, not both",
+        ),
+      jobKeys: z
+        .array(z.string().min(8))
+        .min(1)
+        .max(25)
+        .optional()
+        .describe("Batch: diagnose several jobs in one call. Provide this OR jobKey, not both"),
       folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
       includeLogDigest: z
         .boolean()
         .optional()
         .default(false)
         .describe(
-          "Also fetch the job's robot logs (extra round-trip) and return a condensed " +
+          "Also fetch each job's robot logs (extra HTTP call per job) and return a condensed " +
             "failure digest + structured fault (signature, exception type) — " +
             "use get_job_logs for the complete raw logs",
         ),
     },
   },
-  async ({ env, jobKey, folder, includeLogDigest }) => {
+  async ({ env, jobKey, jobKeys, folder, includeLogDigest }) => {
     try {
+      if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
+      if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
       const resolved = resolveFolder(env, folder);
-      const job = await fetchJobByKey(jobKey, resolved);
-      if (!job) return ok({ env, folder: resolved, found: false });
-      let output: unknown = null;
-      if (job.OutputArguments) {
-        try {
-          const parsed = JSON.parse(job.OutputArguments) as Record<string, unknown>;
-          output = Object.fromEntries(normalizeOutput(parsed).fields);
-        } catch {
-          output = job.OutputArguments.slice(0, 500);
-        }
-      }
-      const logs = includeLogDigest ? await fetchJobLogs(jobKey, resolved) : [];
-      return ok({
-        env,
-        folder: resolved,
-        found: true,
-        job: {
-          id: job.Id,
-          key: job.Key,
-          state: job.State,
-          processName: job.ReleaseName,
-          creationTime: job.CreationTime,
-          endTime: job.EndTime,
-          durationMs: msBetween(job.CreationTime, job.EndTime),
-          deepLink: job.Key ? jobDeepLink(job.Key) : "",
-          output,
-          ...(includeLogDigest
-            ? {
-                fault: job.State === "Successful" ? null : extractFault(job, logs),
-                logDigest: digestLogs(logs),
-              }
-            : {}),
-        },
-      });
+      const keys = jobKeys ?? [jobKey ?? ""];
+      const byKey = await fetchJobsForKeys(keys, resolved);
+      const results = await Promise.all(
+        keys.map(async (key) => {
+          const job = byKey[key] ?? null;
+          if (!job) return { key, found: false };
+          const logs = includeLogDigest ? await fetchJobLogs(key, resolved) : [];
+          return { key, found: true, job: shapeJobDetail(job, logs, includeLogDigest) };
+        }),
+      );
+      if (jobKeys) return ok({ env, folder: resolved, count: results.length, jobs: results });
+      const only = results[0];
+      if (!only?.found) return ok({ env, folder: resolved, found: false });
+      return ok({ env, folder: resolved, found: true, job: only.job });
     } catch (e) {
       return toolError("get_job", e, VERSION);
     }

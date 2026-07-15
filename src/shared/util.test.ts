@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { envelopeRows, isRecord, prop, stringProp } from "./util.js";
+import { chunk, envelopeRows, isRecord, prop, stringProp } from "./util.js";
 
 describe("isRecord", () => {
   test("accepts plain objects", () => {
@@ -43,5 +43,17 @@ describe("stringProp", () => {
     expect(stringProp({ msg: 5 }, "msg")).toBeUndefined();
     expect(stringProp({}, "msg")).toBeUndefined();
     expect(stringProp(null, "msg")).toBeUndefined();
+  });
+});
+
+describe("chunk", () => {
+  test("splits into fixed-size groups, last group smaller", () => {
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+  });
+  test("a single group when size >= length", () => {
+    expect(chunk([1, 2], 5)).toEqual([[1, 2]]);
+  });
+  test("empty input yields no groups", () => {
+    expect(chunk([], 3)).toEqual([]);
   });
 });

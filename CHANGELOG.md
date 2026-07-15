@@ -4,7 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.16.0] - 2026-07-13
+## [1.17.0] - 2026-07-15
+
+### Added
+
+- **`get_job_logs` and `get_job` can now batch by `jobKeys` (up to 25)** — pass an
+  array instead of a single `jobKey` to diagnose many jobs (e.g. every job a
+  `list_jobs` scan just returned) in one MCP call instead of looping one call per
+  job. RobotLogs has no server-side way to combine multiple `JobKey`s (`in`/`or`
+  silently return wrong/empty results rather than erroring — confirmed live), so a
+  batch still issues one HTTP call per job under bounded concurrency; what this
+  collapses is MCP round-trips, not HTTP calls. Single-`jobKey` calls keep their
+  exact existing response shape.
+- **`list_jobs`/`get_job` now include `robotName`/`processVersion`**, and
+  `list_queue_items`/`pull_queue_item` now include `robotName` and a corrected,
+  always-current queue `name` — all via OData `$expand` folded into the existing
+  query (same HTTP call count, richer response). The queue item's own `Name` field
+  can be empty/stale after a queue rename; the expanded `QueueDefinition.Name` is
+  authoritative.
+
+### Changed
+
+- **`list_triggers` now sends an explicit `$select`** instead of fetching every
+  `ProcessSchedules` field (cron internals, `MachineRobots`, `Tags`, …), shrinking
+  the response for the same single call.
+
+
 
 ### Added
 

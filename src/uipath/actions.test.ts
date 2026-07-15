@@ -54,6 +54,7 @@ describe("assertDeletable", () => {
     retryNumber: 0,
     queueDefinitionId: 0,
     name: "",
+    robotName: "",
     specificContent: {},
   });
 
