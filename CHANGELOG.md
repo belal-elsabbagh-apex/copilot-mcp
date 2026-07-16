@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-07-16
+
+### Added
+
+- **Optional OAuth (client-credentials) auth for UiPath Orchestrator**, alongside
+  the existing static bearer/PAT. Configure `uipath.oauth` (`clientId` +
+  `clientSecret`, plus optional `tokenUrl`/`scope`) to have the server fetch and
+  cache an access token instead of using a long-lived PAT. `uipath.bearer` is now
+  optional — at least one of `bearer`/`oauth` is required — and doubles as the
+  runtime fallback if OAuth is unconfigured or its token request fails. `tokenUrl`
+  is guessed from `orchestratorUrl` when omitted. `doctor` now reports which auth
+  mode (`oauth`/`bearer`) is active per env.
+
 ## [1.17.0] - 2026-07-15
 
 ### Added
