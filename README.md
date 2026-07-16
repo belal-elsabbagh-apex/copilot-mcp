@@ -6,21 +6,74 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 
 ## Tools
 
-| Tool | What it does |
-|------|--------------|
-| `clone_order` | Mirror PROD order(s) into PRE-PROD as fresh orders (clone-only by default; `submit` is opt-in). |
-| `find_clone_candidates` | List recent PROD orders that will actually clone to forReview. |
-| `delete_preprod_order` | Delete order(s) from PRE-PROD (never touches prod). |
-| `build_queue_item` | Build a UiPath AddQueueItem request (payload + curl) from an order. BUILD ONLY — `IsApproved` is always `false`. |
-| `analyze_order_execution` | Trace an order to its UiPath Orchestrator job(s) and diagnose the run. READ-ONLY. |
-| `build_faulted_job_issue` | Read a faulted UiPath job (by Key) + its robot logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`) for the RPA repo. READ-ONLY — it does **not** post to GitHub; the caller hands the payload to a GitHub MCP server. |
-| `diff_settings` | Diff an account's `/api/v1/settings/*` between prod and pre-prod (UID/timestamp noise stripped, lists matched by name). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). READ-ONLY. |
-| `get_settings` | Fetch an account's settings sections from ONE env (`prod` \| `pre_prod`) — the single-env counterpart to `diff_settings`. Raw payloads by default (UIDs visible); `normalized:true` applies the diff's noise-stripping. Same `groups`/`sections` scoping. READ-ONLY. |
-| `list_setting_sections` | List the settings sections `diff_settings`/`get_settings`/`plan_settings_sync` can scope to (key, label, group, kind, derived, and each list section's `matchKey`). Narrow with `group` and/or exact `sections` keys. Use it to drive fine-grained, section-level scoping rather than broad `groups`. READ-ONLY, no network. |
-| `plan_settings_sync` | Compute — WITHOUT writing — the additive actions that would copy prod-only settings into pre-prod. Each action carries a stable id (`section:op:typeName:itemName`), a one-line body summary, and warnings for references dropped for having no pre-prod match by name. Covers the outbound order-type **specialties** domain (`specialties` / `referred-providers` / `referred-facilities`) and the **orders** domain (section `orders`, create-only). Sections without a verified write endpoint are reported under `skippedSections`. READ-ONLY. |
-| `apply_settings_sync` | Execute planned sync actions against PRE-PROD — additive only (never overwrites or deletes existing pre-prod settings). Never accepts request bodies: it **re-plans server-side** (same scoping args as `plan_settings_sync`) and executes only the actions selected via `actionIds` OR an explicit `all:true` (exactly one required). Stale ids (state drifted since planning) are reported under `unmatchedIds` instead of executing. Every write is audit-logged to the client. |
-| `get_order` | Fetch a single order's normalized detail (status, insurance, ICD/CPT, facility, note presence) by uid in a chosen env, plus `documents`: clickable CDN links that exist for the order — the auth-screenshot PDF (when `hasAuthScreenshot`) and medical-authorization summary PDF(s). The CDN is CloudFront signed-cookie protected, so links open only in an authenticated Copilot browser session (never fetched/probed server-side). READ-ONLY. |
-| `doctor` | Probe the server's external connections (Copilot BE prod + pre-prod login, UiPath Orchestrator per env) and report what's reachable. READ-ONLY. |
+28 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
+(`env`, `profile`) — see each tool's own schema for the rest. Every Copilot tool requires an
+explicit `profile`; most also require an explicit `env` (`prod` | `pre_prod`) — neither is ever
+defaulted. UiPath-only tools take `env` but no `profile` (UiPath auths globally, not per-account).
+
+### Copilot orders
+
+All read tools here are READ-ONLY. Writes (`clone_order`, `delete_preprod_order`,
+`create_preprod_order`) only ever target **pre-prod**; prod is never mutated.
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `clone_order` | `profile` | Mirror one or more PROD orders into PRE-PROD as fresh orders. Clone-only by default (stops at forReview); `submit:true` is an explicit opt-in to also fire `/submit`. Patient name/DOB don't carry across envs; insurance/ICD/CPT/facility/POS do. Source orders need a facility+type+orderNames or they land "incomplete" — use `find_clone_candidates` first. |
+| `find_clone_candidates` | `profile` | Scan recent PROD orders and return only the ones that will actually clone to forReview (have a referredFacility, orderType, and orderNames) — filters out the ones that would get stuck "incomplete". |
+| `create_preprod_order` | `profile` | Mint a fresh PRE-PROD order from explicit data (no prod source needed) and drive it to forReview. Never submits. Handles the sequence quirks internally (order names reset speciality/provider; place-of-service applied last; `/process` retry). Composes with `build_queue_item` → `add_queue_item` for dev-clone robot tests. |
+| `delete_preprod_order` | `profile` | Delete one or more orders from PRE-PROD (`DELETE /api/v1/orders/{uid}`). Never targets prod. |
+| `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
+| `find_stuck_orders` | `env`, `profile` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheckUipath` correlates each to its UiPath job(s) for a coarse verdict. |
+| `build_queue_item` | `env`, `profile` | Fetch an order and BUILD the UiPath AddQueueItem request payload from it — never POSTs. `IsApproved` is always `false`. Pair with `add_queue_item` to actually post it. |
+| `get_login_token` | `env`, `profile` | Log into the Copilot BE and return the session JWT (the same token UiPath callbacks use as `SpecificContent.token`). Authenticates only — reads/writes no order data. |
+
+### UiPath Orchestrator — reads
+
+All READ-ONLY.
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `analyze_order_execution` | `env`, `profile` | Trace a Copilot `orderUid` to its UiPath job(s) and diagnose the run: state/verdict, computed durations/retry gaps, a structured fault (headline, stable signature, exception type), a condensed log digest, video link, and Orchestrator deep link. Optionally enriches with the order's current BE status. |
+| `list_jobs` | `env` | List the most recent Orchestrator jobs in a folder, newest first, no order correlation. |
+| `get_job` | `env` | Fetch one (or up to 25 via `jobKeys`) job(s) by GUID Key — the light poll target after `start_job`. `includeLogDigest:true` adds a structured fault + condensed log digest. |
+| `get_job_logs` | `env` | Fetch a job's robot logs (oldest first, capped 500), optionally batched via `jobKeys` (up to 25) and filtered (`minLevel`, `contains`, `onlyFailures`, `tail`); messages truncate to 400 chars unless `fullMessages:true`. |
+| `list_queue_items` | `env` | Browse a portal's UiPath queue for triage — resolve by `queueName` (prod) or `queueDefId` (pre-prod), optionally filtered by status. |
+| `list_queues` | `env` | List the queue definitions in a folder — use to discover a `queueDefId` (dev-clone ids differ from the prod portal registry) or the exact queue `Name` for `add_queue_item`. |
+| `list_processes` | `env` | List the releases ("processes") in a folder — `key` is the `releaseKey` `start_job` takes; check `processVersion`/`isLatestVersion` for the pinned package before starting. |
+| `list_triggers` | `env` | List triggers (queue + time) in a folder — verify a queue trigger's `releaseId` points at your dev release before enqueueing. |
+| `pull_queue_item` | `env` (optional if `url` given) | Fetch one queue item (by Orchestrator URL or `txnId`) and return its `SpecificContent` as a ready-to-run test payload. `IsApproved` is always forced `false`. |
+| `build_faulted_job_issue` | `env` | Read a faulted job (by Key) + its robot logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`). Posts nothing — the caller hands the payload to a GitHub MCP server. |
+
+### UiPath Orchestrator — writes (pre-prod only)
+
+`env` is a schema-enforced literal `"pre_prod"` on every tool below — `"prod"` is rejected before
+any HTTP call, and every posted payload passes a safety guard.
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `add_queue_item` | `env` | POST one item to a dev-clone queue. `IsApproved` is forced `false`; a configured `serverURL`/`queueUrl` must match pre-prod; `<TO-FILL>` placeholders are rejected. Pace ~1/s when enqueueing many. |
+| `delete_queue_item` | `env` | Delete one queue item from the dev clone. Fetch-first: refuses unless the item's current status is `New`, so run history is never destroyed. |
+| `start_job` | `env` | Start job(s) for a release in the dev clone. A job resolves its package version at START (not creation) — re-check `list_processes` right before starting if others are publishing. |
+
+### Settings sync (prod ↔ pre-prod)
+
+`diff_settings`/`get_settings`/`plan_settings_sync` are READ-ONLY; `apply_settings_sync` is the
+only settings tool that writes, and it's additive-only against pre-prod (never overwrites/deletes).
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `diff_settings` | `profile` | Diff an account's settings between prod and pre-prod (UID/timestamp/dummy-email noise stripped, list items matched by name not UID). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). |
+| `get_settings` | `env`, `profile` | Fetch an account's settings sections from ONE env — the single-env counterpart to `diff_settings`. Normalized (noise-stripped) by default; `normalized:false` for raw payloads with real UIDs. |
+| `list_setting_sections` | — | List every section `diff_settings`/`get_settings`/`plan_settings_sync` can scope to (key, label, group, kind, whether it's "derived"/crawled, and its `matchKey`). Pure static-catalog read, no network. |
+| `plan_settings_sync` | `profile` | Compute — WITHOUT writing — the additive actions that would copy prod-only settings into pre-prod. Covers the **specialties** domain (`specialties`/`referred-providers`/`referred-facilities`) and the **orders** domain (create-only). Each action gets a stable id (`section:op:typeName:itemName`); refs with no pre-prod match by name are dropped with a warning. Sections with no verified write endpoint land in `skippedSections`. |
+| `apply_settings_sync` | `profile` | Execute a reviewed selection of `plan_settings_sync` actions against pre-prod. Never accepts request bodies — it **re-plans server-side** (same scoping args) and executes only `actionIds` or an explicit `all:true` (exactly one required). Stale ids land in `unmatchedIds` instead of executing. Every write is audit-logged to the client. |
+
+### Meta / diagnostics
+
+| Tool | Args | What it does |
+|------|------|--------------|
+| `doctor` | `profile` | Probe the server's external connections — Copilot BE login (both envs) + one cheap UiPath Orchestrator call per env/folder — and report what's reachable, plus which UiPath auth mode (`oauth`/`bearer`) is active. |
+| `build_mcp_issue` | — | Compose a GitHub issue about **this MCP server** from a bug report or general feedback — no tool failure required. Posts nothing and holds no GitHub credentials; returns `title`/`body`/`labels` (+ a prefilled `url`) for the host's GitHub tooling to file. |
 
 ## Prompts
 
