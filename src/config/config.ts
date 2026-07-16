@@ -41,6 +41,16 @@ const CopilotSchema = z
   })
   .passthrough();
 
+const UipathOAuthSchema = z
+  .object({
+    clientId: z.string().min(1, "oauth.clientId is required"),
+    clientSecret: z.string().min(1, "oauth.clientSecret is required"),
+    // Falls back to a guess derived from orchestratorUrl (…/identity_/connect/token) when omitted.
+    tokenUrl: z.string().url("oauth.tokenUrl must be a valid URL").optional(),
+    scope: z.string().min(1).optional(),
+  })
+  .passthrough();
+
 const UipathSchema = z
   .object({
     orchestratorUrl: z
@@ -51,9 +61,11 @@ const UipathSchema = z
         (u) => /\/\/cloud\.uipath\.com\/[^/]+\/[^/]+\/orchestrator_/.test(u),
         "orchestratorUrl must look like https://cloud.uipath.com/{org}/{tenant}/orchestrator_",
       ),
-    bearer: z
-      .string({ required_error: "bearer is required" })
-      .min(1, "bearer (UiPath PAT/token) must not be empty"),
+    // At least one of bearer/oauth is required — see the .refine() below. oauth is
+    // tried first when present; bearer is also the runtime fallback if the OAuth
+    // token request fails.
+    bearer: z.string().min(1, "bearer (UiPath PAT/token) must not be empty").optional(),
+    oauth: UipathOAuthSchema.optional(),
     folderPath: z.string().min(1).optional(),
     folderPathByEnv: z
       .object({ prod: z.string().min(1).optional(), pre_prod: z.string().min(1).optional() })
@@ -74,7 +86,10 @@ const UipathSchema = z
       .partial()
       .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine((cfg) => Boolean(cfg.bearer || cfg.oauth), {
+    message: "uipath requires bearer, oauth, or both",
+  });
 
 // Optional per-prodUid clone overrides (cross-env reference-uid remaps for the mirror).
 const OrderOverrideSchema = z

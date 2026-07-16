@@ -564,7 +564,14 @@ export const CONFIG_GUIDE = {
     },
     uipath: {
       orchestratorUrl: "https://cloud.uipath.com/<org>/<tenant>/orchestrator_",
-      bearer: "<ASK-USER: UiPath PAT with OR.Jobs/OR.Queues read scope>",
+      bearer: "<ASK-USER: UiPath PAT with OR.Jobs/OR.Queues read scope> (optional if oauth is set)",
+      oauth: {
+        clientId:
+          "<ASK-USER: UiPath external application client id> (optional block; alternative/fallback pair to bearer)",
+        clientSecret: "<ASK-USER: UiPath external application client secret>",
+        tokenUrl:
+          "https://cloud.uipath.com/<org>/identity_/connect/token (optional, guessed if omitted)",
+      },
       folderPathByEnv: { prod: "Authorization", pre_prod: "Authorization Dev Clone" },
     },
   },
@@ -575,7 +582,13 @@ export const CONFIG_GUIDE = {
       "Optional top-level fallback creds used only when a caller could pass no profile; profiles are the normal path.",
     "uipath.orchestratorUrl":
       "Tenant Orchestrator base — https://cloud.uipath.com/{org}/{tenant}/orchestrator_",
-    "uipath.bearer": "Single global UiPath token; UiPath tools take env but no profile.",
+    "uipath.bearer":
+      "Single global UiPath PAT/token; UiPath tools take env but no profile. Optional if uipath.oauth is set — still used as the runtime fallback if the OAuth token request fails, so it's fine (and recommended) to keep both configured.",
+    "uipath.oauth":
+      "Optional: OAuth client-credentials alternative to bearer. Tried first when present; requires clientId + clientSecret. At least one of bearer/oauth is required.",
+    "uipath.oauth.tokenUrl":
+      "Identity-server token endpoint. Optional — defaults to https://cloud.uipath.com/{org}/identity_/connect/token derived from orchestratorUrl; set explicitly if that guess is wrong (e.g. non-standard/on-prem identity server).",
+    "uipath.oauth.scope": "Optional OAuth scope string (e.g. 'OR.Jobs OR.Queues OR.Execution').",
     "uipath.folderPathByEnv":
       "Folder per env; defaults exist for the Authorization folders if omitted.",
     "uipath.folderIdByEnv":

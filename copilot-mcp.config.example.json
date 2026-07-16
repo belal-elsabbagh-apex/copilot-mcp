@@ -1,18 +1,17 @@
 {
-  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is optional (per-account creds); top-level copilot.prod/pre_prod are used when no profile is passed. The uipath.queueUrl/addQueueItemPath/serverUrlByEnv fields are only needed for build_queue_item. overrides is optional (per-prodUid clone remaps). Alternatively set COPILOT_MCP_LOCAL_DIR to a dir holding the legacy split files order-copy-credentials.json + uipath-config.json (+ overrides.json). Config edits are picked up live on the next tool call — no server restart needed.",
+  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is the normal path (every Copilot tool takes a required profile arg); a top-level copilot.prod/pre_prod pair is also accepted as a fallback for callers that pass no profile, but isn't needed once profiles are set. folderIdByEnv is optional (numeric OrganizationUnitId; defaults to prod 231517 / pre_prod 434039 if omitted). uipath.folderPath (singular, legacy) plus queueUrl/addQueueItemPath/serverUrlByEnv are only needed for build_queue_item. uipath needs bearer, oauth, or both — oauth (client-credentials) is tried first when present, with bearer as the fallback if the OAuth token request fails or oauth is omitted; oauth.tokenUrl is optional and otherwise guessed from orchestratorUrl. overrides is optional (per-prodUid clone remaps). Alternatively set COPILOT_MCP_LOCAL_DIR to a dir holding the legacy split files order-copy-credentials.json + uipath-config.json (+ overrides.json). Config edits are picked up live on the next tool call — no server restart needed.",
   "copilot": {
-    "prod": { "be": "https://prod-be-batch.ehrcopilotbe.com", "email": "user@apexmedical.ai", "password": "<redacted>", "fe": "https://copilot.apexmedical.ai" },
-    "pre_prod": { "be": "https://pre-prod-be-batch.ehrcopilotbe.com", "email": "user@apexmedical.ai", "password": "<redacted>", "fe": "https://pre-prod-copilot.apexmedicalai.com" },
     "profiles": {
-      "ossm": { "prod": { "be": "...", "email": "...", "password": "..." }, "pre_prod": { "be": "...", "email": "...", "password": "..." } },
+      "ossm": { "prod": { "be": "https://prod-be-batch.ehrcopilotbe.com", "email": "...", "password": "...", "fe": "https://copilot.apexmedical.ai" }, "pre_prod": { "be": "https://pre-prod-be-batch.ehrcopilotbe.com", "email": "...", "password": "...", "fe": "https://pre-prod-copilot.apexmedicalai.com" } },
       "kafri": { "prod": { "be": "...", "email": "...", "password": "..." }, "pre_prod": { "be": "...", "email": "...", "password": "..." } }
     }
   },
   "uipath": {
     "orchestratorUrl": "https://cloud.uipath.com/apexmedicalaiinc/DefaultTenant/orchestrator_",
-    "bearer": "<UiPath Personal Access Token with OR.Jobs read scope>",
+    "bearer": "<UiPath Personal Access Token with OR.Jobs read scope> (optional if oauth is set; also used as its runtime fallback)",
+    "oauth": { "clientId": "<UiPath external application client id>", "clientSecret": "<UiPath external application client secret>", "tokenUrl": "https://cloud.uipath.com/apexmedicalaiinc/identity_/connect/token (optional, guessed from orchestratorUrl if omitted)" },
     "folderPathByEnv": { "prod": "Authorization", "pre_prod": "Authorization Dev Clone" },
-    "folderPath": "Authorization",
+    "folderIdByEnv": { "prod": "231517", "pre_prod": "434039" },
     "queueUrl": "<queue url used in SpecificContent>",
     "addQueueItemPath": "/odata/Queues/UiPathODataSvc.AddQueueItem",
     "serverUrlByEnv": { "prod": "https://prod-be-batch.ehrcopilotbe.com", "pre_prod": "https://pre-prod-be-batch.ehrcopilotbe.com" }

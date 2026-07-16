@@ -7,6 +7,7 @@ import { isFailureLog } from "../copilot/output-analysis.js";
 import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
 import { chunk, isRecord } from "../shared/util.js";
+import { resolveBearerToken } from "./auth.js";
 
 export type { Env };
 
@@ -111,10 +112,11 @@ async function uipathRequest(
   const url = base() + path + (qs ? `?${qs}` : "");
   const folderPath = opts.folder ?? cfg.folderPath;
   const hasBody = opts.body !== undefined;
+  const token = await resolveBearerToken(cfg);
   const res = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${cfg.bearer}`,
+      Authorization: `Bearer ${token}`,
       Accept: "application/json",
       // Folder scoping — copilot-doctor uses the folder-path header. Jobs live in
       // a per-env folder (prod "Authorization" vs dev "Authorization Dev Clone").

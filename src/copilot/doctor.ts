@@ -68,7 +68,8 @@ export async function runDoctor(opts: { profile?: string | null }): Promise<Doct
       probe(`uipath ${env} folder`, uipath.orchestratorUrl, async () => {
         const folder = resolveFolder(env);
         const jobs = await listRecentJobs(undefined, 1, folder);
-        return `reachable (folder '${folder ?? "(default)"}', ${jobs.length} recent job${
+        const authMode = uipath.oauth ? "oauth" : "bearer";
+        return `reachable via ${authMode} (folder '${folder ?? "(default)"}', ${jobs.length} recent job${
           jobs.length === 1 ? "" : "s"
         } visible)`;
       }),

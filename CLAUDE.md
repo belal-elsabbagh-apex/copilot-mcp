@@ -69,7 +69,11 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   against the config at call time by `resolveCreds`. UiPath-only tools (`list_jobs`, `get_job_logs`,
   `get_job`, `list_queues`, `list_processes`, `list_triggers`, `build_faulted_job_issue`,
   `add_queue_item`, `delete_queue_item`, `start_job`) take `env` but **no `profile`** — UiPath
-  authenticates with the single global `uipath.bearer`, not per-profile creds. Still never default `env`.
+  authenticates globally (not per-profile creds), via `uipath.oauth` (client-credentials, tried
+  first when configured) and/or the static `uipath.bearer` PAT (the fallback if `oauth` is absent or
+  its token request fails — `uipath/auth.ts`'s `resolveBearerToken`, the single chokepoint
+  `uipathRequest` calls). At least one of `bearer`/`oauth` is required by the config schema. Still
+  never default `env`.
 - **stdout is the JSON-RPC channel.** A stray `console.log` to stdout corrupts the protocol.
   `console.*` is redirected to stderr in server.ts; use `mcpLog()` for client-visible logs and
   stderr (`LOG_LEVEL=debug` / `COPILOT_MCP_DEBUG=1`) for local diagnostics.

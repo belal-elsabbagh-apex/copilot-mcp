@@ -66,6 +66,60 @@ describe("getUipath", () => {
   });
 });
 
+describe("uipath auth schema", () => {
+  let authDir: string;
+  let authConfigPath: string;
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    authDir = mkdtempSync(join(tmpdir(), "copilot-mcp-uipath-auth-"));
+    authConfigPath = join(authDir, "config.json");
+    prevEnv = process.env["COPILOT_MCP_CONFIG"];
+    process.env["COPILOT_MCP_CONFIG"] = authConfigPath;
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env["COPILOT_MCP_CONFIG"];
+    else process.env["COPILOT_MCP_CONFIG"] = prevEnv;
+    resetConfigCache();
+    rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const withUipath = (uipath: Record<string, unknown>) => {
+    writeFileSync(authConfigPath, JSON.stringify({ ...FIXTURE, uipath }));
+    resetConfigCache();
+  };
+
+  test("accepts bearer only", () => {
+    withUipath({ orchestratorUrl: FIXTURE.uipath.orchestratorUrl, bearer: "b" });
+    expect(getUipath().bearer).toBe("b");
+  });
+
+  test("accepts oauth only, no bearer", () => {
+    withUipath({
+      orchestratorUrl: FIXTURE.uipath.orchestratorUrl,
+      oauth: { clientId: "id", clientSecret: "secret" },
+    });
+    expect(getUipath().oauth?.clientId).toBe("id");
+    expect(getUipath().bearer).toBeUndefined();
+  });
+
+  test("accepts both bearer and oauth", () => {
+    withUipath({
+      orchestratorUrl: FIXTURE.uipath.orchestratorUrl,
+      bearer: "b",
+      oauth: { clientId: "id", clientSecret: "secret" },
+    });
+    expect(getUipath().bearer).toBe("b");
+    expect(getUipath().oauth?.clientId).toBe("id");
+  });
+
+  test("rejects neither bearer nor oauth", () => {
+    withUipath({ orchestratorUrl: FIXTURE.uipath.orchestratorUrl });
+    expect(() => getUipath()).toThrow(/bearer, oauth, or both/);
+  });
+});
+
 describe("live reload", () => {
   let liveDir: string;
   let liveConfigPath: string;
