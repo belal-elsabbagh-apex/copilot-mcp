@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-07-19
+
+### Removed
+
+- **`clone_order` tool** — it bundled prod-order extraction, best-effort facility
+  remapping, and minting into one opaque call with no way to inspect or
+  intervene when a cross-env reference didn't resolve. Replaced by the
+  `clone-and-verify-order` prompt (see below). The config's per-prodUid
+  `overrides` feature (and the legacy split `overrides.json` file) is removed
+  along with it — nothing consumed it once the automated remap layer was gone.
+
+### Added
+
+- **`submit_preprod_order` tool** — submitting a pre-prod order sitting at
+  forReview is now its own explicit, separate write (only `clone_order` could
+  submit before). Always requires explicit user authorization.
+- **`create_preprod_order` now returns `processMessage`** — the last
+  `/process` response's message, so an order that doesn't reach forReview
+  explains why (e.g. a missing reference) instead of just showing a bare status.
+
+### Changed
+
+- **`clone-and-verify-order` prompt rewritten** to chain `find_clone_candidates`
+  → `get_order` → `create_preprod_order`, letting the agent resolve prod → pre-prod
+  references itself via `get_settings`/`diff_settings` rather than an automated
+  NPI/name matcher. On a failed or stuck mint, it diagnoses (via
+  `list_setting_sections`/`diff_settings`/`plan_settings_sync`) and reports a
+  proposed fix — it never applies one automatically.
+
 ## [1.18.0] - 2026-07-16
 
 ### Added
