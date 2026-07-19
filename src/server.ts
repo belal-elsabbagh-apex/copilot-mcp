@@ -7,10 +7,10 @@
 //   - copilot/analyze.ts   analyze_order_execution orchestration
 //   - uipath/faults.ts     build_faulted_job_issue (faulted job -> GitHub issue payload)
 // Tools:
-//   - clone_order              mirror prod order(s) into pre-prod (clone-only by default; submit opt-in)
 //   - find_clone_candidates    list recent prod orders that are actually cloneable
 //   - delete_preprod_order     delete pre-prod order(s)
 //   - create_preprod_order     mint a fresh pre-prod order from an explicit spec (stops at forReview, never submits)
+//   - submit_preprod_order     submit a pre-prod order sitting at forReview (explicit, separate write)
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
 //   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
 //   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
@@ -48,11 +48,12 @@ import {
   makeClient,
   normalizeOrder,
   ORDER_MODE,
+  submitOrder,
   toMDY,
   verify,
 } from "./copilot/copilot-client.js";
 import { runDoctor } from "./copilot/doctor.js";
-import { type MintSpec, type MirrorResult, mintPreprodOrder, mirrorOne } from "./copilot/mirror.js";
+import { type MintSpec, mintPreprodOrder } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
 import { normalizeOutput } from "./copilot/output-schema.js";
 import {
@@ -207,83 +208,6 @@ onConfigReload(({ source }) =>
   mcpLog(server, "info", `Configuration reloaded from ${source}`, { source }),
 );
 
-// ---- clone_order ---------------------------------------------------------
-server.registerTool(
-  "clone_order",
-  {
-    title: "Clone Copilot order(s) prod -> pre-prod",
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false, // creates fresh pre-prod orders; never deletes/overwrites
-      idempotentHint: false, // each call mints new order(s)
-      openWorldHint: true,
-    },
-    description:
-      "Mirror one or more PROD EHR Copilot orders into the PRE-PROD tenant as fresh orders. " +
-      "Clone-only by default (stops at forReview / ready-to-submit). Set submit=true ONLY when the " +
-      "user explicitly authorizes submitting in pre-prod. Patient name/DOB do NOT carry across envs " +
-      "(pre-prod substitutes its own EMR patient); insurance/memberId/ICD/CPT/facility/POS DO carry. " +
-      "Source orders must have facility+type+orderNames (use find_clone_candidates first) or they get " +
-      "stuck in 'incomplete'. Returns per-order {prodUid, newUid, verify:{status,...}}.",
-    inputSchema: {
-      uids: z.array(z.string().min(8)).min(1).describe("Prod orderUid(s) to clone"),
-      profile: z
-        .string()
-        .min(1)
-        .describe("Credential profile / account name from config (required)"),
-      submit: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "If true, also fire /submit in pre-prod (advances to inProgress). Requires explicit user authorization.",
-        ),
-    },
-  },
-  async ({ uids, profile, submit }, extra) => {
-    try {
-      const creds = resolveCreds(profile ?? null);
-      const results: MirrorResult[] = [];
-      const errors: { prodUid: string; error: string }[] = [];
-      mcpLog(server, "info", `cloning ${uids.length} order(s)`, { submit: !!submit });
-      for (let i = 0; i < uids.length; i++) {
-        const uid = uids[i] as string;
-        reportProgress(extra, i, uids.length, `cloning ${uid}`);
-        try {
-          const r = await mirrorOne(uid, { submit: !!submit, creds });
-          results.push(r);
-          mcpLog(server, "info", `cloned ${uid} -> ${r.newUid}`, { status: r.verify?.status });
-        } catch (e) {
-          const error = toMessage(e);
-          errors.push({ prodUid: uid, error });
-          mcpLog(server, "error", `clone failed for ${uid}`, { error });
-        }
-      }
-      reportProgress(extra, uids.length, uids.length, "done");
-      return ok({
-        profile: profile ?? "(default)",
-        submit: !!submit,
-        cloned: results.length,
-        failed: errors.length,
-        results: [
-          ...results.map((r) => ({
-            prodUid: r.prodUid,
-            preprodUid: r.newUid,
-            status: r.verify?.status,
-            submitted: r.submitted,
-            memberId: r.verify?.memberId,
-            icds: r.verify?.icds,
-            cpts: r.verify?.cpts,
-          })),
-          ...errors,
-        ],
-      });
-    } catch (e) {
-      return toolError("clone_order", e, VERSION);
-    }
-  },
-);
-
 // ---- find_clone_candidates ----------------------------------------------
 server.registerTool(
   "find_clone_candidates",
@@ -299,7 +223,7 @@ server.registerTool(
       "Scan the most recent PROD orders and return only the ones that will actually clone to forReview — " +
       "i.e. they have a referredFacility, orderType, and orderNames. Orders missing those (common for " +
       "recent PCP-notes / order-only entries) get stuck 'incomplete' and are filtered out. Use this to " +
-      "pick good uids before calling clone_order.",
+      "pick good uids before cloning via the clone-and-verify-order prompt.",
     inputSchema: {
       profile: z
         .string()
@@ -418,15 +342,19 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Create a fresh order in the PRE-PROD tenant from explicit data (no prod source order " +
-      "needed — use clone_order to copy an existing prod order instead) and drive it to " +
-      "forReview. NEVER submits — hand-minted test orders stop at forReview by design. The " +
-      "sequence quirks (order names reset speciality/provider; placeOfService applied last, " +
-      "post-forReview; /process retry loop) are handled internally. Reference uids (typeUid, " +
-      "orderNamesUids, specialityUid, facility/provider uids) are the PRE-PROD tenant's own — " +
-      "discover them via get_settings (orders/specialties groups); never reuse prod uids. " +
-      "The result composes with build_queue_item -> add_queue_item for dev-clone robot tests. " +
-      "Returns {profile, newUid, submitted:false, verify}.",
+      "Create a fresh order in the PRE-PROD tenant from explicit data (to clone an existing prod " +
+      "order instead, use the clone-and-verify-order prompt, which reads the prod order via " +
+      "get_order and calls this tool with the derived fields) and drive it to forReview. NEVER " +
+      "submits — hand-minted test orders stop at forReview by design; use submit_preprod_order " +
+      "separately, with explicit user authorization, to advance one. The sequence quirks (order " +
+      "names reset speciality/provider; placeOfService applied last, post-forReview; /process " +
+      "retry loop) are handled internally. Reference uids (typeUid, orderNamesUids, specialityUid, " +
+      "facility/provider uids) are the PRE-PROD tenant's own — discover them via get_settings " +
+      "(orders/specialties groups); never reuse prod uids. The result composes with " +
+      "build_queue_item -> add_queue_item for dev-clone robot tests. If the order doesn't reach " +
+      "forReview, the result's processMessage explains why (e.g. a missing reference) — check " +
+      "get_settings/diff_settings for the implicated section. Returns " +
+      "{profile, newUid, verify, processMessage}.",
     inputSchema: {
       profile: z
         .string()
@@ -498,7 +426,7 @@ server.registerTool(
         })),
         placeOfService: a.placeOfService ?? "",
       };
-      const result = await mintPreprodOrder(pre, spec, { submit: false });
+      const result = await mintPreprodOrder(pre, spec);
       // Audit trail: surface every pre-prod order mint to the client log.
       mcpLog(server, "warning", `minted pre-prod order ${result.newUid}`, {
         profile: a.profile,
@@ -507,6 +435,47 @@ server.registerTool(
       return ok({ profile: a.profile, ...result });
     } catch (e) {
       return toolError("create_preprod_order", e, VERSION);
+    }
+  },
+);
+
+// ---- submit_preprod_order --------------------------------------------------
+server.registerTool(
+  "submit_preprod_order",
+  {
+    title: "Submit a pre-prod order sitting at forReview",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false, // advances the order's own state; nothing else is touched
+      idempotentHint: false, // a second call re-submits/fails against an already-submitted order
+      openWorldHint: true,
+    },
+    description:
+      "Submit a PRE-PROD order that is sitting at forReview, advancing it to inProgress. " +
+      "PRE-PROD ONLY. Requires EXPLICIT user authorization before calling — this is a real, " +
+      "deliberate write, separate from create_preprod_order (which never submits). Returns " +
+      "{profile, orderUid, submitted:true, verify}.",
+    inputSchema: {
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      orderUid: z.string().min(8).describe("PRE-PROD orderUid to submit (must be at forReview)"),
+    },
+  },
+  async ({ profile, orderUid }) => {
+    try {
+      const creds = resolveCreds(profile);
+      const pre = makeClient(creds.pre_prod.be, "pre_prod");
+      await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+      const result = await submitOrder(pre, orderUid);
+      mcpLog(server, "warning", `submitted pre-prod order ${orderUid}`, {
+        profile,
+        status: result?.status,
+      });
+      return ok({ profile, orderUid, submitted: true, verify: result });
+    } catch (e) {
+      return toolError("submit_preprod_order", e, VERSION);
     }
   },
 );

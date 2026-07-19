@@ -22,9 +22,9 @@ interface RegisteredTool {
 // additively to pre-prod only; the UiPath writes (add_queue_item, delete_queue_item,
 // start_job) are schema-restricted to the pre_prod dev clone.
 const WRITE_TOOLS = new Set([
-  "clone_order",
   "delete_preprod_order",
   "create_preprod_order",
+  "submit_preprod_order",
   "apply_settings_sync",
   "add_queue_item",
   "delete_queue_item",
@@ -36,10 +36,10 @@ const registered = (server as unknown as { _registeredTools: Record<string, Regi
   ._registeredTools;
 
 const EXPECTED = [
-  "clone_order",
   "find_clone_candidates",
   "delete_preprod_order",
   "create_preprod_order",
+  "submit_preprod_order",
   "build_queue_item",
   "analyze_order_execution",
   "pull_queue_item",
@@ -111,10 +111,6 @@ describe("tool input schemas accept representative payloads", () => {
     // profile is required (any non-empty string; validated against config at call time).
     // env is required on every env-taking tool. Invalid cases omit a required field or
     // use a wrong type.
-    clone_order: {
-      valid: { uids: ["abcdefgh"], profile: "ossm" },
-      invalid: { uids: ["abcdefgh"] },
-    },
     find_clone_candidates: { valid: { profile: "ossm" }, invalid: {} },
     delete_preprod_order: {
       valid: { uids: ["abcdefgh"], profile: "ossm" },
@@ -138,6 +134,10 @@ describe("tool input schemas accept representative payloads", () => {
         typeUid: "abcdefgh-type",
         orderNamesUids: ["abcdefgh-name"],
       },
+    },
+    submit_preprod_order: {
+      valid: { profile: "ossm", orderUid: "abcdefgh" },
+      invalid: { orderUid: "abcdefgh" }, // profile is required
     },
     build_queue_item: {
       valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" },

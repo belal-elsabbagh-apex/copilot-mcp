@@ -238,6 +238,26 @@ export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | 
   return normalizeOrder(o);
 }
 
+// Submit a pre-prod order that is sitting at forReview (advances it to inProgress).
+// `pre` must already be logged in and tagged pre_prod (fails closed via
+// assertPreProdClient). Retries once on a 403 missing_token (session-cookie race),
+// mirroring every other write in this codebase.
+export async function submitOrder(pre: HttpClient, uid: string): Promise<OrderVerify | null> {
+  assertPreProdClient(pre, "submitOrder");
+  let r = await pre.req("POST", `/api/v1/orders/${uid}/submit`, {
+    json: { actionsHistory: ["submit_action"] },
+  });
+  if (r.status === 403 && /missing_token/.test(r.text)) {
+    await pre.req("GET", "/api/v1/physician/refresh");
+    r = await pre.req("POST", `/api/v1/orders/${uid}/submit`, {
+      json: { actionsHistory: ["submit_action"] },
+    });
+  }
+  if (r.status >= 400) throw new Error(`/submit failed ${r.status}: ${r.text.slice(0, 300)}`);
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  return verify(pre, uid);
+}
+
 // ---- shared date helpers --------------------------------------------------
 
 export const pad = (n: number | string): string => String(n).padStart(2, "0");

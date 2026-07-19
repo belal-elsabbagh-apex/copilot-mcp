@@ -13,14 +13,16 @@ defaulted. UiPath-only tools take `env` but no `profile` (UiPath auths globally,
 
 ### Copilot orders
 
-All read tools here are READ-ONLY. Writes (`clone_order`, `delete_preprod_order`,
-`create_preprod_order`) only ever target **pre-prod**; prod is never mutated.
+All read tools here are READ-ONLY. Writes (`delete_preprod_order`, `create_preprod_order`,
+`submit_preprod_order`) only ever target **pre-prod**; prod is never mutated. There's no single
+"clone" tool — the `clone-and-verify-order` prompt (see Prompts below) orchestrates `find_clone_candidates`
+→ `get_order` → `create_preprod_order` (and the settings tools, if a reference doesn't resolve).
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `clone_order` | `profile` | Mirror one or more PROD orders into PRE-PROD as fresh orders. Clone-only by default (stops at forReview); `submit:true` is an explicit opt-in to also fire `/submit`. Patient name/DOB don't carry across envs; insurance/ICD/CPT/facility/POS do. Source orders need a facility+type+orderNames or they land "incomplete" — use `find_clone_candidates` first. |
 | `find_clone_candidates` | `profile` | Scan recent PROD orders and return only the ones that will actually clone to forReview (have a referredFacility, orderType, and orderNames) — filters out the ones that would get stuck "incomplete". |
-| `create_preprod_order` | `profile` | Mint a fresh PRE-PROD order from explicit data (no prod source needed) and drive it to forReview. Never submits. Handles the sequence quirks internally (order names reset speciality/provider; place-of-service applied last; `/process` retry). Composes with `build_queue_item` → `add_queue_item` for dev-clone robot tests. |
+| `create_preprod_order` | `profile` | Mint a fresh PRE-PROD order from explicit data and drive it to forReview. Never submits (see `submit_preprod_order`). Handles the sequence quirks internally (order names reset speciality/provider; place-of-service applied last; `/process` retry). If it doesn't reach forReview, `processMessage` explains why. Composes with `build_queue_item` → `add_queue_item` for dev-clone robot tests. |
+| `submit_preprod_order` | `profile` | Submit a PRE-PROD order sitting at forReview, advancing it to inProgress. A real, deliberate write — requires explicit user authorization before calling. |
 | `delete_preprod_order` | `profile` | Delete one or more orders from PRE-PROD (`DELETE /api/v1/orders/{uid}`). Never targets prod. |
 | `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
 | `find_stuck_orders` | `env`, `profile` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheckUipath` correlates each to its UiPath job(s) for a coarse verdict. |
@@ -86,6 +88,15 @@ User-invokable workflow prompts chain the tools above for common ops tasks:
 `apply_settings_sync` with exactly the approved ids. `inspect-settings` reads one env's
 settings via `get_settings` and summarizes them.
 
+`clone-and-verify-order` picks a cloneable prod order (or uses a given uid), reads it via
+`get_order`, and mints an equivalent pre-prod order via `create_preprod_order` — there's no
+dedicated "clone" tool, since whether a clone succeeds is order-specific (it depends on
+pre-prod already having the referenced facility/speciality/order type/order names). If minting
+fails or the order doesn't reach forReview, the prompt diagnoses via `list_setting_sections` →
+`diff_settings` → `plan_settings_sync`, reporting a proposed fix rather than applying one.
+Submitting the resulting order is a separate, explicit `submit_preprod_order` call that only
+happens with the user's authorization.
+
 `report-faulted-uipath-jobs` finds faulted UiPath jobs (prod by default) and files each as a
 GitHub issue on `Apex-Medical-AI-Inc/RPAPlaywright` — creating one issue per distinct fault
 and commenting on the existing issue when the same fault recurs. This server holds **no
@@ -104,13 +115,12 @@ args. Two ways to provide it:
    working directory (falling back to the older `config.local.json` name if that's what
    you already have).
 2. **Split legacy files:** set `COPILOT_MCP_LOCAL_DIR` to a directory containing
-   `order-copy-credentials.json` + `uipath-config.json` (+ optional `overrides.json`).
+   `order-copy-credentials.json` + `uipath-config.json`.
 
 The `uipath.queueUrl / addQueueItemPath / serverUrlByEnv` fields are only
-required by `build_queue_item`. `overrides` (per-prodUid clone remaps) is optional.
-Editing the config file while the server is running takes effect on the next tool
-call — no restart needed — and the server sends an MCP logging notification when it
-reloads.
+required by `build_queue_item`. Editing the config file while the server is running
+takes effect on the next tool call — no restart needed — and the server sends an MCP
+logging notification when it reloads.
 
 When a tool fails for a reason that looks like a bug in this server (an unexpected
 exception — not a bad profile, missing/invalid config, not-found, auth, or any HTTP error
@@ -121,9 +131,6 @@ it off or repoints it:
 ```json
 "feedback": { "enabled": false, "repositoryUrl": "https://github.com/your-org/your-fork" }
 ```
-
-Other env vars: `COPILOT_MCP_DEBUG_DIR` (where `clone_order` dumps the extracted prod
-order JSON; defaults to the OS temp dir).
 
 ## Local development
 

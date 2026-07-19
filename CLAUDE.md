@@ -78,20 +78,23 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `console.*` is redirected to stderr in server.ts; use `mcpLog()` for client-visible logs and
   stderr (`LOG_LEVEL=debug` / `COPILOT_MCP_DEBUG=1`) for local diagnostics.
 - **prod/pre-prod isolation**: writes target pre-prod only; `delete_preprod_order` never touches
-  prod; `clone_order` is clone-only unless `submit` is explicitly authorized; `build_queue_item` /
-  `pull_queue_item` force `IsApproved=false` so a test run can never submit a real auth.
-  BE clients are env-tagged (`makeClient(base, env)`) and every BE write engine
-  (`mintPreprodOrder`, the `delete_preprod_order` handler, `applySettingsSync`) calls
-  `assertPreProdClient`, which refuses prod-tagged AND untagged clients (fails closed) —
-  tag any new client at construction and assert before any new write path.
-- **Order minting is one engine, two producers.** `copilot/mirror.ts` splits into a pure
-  `specFromProdOrder` (prod order + overrides + facility remap -> `MintSpec`, unit-tested) and
-  `mintPreprodOrder(pre, spec, {submit})` — the engine owning the sequence invariants (order names
-  reset speciality/provider; placeOfService LAST, post-forReview; E6001-tolerant `/process` retry).
-  `clone_order` composes extract -> spec -> mint; `create_preprod_order` mints from an explicit
-  spec and **always passes `submit:false`** (hand-minted test orders stop at forReview — only
-  `clone_order` may submit, explicitly). Do NOT expose the raw atoms (create draft / PUT field /
-  process) as tools — the tool boundary is the safe transaction, not the HTTP verb.
+  prod; `create_preprod_order` never submits (only `submit_preprod_order` does, and only with
+  explicit user authorization); `build_queue_item` / `pull_queue_item` force `IsApproved=false` so
+  a test run can never submit a real auth. BE clients are env-tagged (`makeClient(base, env)`) and
+  every BE write engine (`mintPreprodOrder`, `submitOrder`, the `delete_preprod_order` handler,
+  `applySettingsSync`) calls `assertPreProdClient`, which refuses prod-tagged AND untagged clients
+  (fails closed) — tag any new client at construction and assert before any new write path.
+- **Order minting is one engine, one producer.** `copilot/mirror.ts`'s `mintPreprodOrder(pre,
+  spec)` owns the sequence invariants (order names reset speciality/provider; placeOfService LAST,
+  post-forReview; E6001-tolerant `/process` retry) and **always stops at forReview** — it never
+  submits. `create_preprod_order` is its only caller, minting from an explicit `MintSpec`; there is
+  no dedicated "clone" tool — the `clone-and-verify-order` prompt reads a prod order via
+  `get_order` and derives the spec fields itself (no automated cross-env reference matching exists;
+  an agent resolves prod names to pre-prod uids via `get_settings`/`diff_settings`, and the
+  settings tools diagnose a reference that doesn't resolve). Submitting is a fully separate step:
+  `submitOrder` (in `copilot-client.ts`) backs the `submit_preprod_order` tool, the only thing that
+  may submit, always explicit. Do NOT expose the raw atoms (create draft / PUT field / process) as
+  tools — the tool boundary is the safe transaction, not the HTTP verb.
 - **UiPath writes are dev-clone-only and guarded.** `add_queue_item`, `delete_queue_item` and
   `start_job` (all in `uipath/actions.ts` — the ONLY module that mutates Orchestrator state) take
   `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` in the domain

@@ -11,10 +11,9 @@
 // onConfigReload() to react to that (server.ts turns it into an MCP notification).
 //
 // Migration fallback: if no single-file config exists, this assembles the same
-// shape from a split `order-copy-credentials.json` + `uipath-config.json` (+ optional
-// `overrides.json`) found in COPILOT_MCP_LOCAL_DIR, so the legacy `.planning/.local`
-// setup keeps working — point COPILOT_MCP_LOCAL_DIR at it (see
-// copilot-mcp.config.example.json).
+// shape from a split `order-copy-credentials.json` + `uipath-config.json` found in
+// COPILOT_MCP_LOCAL_DIR, so the legacy `.planning/.local` setup keeps working —
+// point COPILOT_MCP_LOCAL_DIR at it (see copilot-mcp.config.example.json).
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -91,19 +90,6 @@ const UipathSchema = z
     message: "uipath requires bearer, oauth, or both",
   });
 
-// Optional per-prodUid clone overrides (cross-env reference-uid remaps for the mirror).
-const OrderOverrideSchema = z
-  .object({
-    typeUid: z.string().optional(),
-    referredFacilityUid: z.string().optional(),
-    specialityUid: z.string().optional(),
-    orderNamesUids: z.array(z.string()).optional(),
-    clinicProviderUid: z.string().optional(),
-    injectCPTs: z.boolean().optional(),
-    placeOfService: z.string().optional(),
-  })
-  .passthrough();
-
 // On-failure GitHub-issue suggestion (see feedback.ts). Optional; on by default.
 const FeedbackSchema = z
   .object({
@@ -115,7 +101,6 @@ const FeedbackSchema = z
 const ConfigSchema = z.object({
   copilot: CopilotSchema,
   uipath: UipathSchema,
-  overrides: z.record(OrderOverrideSchema).optional(),
   feedback: FeedbackSchema.optional(),
 });
 
@@ -123,7 +108,6 @@ export type Env = "prod" | "pre_prod";
 export type EnvCreds = z.infer<typeof EnvCredsSchema>;
 export type UipathConfig = z.infer<typeof UipathSchema>;
 export type CopilotConfig = z.infer<typeof CopilotSchema>;
-export type OrderOverride = z.infer<typeof OrderOverrideSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 export interface ResolvedCreds {
   prod: EnvCreds;
@@ -166,7 +150,6 @@ const localFile = (name: string): string =>
   LOCAL_DIR ? join(LOCAL_DIR, name) : fileURLToPath(new URL(`../.local/${name}`, import.meta.url));
 const LEGACY_CREDS = localFile("order-copy-credentials.json");
 const LEGACY_UIPATH = localFile("uipath-config.json");
-const LEGACY_OVERRIDES = localFile("overrides.json");
 
 const isMissing = (e: unknown): boolean =>
   e instanceof Error && "code" in e && (e as { code?: string }).code === "ENOENT";
@@ -188,17 +171,11 @@ function readJson(path: string | URL, label: string): unknown {
 
 class ConfigMissing extends Error {}
 
-// Assemble the single-file shape from the split legacy files. overrides.json is optional.
+// Assemble the single-file shape from the split legacy files.
 function loadLegacy(): unknown {
   const copilot = readJson(LEGACY_CREDS, "Copilot credentials");
   const uipath = readJson(LEGACY_UIPATH, "UiPath config");
-  let overrides: unknown;
-  try {
-    overrides = readJson(LEGACY_OVERRIDES, "overrides");
-  } catch (e) {
-    if (!(e instanceof ConfigMissing)) throw e;
-  }
-  return overrides ? { copilot, uipath, overrides } : { copilot, uipath };
+  return { copilot, uipath };
 }
 
 let _config: Config | undefined;
@@ -219,7 +196,7 @@ function computeStatKey(): string {
   const cfgPath = configPath();
   const single = tryMtime(cfgPath);
   if (single !== undefined) return `single:${cfgPath}:${single}`;
-  const parts = [LEGACY_CREDS, LEGACY_UIPATH, LEGACY_OVERRIDES]
+  const parts = [LEGACY_CREDS, LEGACY_UIPATH]
     .map((p) => `${p}:${tryMtime(p) ?? "missing"}`)
     .join("|");
   return `legacy:${parts}`;
@@ -325,8 +302,6 @@ export function listProfiles(): string[] {
     return [];
   }
 }
-
-export const getOverrides = (): Record<string, OrderOverride> => loadConfig().overrides ?? {};
 
 // On-failure feedback settings. Enabled by default; repositoryUrl is omitted unless
 // configured (feedback.ts supplies the default repo). Reads through loadConfig, so it

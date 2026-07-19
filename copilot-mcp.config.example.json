@@ -1,5 +1,5 @@
 {
-  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is the normal path (every Copilot tool takes a required profile arg); a top-level copilot.prod/pre_prod pair is also accepted as a fallback for callers that pass no profile, but isn't needed once profiles are set. folderIdByEnv is optional (numeric OrganizationUnitId; defaults to prod 231517 / pre_prod 434039 if omitted). uipath.folderPath (singular, legacy) plus queueUrl/addQueueItemPath/serverUrlByEnv are only needed for build_queue_item. uipath needs bearer, oauth, or both — oauth (client-credentials) is tried first when present, with bearer as the fallback if the OAuth token request fails or oauth is omitted; oauth.tokenUrl is optional and otherwise guessed from orchestratorUrl. overrides is optional (per-prodUid clone remaps). Alternatively set COPILOT_MCP_LOCAL_DIR to a dir holding the legacy split files order-copy-credentials.json + uipath-config.json (+ overrides.json). Config edits are picked up live on the next tool call — no server restart needed.",
+  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is the normal path (every Copilot tool takes a required profile arg); a top-level copilot.prod/pre_prod pair is also accepted as a fallback for callers that pass no profile, but isn't needed once profiles are set. folderIdByEnv is optional (numeric OrganizationUnitId; defaults to prod 231517 / pre_prod 434039 if omitted). uipath.folderPath (singular, legacy) plus queueUrl/addQueueItemPath/serverUrlByEnv are only needed for build_queue_item. uipath needs bearer, oauth, or both — oauth (client-credentials) is tried first when present, with bearer as the fallback if the OAuth token request fails or oauth is omitted; oauth.tokenUrl is optional and otherwise guessed from orchestratorUrl. Alternatively set COPILOT_MCP_LOCAL_DIR to a dir holding the legacy split files order-copy-credentials.json + uipath-config.json. Config edits are picked up live on the next tool call — no server restart needed.",
   "copilot": {
     "profiles": {
       "ossm": { "prod": { "be": "https://prod-be-batch.ehrcopilotbe.com", "email": "...", "password": "...", "fe": "https://copilot.apexmedical.ai" }, "pre_prod": { "be": "https://pre-prod-be-batch.ehrcopilotbe.com", "email": "...", "password": "...", "fe": "https://pre-prod-copilot.apexmedicalai.com" } },
@@ -15,9 +15,6 @@
     "queueUrl": "<queue url used in SpecificContent>",
     "addQueueItemPath": "/odata/Queues/UiPathODataSvc.AddQueueItem",
     "serverUrlByEnv": { "prod": "https://prod-be-batch.ehrcopilotbe.com", "pre_prod": "https://pre-prod-be-batch.ehrcopilotbe.com" }
-  },
-  "overrides": {
-    "<prodOrderUid>": { "referredFacilityUid": "<preprod-uid>", "specialityUid": "<preprod-uid>", "placeOfService": "11", "injectCPTs": false }
   },
   "feedback": { "enabled": true, "repositoryUrl": "https://github.com/belal-elsabbagh-apex/copilot-mcp" }
 }

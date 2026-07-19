@@ -595,7 +595,6 @@ export const CONFIG_GUIDE = {
       "Optional numeric OrganizationUnitId per env (defaults: prod 231517 / pre_prod 434039).",
     "uipath.queueUrl / uipath.addQueueItemPath / uipath.serverUrlByEnv":
       "Only needed for build_queue_item / add_queue_item; the safety guard pins posted items to these pre-prod values.",
-    overrides: "Optional per-prodUid clone remaps (cross-env reference uids) for clone_order.",
     feedback:
       "Optional on-failure GitHub-issue feedback; on by default (feedback.enabled=false disables). When a tool fails in a way that looks like a bug in this server, the error payload carries reportIssue.url — a prefilled GitHub new-issue link (tool name + error + server version only, no args/credentials) targeting feedback.repositoryUrl (default: this server's repo). Surface or open it so bugs get reported.",
   },

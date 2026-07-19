@@ -118,7 +118,8 @@ export function registerPrompts(server: McpServer): void {
     {
       title: "Clone a prod order to pre-prod and verify",
       description:
-        "Pick a cloneable prod order, clone it into pre-prod (clone-only), and confirm the new order.",
+        "Pick a cloneable prod order, read it, mint an equivalent pre-prod order, and — if a " +
+        "reference doesn't resolve — diagnose via the settings tools instead of guessing.",
       argsSchema: {
         uid: z.string().optional().describe("A specific prod orderUid to clone; omit to pick one"),
         profile: completable(
@@ -132,12 +133,18 @@ export function registerPrompts(server: McpServer): void {
       const step1 = uid
         ? `1. You already have orderUid="${uid}". Optionally confirm it is cloneable with find_clone_candidates.`
         : `1. Call find_clone_candidates${p} to list recent prod orders that will actually clone, and pick one.`;
+      const orderUidRef = uid ?? "<the chosen uid>";
       return userText(
-        `Clone a prod Copilot order into pre-prod and verify it${p}.\n` +
-          `${step1}\n` +
-          `2. Call clone_order with the chosen uid(s)${p} — clone-only (submit=false) unless the user explicitly authorizes submitting in pre-prod.\n` +
-          `3. From the result, take each newUid and confirm it landed (it should reach forReview / ready-to-submit).\n` +
-          `Report the prodUid -> newUid mapping and the verify status for each.`,
+        [
+          `Clone a prod Copilot order into pre-prod and verify it${p}. This is a judgment-driven flow, not a fixed script — skip the diagnosis steps entirely on a clean mint, and don't assume every failure is a missing reference (it could be a transient 403, a bad date, etc).`,
+          step1,
+          `2. Call get_order with orderUid="${orderUidRef}", env="prod"${p} to read its facility, speciality, order type, order names, insurance, patient, and ICD/CPT detail.`,
+          `3. Using your own judgment (no automated matcher exists for this), find the PRE-PROD equivalents by NAME: call get_settings (env="pre_prod"${p}) or diff_settings${p}, scoped to whichever of these sections are relevant — referred-facilities (facility), specialties (speciality), orders-outbound-types (order type), orders (order names).`,
+          `4. Call create_preprod_order${p} with the fields derived in steps 2-3 (patientName, patientBirthDate, insuranceName, typeUid, orderNamesUids, and whichever of specialityUid / referredFacilityUid / referredProviderUid / location / appointmentDate / icdCodes / placeOfService apply). It never accepts a submit flag.`,
+          `5. If create_preprod_order throws, or its processMessage/verify status shows the order didn't reach forReview: identify which reference is implicated (the error or message should name the field), map it to a settings section per the list in step 3, then diagnose — call list_setting_sections if unsure of exact keys, then diff_settings${p} scoped to that section to confirm the item is onlyInProd (present in prod, missing in pre-prod). If confirmed, call plan_settings_sync${p} (same section scope) and report the proposed action id(s) + any warnings to the user — do NOT call apply_settings_sync yourself. Suggest: get approval, apply, then retry from step 4.`,
+          `6. On success, report {prodUid, newUid, verify} — the order should be at forReview.`,
+          `7. ONLY if the user explicitly authorizes it, call submit_preprod_order${p} with the new orderUid as a separate, deliberate step — never implied by a default.`,
+        ].join("\n"),
       );
     },
   );
