@@ -27,6 +27,8 @@
 //   - plan_settings_sync       plan the additive prod -> pre-prod sync actions (read-only)
 //   - apply_settings_sync      execute selected planned sync actions against pre-prod (additive only)
 //   - get_order                fetch a single order's normalized detail by uid (read-only)
+//   - search_orders            filter orders by location/insurance/referredTo/type/auth/date range (read-only)
+//   - get_order_category_stats per-folder order counts for a given filter (read-only)
 //   - get_login_token          log into the Copilot BE for a profile/env and return the session JWT (read-only)
 //   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
 //
@@ -42,7 +44,9 @@ import { configStatus, getFeedbackConfig, onConfigReload, resolveCreds } from ".
 import { analyzeOrderExecution } from "./copilot/analyze.js";
 import {
   assertPreProdClient,
+  type BeOrder,
   fetchOrder,
+  filterOrders,
   login,
   loginToken,
   makeClient,
@@ -55,6 +59,7 @@ import {
 import { runDoctor } from "./copilot/doctor.js";
 import { type MintSpec, mintPreprodOrder } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
+import { getOrderCategoryStats, searchOrders } from "./copilot/order-search.js";
 import { normalizeOutput } from "./copilot/output-schema.js";
 import {
   applySettingsSync,
@@ -77,7 +82,7 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
-import { envelopeRows, msBetween, stringProp } from "./shared/util.js";
+import { msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
@@ -120,23 +125,9 @@ const ok = (obj: unknown) => ({
 });
 const toMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-// Minimal shape of an order row from /api/v1/orders/filter (only fields we read).
-interface OrderRow {
-  orderUid?: string;
-  status?: string;
-  referredFacility?: { referredFacilityUid?: string; name?: string };
-  orderType?: { typeUid?: string; name?: string };
-  orderNames?: unknown[];
-  insurance?: { name?: string };
-  appointmentDate?: unknown;
-  ICDCodes?: unknown[];
-  CPTCodes?: unknown[];
-}
-const ordersOf = (data: unknown): OrderRow[] => envelopeRows(data) as OrderRow[];
-
 // A prod order clones to forReview only if it has facility + type + orderNames.
 // Returns the candidate summary, or null if it would get stuck 'incomplete'.
-const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
+const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
   const cloneable =
     !!o.referredFacility?.referredFacilityUid &&
     !!o.orderType?.typeUid &&
@@ -255,15 +246,12 @@ server.registerTool(
       const candidates: Record<string, unknown>[] = [];
       let scanned = 0;
       for (let page = 0; page < scanPages && candidates.length < limit; page++) {
-        const r = await prod.req("POST", "/api/v1/orders/filter", {
-          json: {
-            pageSize: 50,
-            pageNumber: page,
-            type: "Outbound Referral",
-            orderMode: ORDER_MODE,
-          },
+        const { rows } = await filterOrders(prod, {
+          pageSize: 50,
+          pageNumber: page,
+          type: "Outbound Referral",
+          orderMode: ORDER_MODE,
         });
-        const rows = ordersOf(r.data);
         if (!rows.length) break;
         for (const o of rows) {
           scanned++;
@@ -1903,6 +1891,147 @@ server.registerTool(
       return ok({ orderUid, env, ...detail, ...(documents.length > 0 ? { documents } : {}) });
     } catch (e) {
       return toolError("get_order", e, VERSION);
+    }
+  },
+);
+
+// ---- search_orders --------------------------------------------------------
+const orderFilterDimensionsSchema = {
+  type: z
+    .string()
+    .optional()
+    .describe("Order category, e.g. 'Outbound Referral' (default) or 'PCP Notes'"),
+  locations: z.array(z.string()).optional().describe("Clinic location names to filter to"),
+  insurances: z.array(z.string()).optional().describe("Insurance/payer names to filter to"),
+  referredTo: z
+    .array(z.string())
+    .optional()
+    .describe("referredFacilityUid/referredProviderUid values to filter to"),
+  orderType: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Order type names, e.g. 'Consultation Referral', 'Follow-up Visit', 'Imaging', 'Injections', " +
+        "'Medical Supplies', 'Other', 'PCP Notes'",
+    ),
+  authRequired: z
+    .array(z.enum(["Yes", "No", "Skip"]))
+    .optional()
+    .describe("Authorization Required filter (UI strings)"),
+  authStatus: z
+    .array(
+      z.enum([
+        "denied",
+        "approved",
+        "expired",
+        "cancelled",
+        "closed",
+        "denied by Service Provider",
+      ]),
+    )
+    .optional()
+    .describe("Authorization Status filter"),
+  uploadStatusAuth: z
+    .array(z.enum(["not_started", "completed", "failed", "in_progress"]))
+    .optional()
+    .describe("Upload Auth Status filter"),
+  uploadStatusFax: z
+    .array(z.enum(["not_started", "completed", "failed", "in_progress"]))
+    .optional()
+    .describe("Upload Fax Status filter"),
+  hasAuthScreenshot: z
+    .boolean()
+    .optional()
+    .describe("true = Pending Final Approval, false = Pending Review & Submission"),
+  sendFax: z.boolean().optional().describe("Send Fax filter"),
+  missingNotes: z.boolean().optional().describe("Missing Provider Notes filter"),
+  mrn: z.string().optional().describe("Free-text MRN search"),
+  search: z.string().optional().describe("Free-text patient/order search"),
+  fromDate: z.string().optional().describe("Creation Date range start, MM-DD-YYYY"),
+  toDate: z.string().optional().describe("Creation Date range end, MM-DD-YYYY"),
+  orderDateFrom: z.string().optional().describe("Order Date range start, MM-DD-YYYY"),
+  orderDateTo: z.string().optional().describe("Order Date range end, MM-DD-YYYY"),
+  appointmentDateFrom: z.string().optional().describe("Appointment Date range start, MM-DD-YYYY"),
+  appointmentDateTo: z.string().optional().describe("Appointment Date range end, MM-DD-YYYY"),
+  submissionDateFrom: z.string().optional().describe("Submission Date range start, MM-DD-YYYY"),
+  submissionDateTo: z.string().optional().describe("Submission Date range end, MM-DD-YYYY"),
+  notificationDateFrom: z.string().optional().describe("Notification Date range start, MM-DD-YYYY"),
+  notificationDateTo: z.string().optional().describe("Notification Date range end, MM-DD-YYYY"),
+};
+
+server.registerTool(
+  "search_orders",
+  {
+    title: "Search Copilot orders by dimension",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Filter an account's Copilot orders by any combination of location, insurance, referred-to, " +
+      "order type, auth/upload status, MRN, free-text search, or any of 5 date ranges, via " +
+      "POST /orders/filter. READ-ONLY. Returns slim, non-PHI rows (orderUid, status, dates, insurance, " +
+      "speciality, referredTo{name,npi,external}, auth/upload status — no patient data). Defaults to " +
+      "type='Outbound Referral', pageSize=100, pageNumber=1 (1-based). Use get_order for a single " +
+      "order's full detail including patient info.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to search (required)"),
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      pageSize: z.number().int().min(1).max(100).optional().describe("Rows per page (default 100)"),
+      pageNumber: z.number().int().min(1).optional().describe("1-based page number (default 1)"),
+      sort: z
+        .string()
+        .regex(
+          /^(creationDate|orderDate|submissionDate|appointmentDate|notificationDate):(asc|desc)$/,
+        )
+        .optional()
+        .describe("e.g. 'creationDate:desc'"),
+      ...orderFilterDimensionsSchema,
+    },
+  },
+  async (args) => {
+    try {
+      return ok(await searchOrders({ ...args, profile: args.profile ?? null }));
+    } catch (e) {
+      return toolError("search_orders", e, VERSION);
+    }
+  },
+);
+
+// ---- get_order_category_stats ----------------------------------------------
+server.registerTool(
+  "get_order_category_stats",
+  {
+    title: "Get Copilot order counts per category folder",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "Cheap per-folder order counts (For Review, PCP Notes, Processing, Archived, with their " +
+      "sub-buckets) for a given filter, via POST /orders/category/stats — same filter dimensions as " +
+      "search_orders, no pagination. READ-ONLY. Response shape is passed through as returned by the BE.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to query (required)"),
+      profile: z
+        .string()
+        .min(1)
+        .describe("Credential profile / account name from config (required)"),
+      ...orderFilterDimensionsSchema,
+    },
+  },
+  async (args) => {
+    try {
+      return ok(await getOrderCategoryStats({ ...args, profile: args.profile ?? null }));
+    } catch (e) {
+      return toolError("get_order_category_stats", e, VERSION);
     }
   },
 );

@@ -5,7 +5,7 @@
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
 import type { Env } from "../config/config.js";
-import { envelopeRows, stringProp } from "../shared/util.js";
+import { envelopeRows, isRecord, prop, stringProp } from "../shared/util.js";
 
 // orderMode sent on every /orders/filter call (orders + pcp notes).
 export const ORDER_MODE = '["orders_only_mode","pcp_notes_mode"]';
@@ -28,6 +28,7 @@ export interface BeFacility {
   phone?: string;
   placeOfService?: string;
   isSpeciality?: boolean;
+  external?: boolean;
 }
 export interface BeSpeciality {
   specialityUid?: string;
@@ -36,6 +37,8 @@ export interface BeSpeciality {
 export interface BeOrder {
   orderUid?: string;
   status?: string;
+  category?: string;
+  creationDate?: string;
   submissionStatus?: string;
   submissionReference?: string;
   patient?: { patientName?: string; patientBirthDate?: string; patientPhoneNumber?: string };
@@ -43,6 +46,9 @@ export interface BeOrder {
   orderType?: { typeUid?: string; name?: string };
   speciality?: { name?: string };
   referredFacility?: BeFacility;
+  // Mutually exclusive with referredFacility — provider-targeted orders are
+  // PCP-notes sends (insurance null); payer referrals always target a facility.
+  referredProvider?: { referredProviderUid?: string; name?: string; NPI?: string };
   clinicProvider?: { clinicProviderUid?: string };
   orderNames?: { nameUid?: string }[];
   ICDCodes?: BeCode[];
@@ -50,6 +56,9 @@ export interface BeOrder {
   location?: string;
   uploadAuth?: boolean;
   uploadFax?: boolean;
+  authStatus?: string;
+  uploadStatusAuth?: string;
+  uploadStatusFax?: string;
   retro?: boolean;
   urgency?: string;
   comments?: string;
@@ -180,24 +189,85 @@ export async function loginToken(c: HttpClient, email: string, password: string)
   return token;
 }
 
-// Pull a single order row out of an /orders/filter response (defensive about shape).
-const firstOrder = (data: unknown): BeOrder | undefined =>
-  envelopeRows(data)[0] as BeOrder | undefined;
+// The full documented /orders/filter request-body contract (see the
+// copilot-orders-filter reference). Every array-valued filter is a JSON-ENCODED
+// STRING, not a bare array (e.g. `locations: '["OSSM COR"]'`) — callers building
+// these from real arrays should encode before constructing this body (see
+// order-search.ts's buildFilterBody for the pure encoding step).
+export interface OrderFilterBody {
+  pageSize: number;
+  pageNumber: number;
+  type?: string;
+  orderMode?: string;
+  searchUid?: string;
+  search?: string;
+  locations?: string;
+  insurances?: string;
+  referredTo?: string;
+  orderType?: string;
+  authRequired?: string;
+  authStatus?: string;
+  uploadStatusAuth?: string;
+  uploadStatusFax?: string;
+  hasAuthScreenshot?: boolean;
+  sendFax?: boolean;
+  missingNotes?: boolean;
+  mrn?: string;
+  fromDate?: string;
+  toDate?: string;
+  orderDateFrom?: string;
+  orderDateTo?: string;
+  appointmentDateFrom?: string;
+  appointmentDateTo?: string;
+  submissionDateFrom?: string;
+  submissionDateTo?: string;
+  notificationDateFrom?: string;
+  notificationDateTo?: string;
+  sort?: string;
+}
+
+// Single low-level POST /orders/filter wrapper — every call site (fetchOrder,
+// verify, findStuckOrders, find_clone_candidates, searchOrders) shares this
+// instead of building its own request/response handling.
+export async function filterOrders(
+  c: HttpClient,
+  body: OrderFilterBody,
+): Promise<{ rows: BeOrder[]; total?: number }> {
+  const r = await c.req("POST", "/api/v1/orders/filter", { json: body });
+  if (r.status >= 400)
+    throw new Error(`/orders/filter failed ${r.status}: ${r.text.slice(0, 300)}`);
+  const total = prop(r.data, "totalNumberOfElements");
+  return {
+    rows: envelopeRows(r.data) as BeOrder[],
+    ...(typeof total === "number" ? { total } : {}),
+  };
+}
+
+// POST /orders/category/stats — same filter body (minus paging), returns per-category
+// folder counts. Response shape is passed through as-is: no live sample exists in this
+// codebase to type it against yet (see reference/copilot-orders-filter.md for the
+// documented folder/sub-bucket names) — verify against a real account before relying
+// on specific fields.
+export async function categoryStats(
+  c: HttpClient,
+  body: Omit<OrderFilterBody, "pageSize" | "pageNumber">,
+): Promise<Record<string, unknown>> {
+  const r = await c.req("POST", "/api/v1/orders/category/stats", { json: body });
+  if (r.status >= 400)
+    throw new Error(`/orders/category/stats failed ${r.status}: ${r.text.slice(0, 300)}`);
+  return isRecord(r.data) ? r.data : {};
+}
 
 // /orders/filter for one uid; throws if the order isn't found in this env.
 export async function fetchOrder(c: HttpClient, uid: string): Promise<BeOrder> {
-  const r = await c.req("POST", "/api/v1/orders/filter", {
-    json: {
-      searchUid: uid,
-      pageSize: 30,
-      pageNumber: 0,
-      type: "Outbound Referral",
-      orderMode: ORDER_MODE,
-    },
+  const { rows } = await filterOrders(c, {
+    searchUid: uid,
+    pageSize: 30,
+    pageNumber: 0,
+    type: "Outbound Referral",
+    orderMode: ORDER_MODE,
   });
-  if (r.status >= 400)
-    throw new Error(`/orders/filter failed ${r.status}: ${r.text.slice(0, 300)}`);
-  const o = firstOrder(r.data);
+  const o = rows[0];
   if (!o) throw new Error(`order ${uid} not found in this env`);
   return o;
 }
@@ -223,19 +293,22 @@ export function normalizeOrder(o: BeOrder): OrderVerify {
 }
 
 // Read-only status summary for an order (used by clone verify + analyze enrich).
+// Swallows both "not found" and HTTP-error responses into null (matches the prior
+// behavior of reading straight off the response body regardless of status).
 export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | null> {
-  const r = await c.req("POST", "/api/v1/orders/filter", {
-    json: {
+  try {
+    const { rows } = await filterOrders(c, {
       searchUid: uid,
       pageSize: 30,
       pageNumber: 0,
       type: "Outbound Referral",
       orderMode: ORDER_MODE,
-    },
-  });
-  const o = firstOrder(r.data);
-  if (!o) return null;
-  return normalizeOrder(o);
+    });
+    const o = rows[0];
+    return o ? normalizeOrder(o) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Submit a pre-prod order that is sitting at forReview (advances it to inProgress).

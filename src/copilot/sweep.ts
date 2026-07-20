@@ -4,24 +4,12 @@
 // the Orchestrator search in uipath.ts.
 
 import { type Env, resolveCreds } from "../config/config.js";
-import { envelopeRows } from "../shared/util.js";
 import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "../uipath/uipath.js";
-import { login, makeClient, ORDER_MODE } from "./copilot-client.js";
+import { type BeOrder, filterOrders, login, makeClient, ORDER_MODE } from "./copilot-client.js";
 
 // Statuses considered "stuck" by default: submitted-but-not-finished, or never
 // completed. Terminal/healthy statuses (e.g. forReview, completed) are excluded.
 export const DEFAULT_STUCK_STATUSES = ["inProgress", "incomplete", "pending"];
-
-interface OrderRow {
-  orderUid?: string;
-  status?: string;
-  orderType?: { name?: string };
-  referredFacility?: { name?: string };
-  insurance?: { name?: string };
-  orderDate?: string;
-  encounterDate?: string;
-  appointmentDate?: string;
-}
 
 export interface StuckOrder {
   orderUid?: string | undefined;
@@ -60,7 +48,7 @@ export interface FindStuckResult {
 }
 
 // Best-effort age in hours from whatever timestamp the row carries. null if none parse.
-function ageHours(row: OrderRow): number | null {
+function ageHours(row: BeOrder): number | null {
   for (const v of [row.orderDate, row.encounterDate, row.appointmentDate]) {
     if (!v) continue;
     const t = Date.parse(v);
@@ -101,10 +89,12 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
   const stuck: StuckOrder[] = [];
   let scanned = 0;
   for (let page = 0; page < scanPages; page++) {
-    const r = await client.req("POST", "/api/v1/orders/filter", {
-      json: { pageSize: 50, pageNumber: page, type: "Outbound Referral", orderMode: ORDER_MODE },
+    const { rows } = await filterOrders(client, {
+      pageSize: 50,
+      pageNumber: page,
+      type: "Outbound Referral",
+      orderMode: ORDER_MODE,
     });
-    const rows = envelopeRows(r.data) as OrderRow[];
     if (!rows.length) break;
     for (const o of rows) {
       scanned++;

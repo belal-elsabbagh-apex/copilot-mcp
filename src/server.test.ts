@@ -54,6 +54,8 @@ const EXPECTED = [
   "plan_settings_sync",
   "apply_settings_sync",
   "get_order",
+  "search_orders",
+  "get_order_category_stats",
   "get_login_token",
   "doctor",
   "list_queues",
@@ -165,6 +167,14 @@ describe("tool input schemas accept representative payloads", () => {
     get_order: {
       valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required
+    },
+    search_orders: {
+      valid: { env: "prod", profile: "ossm", insurances: ["OPTUM CARE NETWORK"] },
+      invalid: { profile: "ossm" }, // env is required
+    },
+    get_order_category_stats: {
+      valid: { env: "prod", profile: "ossm" },
+      invalid: { profile: "ossm" }, // env is required
     },
     get_login_token: {
       valid: { env: "prod", profile: "ossm" },
