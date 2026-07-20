@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.5] - 2026-07-20
+
+### Fixed
+
+- **`list_queue_items` was failing on every call** with a UiPath 400 (`Could not find
+  a property named 'Name' on type ... QueueItemDto`). Combining an outer `$select`
+  with the bare `$expand=QueueDefinition,Robot` this endpoint requires triggered the
+  error; `getQueueItem` already avoided `$select` for the same reason. Dropped
+  `$select` from `listQueueItems` — `toQueueItem` only reads the fields it needs, so
+  fetching the full object costs nothing downstream.
+
 ## [1.19.4] - 2026-07-20
 
 ### Changed
