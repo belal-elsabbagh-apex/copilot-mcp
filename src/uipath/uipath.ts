@@ -660,6 +660,12 @@ export async function listTriggers(scope: FolderScope, top: number): Promise<UiP
 
 // Queue items for a queue, newest first. Filtered by QueueDefinitionId and, when
 // `status` is non-empty, Status. Capped at `top`.
+//
+// No `$select` here: combining an outer $select with the bare $expand this endpoint
+// requires (see QUEUE_ITEM_EXPAND) makes UiPath's OData controller 400 with "Could not
+// find a property named 'Name' on type ... QueueItemDto" — confirmed live, 100% repro.
+// getQueueItem already fetches the full object for the same reason; toQueueItem only
+// reads the fields it needs, so the larger payload costs nothing downstream.
 export async function listQueueItems(
   queueDefId: number,
   scope: FolderScope,
@@ -674,7 +680,6 @@ export async function listQueueItems(
       $filter: filters.join(" and "),
       $orderby: "CreationTime desc",
       $top: String(top),
-      $select: "Id,Status,Reference,CreationTime,RetryNumber,QueueDefinitionId,SpecificContent",
       $expand: QUEUE_ITEM_EXPAND,
     },
     scope.folderPath,
