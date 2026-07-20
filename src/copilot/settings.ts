@@ -767,31 +767,45 @@ const payerUidOf = (p: unknown): string | undefined => {
   return undefined;
 };
 
-// name -> own payerUid for one env (source: clinic-payers, envelope `data`, key `Name`).
-async function fetchPayerUidsByName(client: HttpClient): Promise<Map<string, string>> {
+// name -> own payerUid AND uid -> name for one env (source: clinic-payers, envelope `data`, key
+// `Name`) — one fetch, both directions: buildPayerMaps needs uidByName (to link prod payerUid ->
+// pre payerUid by name); auditPayerLinks needs each env's OWN nameByUid (to resolve a facility's
+// payer links back to a name for cross-env diffing, and to spot a uid that resolves to nothing).
+async function fetchPayerMaps(
+  client: HttpClient,
+): Promise<{ uidByName: Map<string, string>; nameByUid: Map<string, string> }> {
   const r = await client.req("GET", "/api/v1/settings/clinic-payers");
   if (r.status >= 400) throw new Error(`GET /settings/clinic-payers -> ${r.status}`);
-  const out = new Map<string, string>();
+  const uidByName = new Map<string, string>();
+  const nameByUid = new Map<string, string>();
   for (const p of asArray(getEnvelope(r.data, "data"))) {
     const name = stringProp(p, "Name");
     const uid = payerUidOf(p);
-    if (name && uid) out.set(name, uid);
+    if (name && uid) {
+      uidByName.set(name, uid);
+      nameByUid.set(uid, name);
+    }
   }
-  return out;
+  return { uidByName, nameByUid };
 }
 
-// prod payerUid -> pre-prod payerUid, by matching payers across envs on name.
-async function buildPayerMap(prod: HttpClient, pre: HttpClient): Promise<Map<string, string>> {
-  const [prodByName, preByName] = await Promise.all([
-    fetchPayerUidsByName(prod),
-    fetchPayerUidsByName(pre),
-  ]);
-  const map = new Map<string, string>();
-  for (const [name, prodUid] of prodByName) {
-    const preUid = preByName.get(name);
-    if (preUid) map.set(prodUid, preUid);
+// prod payerUid -> pre-prod payerUid (by matching payers across envs on name), plus each env's
+// own uid -> name map (needed to resolve/audit payer links directly, not just remap them).
+async function buildPayerMaps(
+  prod: HttpClient,
+  pre: HttpClient,
+): Promise<{
+  prodToPre: Map<string, string>;
+  prodNameByUid: ReadonlyMap<string, string>;
+  preNameByUid: ReadonlyMap<string, string>;
+}> {
+  const [prodMaps, preMaps] = await Promise.all([fetchPayerMaps(prod), fetchPayerMaps(pre)]);
+  const prodToPre = new Map<string, string>();
+  for (const [name, prodUid] of prodMaps.uidByName) {
+    const preUid = preMaps.uidByName.get(name);
+    if (preUid) prodToPre.set(prodUid, preUid);
   }
-  return map;
+  return { prodToPre, prodNameByUid: prodMaps.nameByUid, preNameByUid: preMaps.nameByUid };
 }
 
 // Rewrite each link's payerUid prod->pre; drop (and report) links with no pre-prod match.
@@ -1103,6 +1117,113 @@ export function planSpecialitySync(
     }
   }
   return { actions, skipped };
+}
+
+// ---- payer-link audit (read-only; facilities/providers that already match by name) --------
+// planSpecialitySync only ever ADDS prod-only facilities/providers — a facility/provider that
+// already exists (matched by name) in both envs is never looked at again, so payer-link drift
+// on shared records is invisible to sync (issue #4). Reconciling an EXISTING record's
+// payersProviderId would mean MODIFYING pre-prod settings, not just adding to them — outside
+// sync's additive-only contract (see the module doc) — so this is audit-only: it reports
+// findings, plan_settings_sync surfaces them, nothing here writes anything.
+
+export interface PayerLinkFinding {
+  typeName: string;
+  specialityName: string;
+  itemKind: "facility" | "provider";
+  itemName: string;
+  extraInPreProd: string[]; // payer NAMEs linked in pre-prod but not in prod
+  missingInPreProd: string[]; // payer NAMEs linked in prod but not in pre-prod
+  orphanedProdPayerUids: string[]; // prod's own payerUids that resolve to no payer name in prod
+  orphanedPreProdPayerUids: string[]; // pre-prod's own payerUids that resolve to no payer name in pre-prod
+}
+
+// Payer names linked to one facility/provider row (resolved via the row's OWN env's payer
+// list — payer uids are per-env and never expected to match across envs, only their names are
+// comparable), plus any payerUid that doesn't resolve to a name at all in that env (a dangling
+// reference).
+function payerLinkNames(
+  item: unknown,
+  payerNameByUid: ReadonlyMap<string, string>,
+): { names: string[]; orphaned: string[] } {
+  const names: string[] = [];
+  const orphaned: string[] = [];
+  for (const l of asArray(prop(item, "payersProviderId"))) {
+    const uid = stringProp(l, "payerUid");
+    if (!uid) continue;
+    const name = payerNameByUid.get(uid);
+    if (name) names.push(name);
+    else orphaned.push(uid);
+  }
+  return { names, orphaned };
+}
+
+const setDiff = (a: readonly string[], b: readonly string[]): string[] => {
+  const have = new Set(b);
+  return [...new Set(a)].filter((x) => !have.has(x));
+};
+
+// Audit payer links on facilities/providers that exist (matched by name) in BOTH envs' crawled
+// speciality trees — exactly the records planSpecialitySync's additive logic never inspects.
+// Pure over the same crawled trees + per-env payerUid->name maps buildSyncPlan already builds
+// for the specialities domain (no extra requests). Types/specialities not present in both envs
+// are skipped here too — planSpecialitySync already reports those via `skipped`.
+export function auditPayerLinks(
+  prodTree: SpecialityTree,
+  preTree: SpecialityTree,
+  prodPayerNameByUid: ReadonlyMap<string, string>,
+  prePayerNameByUid: ReadonlyMap<string, string>,
+): PayerLinkFinding[] {
+  const preTypeByName = new Map(preTree.types.map((t) => [t.name, t]));
+  const findings: PayerLinkFinding[] = [];
+  const kinds = [
+    { field: "referredFacilities", itemKind: "facility" as const },
+    { field: "referredProviders", itemKind: "provider" as const },
+  ];
+
+  for (const pType of prodTree.types) {
+    const qType = preTypeByName.get(pType.name);
+    if (!qType) continue;
+    const preSpecByName = new Map(qType.specialities.map((s) => [referralName(s), s]));
+
+    for (const pSpec of pType.specialities) {
+      const qSpec = preSpecByName.get(referralName(pSpec));
+      if (!qSpec) continue;
+
+      for (const { field, itemKind } of kinds) {
+        const preItemByName = new Map(asArray(prop(qSpec, field)).map((x) => [referralName(x), x]));
+        for (const pItem of asArray(prop(pSpec, field))) {
+          const itemName = referralName(pItem);
+          const qItem = preItemByName.get(itemName);
+          if (!qItem) continue; // not shared -- planSpecialitySync's create/merge covers it
+
+          const prodLinks = payerLinkNames(pItem, prodPayerNameByUid);
+          const preLinks = payerLinkNames(qItem, prePayerNameByUid);
+          const extraInPreProd = setDiff(preLinks.names, prodLinks.names);
+          const missingInPreProd = setDiff(prodLinks.names, preLinks.names);
+          if (
+            !extraInPreProd.length &&
+            !missingInPreProd.length &&
+            !prodLinks.orphaned.length &&
+            !preLinks.orphaned.length
+          )
+            continue;
+
+          findings.push({
+            typeName: pType.name,
+            specialityName: referralName(pSpec),
+            itemKind,
+            itemName,
+            extraInPreProd,
+            missingInPreProd,
+            orphanedProdPayerUids: prodLinks.orphaned,
+            orphanedPreProdPayerUids: preLinks.orphaned,
+          });
+        }
+      }
+    }
+  }
+  return findings;
 }
 
 // ---- orders domain (create prod-only orders in pre-prod) ------------------
@@ -1470,6 +1591,7 @@ interface SyncPlanContext {
   actions: PlannedSyncAction[];
   skipped: SyncSkip[];
   skippedSections: { key: string; reason: string }[];
+  payerLinkFindings: PayerLinkFinding[];
   pre: HttpClient | null; // logged-in pre-prod client; null when nothing syncable was selected (no login done)
 }
 
@@ -1501,6 +1623,7 @@ async function buildSyncPlan(opts: {
     actions: [],
     skipped: [],
     skippedSections,
+    payerLinkFindings: [],
     pre: null,
   };
   if (!runSpeciality && !runOrderNames) return ctx; // nothing syncable selected — report skipped only
@@ -1512,10 +1635,11 @@ async function buildSyncPlan(opts: {
     login(pre, creds.pre_prod.email, creds.pre_prod.password),
   ]);
 
-  // Both domains remap payer references prod->pre, so build the payer map once and share it.
-  const payerMap = await buildPayerMap(prod, pre);
+  // Both domains remap payer references prod->pre, so build the payer maps once and share them.
+  const { prodToPre: payerMap, prodNameByUid, preNameByUid } = await buildPayerMaps(prod, pre);
   const actions: SyncAction[] = [];
   const skipped: SyncSkip[] = [];
+  let payerLinkFindings: PayerLinkFinding[] = [];
 
   if (runSpeciality) {
     const [prodTree, preTree] = await Promise.all([
@@ -1525,6 +1649,7 @@ async function buildSyncPlan(opts: {
     const s = planSpecialitySync(prodTree, preTree, payerMap);
     actions.push(...s.actions);
     skipped.push(...s.skipped);
+    payerLinkFindings = auditPayerLinks(prodTree, preTree, prodNameByUid, preNameByUid);
   }
   if (runOrderNames) {
     const [prodTree, preTree] = await Promise.all([
@@ -1539,6 +1664,7 @@ async function buildSyncPlan(opts: {
 
   ctx.actions = assignActionIds(actions);
   ctx.skipped = skipped;
+  ctx.payerLinkFindings = payerLinkFindings;
   ctx.pre = pre;
   return ctx;
 }
@@ -1561,6 +1687,9 @@ export interface PlanSettingsSyncResult {
   actions: PlannedActionSummary[];
   skipped: SyncSkip[];
   skippedSections: { key: string; reason: string }[];
+  // Payer-link drift/orphans on facilities/providers that already exist (matched by name) in
+  // both envs — audit-only, never turned into a write action (see auditPayerLinks doc).
+  payerLinkFindings: PayerLinkFinding[];
 }
 
 // Compute — without writing — the additive actions that would sync prod -> pre-prod for
@@ -1577,6 +1706,7 @@ export async function planSettingsSyncOp(
     actions: ctx.actions.map((a) => toActionSummary(a, opts.includeBodies ?? false)),
     skipped: ctx.skipped,
     skippedSections: ctx.skippedSections,
+    payerLinkFindings: ctx.payerLinkFindings,
   };
 }
 

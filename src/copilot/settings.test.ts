@@ -3,6 +3,7 @@ import { ExpectedError } from "../mcp/feedback.js";
 import {
   actionId,
   assignActionIds,
+  auditPayerLinks,
   buildMergedSpecialityBody,
   buildOrderNameCreateBody,
   buildSpecialityCreateBody,
@@ -666,6 +667,169 @@ describe("sync_settings (pure)", () => {
     expect(
       merge?.warnings?.some((w) => w.includes("1386941219") && w.includes("Consultation")),
     ).toBe(true);
+  });
+});
+
+describe("auditPayerLinks (pure)", () => {
+  // Regression (issue #4): a facility that exists in both envs (matched by name) is never
+  // touched by planSpecialitySync's additive create/merge logic, so payer-link drift on it was
+  // invisible. Matching must be by payer NAME (uids are per-env and never expected to match),
+  // never by payerUid.
+  test("flags a payer link present in pre-prod but not prod, on a facility that matches by name", () => {
+    const prod: SpecialityTree = {
+      types: [
+        {
+          typeUid: "prod-t1",
+          name: "Medical Supplies",
+          specialities: [
+            {
+              name: "DME",
+              specialityUid: "prod-sp-dme",
+              referredFacilities: [{ name: "Body Basics Physical Therapy", payersProviderId: [] }],
+            },
+          ],
+        },
+      ],
+    };
+    const pre: SpecialityTree = {
+      types: [
+        {
+          typeUid: "pre-t1",
+          name: "Medical Supplies",
+          specialities: [
+            {
+              name: "DME",
+              specialityUid: "pre-sp-dme",
+              referredFacilities: [
+                {
+                  name: "Body Basics Physical Therapy",
+                  payersProviderId: [{ payerUid: "pre-payer-optum" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const prodNameByUid = new Map<string, string>(); // prod has no links to resolve here
+    const preNameByUid = new Map([["pre-payer-optum", "OPTUM CARE NETWORK"]]);
+
+    const findings = auditPayerLinks(prod, pre, prodNameByUid, preNameByUid);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      typeName: "Medical Supplies",
+      specialityName: "DME",
+      itemKind: "facility",
+      itemName: "Body Basics Physical Therapy",
+      extraInPreProd: ["OPTUM CARE NETWORK"],
+      missingInPreProd: [],
+      orphanedProdPayerUids: [],
+      orphanedPreProdPayerUids: [],
+    });
+  });
+
+  // Regression (issue #4): a payerUid on a shared facility/provider that resolves to no payer
+  // in that env's own clinic-payers list is a dangling reference — invisible to diff_settings
+  // (which strips uids) and to sync (additive only). Must be flagged even with no name-level
+  // link drift otherwise.
+  test("flags a payerUid that resolves to no payer name (orphaned reference)", () => {
+    const prod: SpecialityTree = {
+      types: [
+        {
+          typeUid: "prod-t1",
+          name: "Follow-up Visit",
+          specialities: [
+            {
+              name: "Orthopedics",
+              specialityUid: "prod-sp-ortho",
+              referredProviders: [{ name: "Steven Kelley", payersProviderId: [] }],
+            },
+          ],
+        },
+      ],
+    };
+    const pre: SpecialityTree = {
+      types: [
+        {
+          typeUid: "pre-t1",
+          name: "Follow-up Visit",
+          specialities: [
+            {
+              name: "Orthopedics",
+              specialityUid: "pre-sp-ortho",
+              referredProviders: [
+                {
+                  name: "Steven Kelley",
+                  payersProviderId: [{ payerUid: "pre-payer-dangling" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    // pre-payer-dangling deliberately absent from preNameByUid -- it resolves to no payer
+    const findings = auditPayerLinks(prod, pre, new Map(), new Map());
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      itemKind: "provider",
+      itemName: "Steven Kelley",
+      extraInPreProd: [],
+      missingInPreProd: [],
+      orphanedProdPayerUids: [],
+      orphanedPreProdPayerUids: ["pre-payer-dangling"],
+    });
+  });
+
+  test("reports nothing when a shared facility's payer links match by name on both sides", () => {
+    const prod: SpecialityTree = {
+      types: [
+        {
+          typeUid: "prod-t1",
+          name: "Imaging",
+          specialities: [
+            {
+              name: "MRI",
+              specialityUid: "prod-sp-mri",
+              referredFacilities: [
+                { name: "RadNet", payersProviderId: [{ payerUid: "prod-payer-A" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const pre: SpecialityTree = {
+      types: [
+        {
+          typeUid: "pre-t1",
+          name: "Imaging",
+          specialities: [
+            {
+              name: "MRI",
+              specialityUid: "pre-sp-mri",
+              referredFacilities: [
+                { name: "RadNet", payersProviderId: [{ payerUid: "pre-payer-A" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const prodNameByUid = new Map([["prod-payer-A", "Anthem"]]);
+    const preNameByUid = new Map([["pre-payer-A", "Anthem"]]);
+
+    expect(auditPayerLinks(prod, pre, prodNameByUid, preNameByUid)).toEqual([]);
+  });
+
+  test("skips types/specialities not present in both envs (already reported by planSpecialitySync)", () => {
+    const prod: SpecialityTree = {
+      types: [{ typeUid: "prod-t1", name: "Lab", specialities: [{ name: "Blood" }] }],
+    };
+    const pre: SpecialityTree = { types: [] };
+    expect(auditPayerLinks(prod, pre, new Map(), new Map())).toEqual([]);
   });
 });
 

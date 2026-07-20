@@ -1754,9 +1754,16 @@ server.registerTool(
       "the action. Each action carries a stable id ('section:op:typeName:itemName') to pass to " +
       "apply_settings_sync after user review. Request bodies are summarized, not included " +
       "(includeBodies=true to inspect them — scope with sections first). Sections with no verified " +
-      "write endpoint are reported under skippedSections. Returns {account, prodBase, preProdBase, " +
-      "actionCount, actions:[{id,op,itemKind,typeName,itemName,method,path,summary,warnings?}], " +
-      "skipped, skippedSections}.",
+      "write endpoint are reported under skippedSections. Also runs a READ-ONLY payer-link audit " +
+      "(specialties domain only): a facility/provider that already exists (matched by name) in " +
+      "both envs is never touched by the additive sync above, so payer-link drift on it — payers " +
+      "linked in pre-prod but not prod, prod but not pre-prod, or a payerUid that resolves to no " +
+      "payer at all — was previously invisible. Matched by payer NAME, never by payerUid (payer " +
+      "uids are per-env and never expected to match). Findings are reported only, never turned " +
+      "into a write action. Returns {account, prodBase, preProdBase, actionCount, " +
+      "actions:[{id,op,itemKind,typeName,itemName,method,path,summary,warnings?}], skipped, " +
+      "skippedSections, payerLinkFindings:[{typeName,specialityName,itemKind,itemName," +
+      "extraInPreProd,missingInPreProd,orphanedProdPayerUids,orphanedPreProdPayerUids}]}.",
     inputSchema: {
       profile: z
         .string()
