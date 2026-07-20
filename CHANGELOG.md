@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.2] - 2026-07-20
+
+### Fixed
+
+- **`plan_settings_sync`/`apply_settings_sync`: exact-string facility/provider name
+  matching missed same-NPI duplicates, causing merge actions to 400** (#3, partial).
+  A prod-only facility/provider is now checked against a tenant-wide index of every
+  NPI already present in pre-prod (any order type, any speciality) before being added
+  to a merge body — a same-NPI record under a different name/casing or a different
+  speciality is dropped with a warning instead of silently duplicated (verified live:
+  `Medical Supplies -> DME`'s `Verio Healthcare Inc - DME` / `VERIO HEALTHCARE INC -
+  DME` collision no longer 400s). This does not yet cover records where pre-prod's own
+  row carries no NPI at all — that needs fuzzy name matching and is being scoped
+  separately given the risk of conflating two distinct providers.
+
 ## [1.19.1] - 2026-07-20
 
 ### Fixed
