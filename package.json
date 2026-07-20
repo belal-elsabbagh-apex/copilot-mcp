@@ -1,6 +1,6 @@
 {
   "name": "@belal-elsabbagh-apex/copilot-mcp",
-  "version": "1.19.5",
+  "version": "1.20.0",
   "type": "module",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
   "author": "Belal Elsabbagh",

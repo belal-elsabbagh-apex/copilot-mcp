@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-07-20
+
+### Changed
+
+- **BREAKING: settings-catalog `group` renamed to `tags` (many-to-many)** across the five
+  settings tools (`diff_settings`, `get_settings`, `plan_settings_sync`, `apply_settings_sync`:
+  `groups` param → `tags`; `list_setting_sections`: `group` param → `tag`) and their response
+  shapes (`sections[].group` → `sections[].tags`, `{groups}` → `{tags}`). `group` was never a
+  live Copilot API concept — a static one-to-one categorization invented when the catalog was
+  reverse-engineered from a HAR capture. `tags: string[]` lets a section belong to more than
+  one category; every section still carries exactly the one tag it had before, in a 1-element
+  array — no section was re-tagged in this pass. Filtering is now OR-across-requested-tags.
+
 ## [1.19.5] - 2026-07-20
 
 ### Fixed
