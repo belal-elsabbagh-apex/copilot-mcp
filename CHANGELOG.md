@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.3] - 2026-07-20
+
+### Added
+
+- **`plan_settings_sync` now audits per-facility payer-link drift** (#4, partial).
+  The additive create/merge sync never inspects a facility/provider that already
+  exists (matched by name) in both envs, so payer-link drift on it was invisible.
+  A new `payerLinkFindings` array reports, per shared facility/provider: payer
+  names linked only in pre-prod, only in prod, or a `payerUid` that resolves to
+  no payer at all in that env (a dangling reference). Matched by payer NAME,
+  never by payerUid — payer uids are per-env and never expected to match.
+  Audit-only: nothing here writes anything, since reconciling an existing
+  facility's links would mean modifying (not adding to) pre-prod settings,
+  outside sync's additive-only contract. Does not yet disambiguate multiple
+  facilities sharing the same name within one speciality — a pre-existing gap
+  in the name-matching `planSpecialitySync` already uses.
+
 ## [1.19.2] - 2026-07-20
 
 ### Fixed
