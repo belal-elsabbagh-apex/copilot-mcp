@@ -939,12 +939,71 @@ export interface SyncSkip {
 }
 
 const referralName = (x: unknown): string => stringProp(x, "name") ?? "";
-const missingByName = (prodArr: unknown[], preArr: unknown[]): unknown[] => {
-  const have = new Set(preArr.map(referralName));
-  return prodArr.filter((x) => !have.has(referralName(x)));
-};
+// The BE has used both casings for this field across records (see BeFacility in
+// copilot-client.ts) — try both.
+const npiOf = (x: unknown): string | undefined => stringProp(x, "NPI") ?? stringProp(x, "npi");
 const payerWarning = (dropped: string[]): string =>
   `${dropped.length} payer link(s) dropped (no matching pre-prod payer): ${[...new Set(dropped)].join(", ")}`;
+
+// One pre-prod facility/provider record, indexed by NPI regardless of which order type or
+// speciality it lives under.
+interface PreNpiEntry {
+  typeName: string;
+  specialityName: string;
+  name: string;
+}
+
+// Every facility/provider NPI already present ANYWHERE in pre-prod — across every order type
+// and speciality, not just the one being merged. A prod-only-by-name "addition" whose NPI shows
+// up here is the same real-world record under a different name or casing, not a genuinely new
+// one (issue #3: an all-caps pre-prod duplicate within the SAME speciality, and a same-NPI
+// record living under a completely different speciality elsewhere in the tenant, both slipped
+// past exact-string name matching and 400'd the BE's duplicate-NPI constraint).
+function buildPreNpiIndex(preTree: SpecialityTree): Map<string, PreNpiEntry> {
+  const index = new Map<string, PreNpiEntry>();
+  for (const t of preTree.types) {
+    for (const s of t.specialities) {
+      const specialityName = referralName(s);
+      for (const item of [
+        ...asArray(prop(s, "referredFacilities")),
+        ...asArray(prop(s, "referredProviders")),
+      ]) {
+        const npi = npiOf(item);
+        if (npi && !index.has(npi))
+          index.set(npi, { typeName: t.name, specialityName, name: referralName(item) });
+      }
+    }
+  }
+  return index;
+}
+
+// Prod items missing from pre-prod BY NAME, minus any whose NPI already exists somewhere in
+// pre-prod (a same-record duplicate hiding behind a name/casing difference) — those are
+// dropped and reported via `warnings` instead of sent, since the write would 400 on the
+// duplicate NPI otherwise.
+function missingByName(
+  prodArr: unknown[],
+  preArr: unknown[],
+  npiIndex: ReadonlyMap<string, PreNpiEntry>,
+): { items: unknown[]; warnings: string[] } {
+  const have = new Set(preArr.map(referralName));
+  const items: unknown[] = [];
+  const warnings: string[] = [];
+  for (const x of prodArr) {
+    if (have.has(referralName(x))) continue;
+    const npi = npiOf(x);
+    const existing = npi ? npiIndex.get(npi) : undefined;
+    if (existing) {
+      warnings.push(
+        `'${referralName(x)}' (NPI ${npi}) skipped — already in pre-prod as '${existing.name}' ` +
+          `under ${existing.typeName} / ${existing.specialityName}`,
+      );
+      continue;
+    }
+    items.push(x);
+  }
+  return { items, warnings };
+}
 
 // Match order types by name, then specialities by name; emit create actions for prod-only
 // specialities and merge actions for specialities whose facilities/providers are a superset in
@@ -955,6 +1014,7 @@ export function planSpecialitySync(
   payerMap: ReadonlyMap<string, string>,
 ): { actions: SyncAction[]; skipped: SyncSkip[] } {
   const preTypeByName = new Map(preTree.types.map((t) => [t.name, t]));
+  const npiIndex = buildPreNpiIndex(preTree);
   const actions: SyncAction[] = [];
   const skipped: SyncSkip[] = [];
 
@@ -992,12 +1052,23 @@ export function planSpecialitySync(
       const missFacs = missingByName(
         asArray(prop(pSpec, "referredFacilities")),
         asArray(prop(qSpec, "referredFacilities")),
+        npiIndex,
       );
       const missProvs = missingByName(
         asArray(prop(pSpec, "referredProviders")),
         asArray(prop(qSpec, "referredProviders")),
+        npiIndex,
       );
-      if (!missFacs.length && !missProvs.length) continue; // already in sync
+      const npiWarnings = [...missFacs.warnings, ...missProvs.warnings];
+      if (!missFacs.items.length && !missProvs.items.length) {
+        if (npiWarnings.length)
+          skipped.push({
+            typeName: pType.name,
+            specialityName: sName,
+            reason: `nothing left to merge after dropping NPI duplicates: ${npiWarnings.join("; ")}`,
+          });
+        continue; // already in sync (or everything missing was an NPI duplicate)
+      }
 
       const preSpecUid = stringProp(qSpec, "specialityUid");
       if (!preSpecUid) {
@@ -1010,10 +1081,14 @@ export function planSpecialitySync(
       }
       const { body, droppedPayers } = buildMergedSpecialityBody(
         qSpec,
-        missFacs,
-        missProvs,
+        missFacs.items,
+        missProvs.items,
         payerMap,
       );
+      const warnings = [
+        ...(droppedPayers.length ? [payerWarning(droppedPayers)] : []),
+        ...npiWarnings,
+      ];
       actions.push({
         section: "specialties",
         op: "merge",
@@ -1023,7 +1098,7 @@ export function planSpecialitySync(
         method: "PUT",
         path: `/api/v1/settings/specialities/${preSpecUid}`,
         body,
-        ...(droppedPayers.length ? { warnings: [payerWarning(droppedPayers)] } : {}),
+        ...(warnings.length ? { warnings } : {}),
       });
     }
   }

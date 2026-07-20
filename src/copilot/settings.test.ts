@@ -545,6 +545,128 @@ describe("sync_settings (pure)", () => {
     expect(skipped[0]?.typeName).toBe("Lab");
     expect(skipped[0]?.reason).toMatch(/missing in pre-prod/);
   });
+
+  // Regression (issue #3): exact-string name matching alone missed a pre-prod duplicate that
+  // only differs by casing, so the merge body appended the SAME NPI twice under two
+  // name-casings — the BE 400s on the duplicate NPI within the speciality.
+  test("planSpecialitySync drops a same-NPI facility that only differs by name casing, with a warning", () => {
+    const prod: SpecialityTree = {
+      types: [
+        {
+          typeUid: "prod-t1",
+          name: "Medical Supplies",
+          specialities: [
+            {
+              name: "DME",
+              specialityUid: "prod-sp-dme",
+              referredFacilities: [{ name: "Verio Healthcare Inc - DME", NPI: "1821467804" }],
+            },
+          ],
+        },
+      ],
+    };
+    const pre: SpecialityTree = {
+      types: [
+        {
+          typeUid: "pre-t1",
+          name: "Medical Supplies",
+          specialities: [
+            {
+              name: "DME",
+              specialityUid: "pre-sp-dme",
+              referredFacilities: [
+                {
+                  referredFacilityUid: "pre-f-verio",
+                  name: "VERIO HEALTHCARE INC - DME",
+                  NPI: "1821467804",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const { actions, skipped } = planSpecialitySync(prod, pre, payerMap);
+
+    // nothing genuinely new to merge -> no write action, just a reported skip
+    expect(actions).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.specialityName).toBe("DME");
+    expect(skipped[0]?.reason).toMatch(/1821467804/);
+    expect(skipped[0]?.reason).toMatch(/VERIO HEALTHCARE INC - DME/);
+  });
+
+  // Regression (issue #3): two "new" facilities collide by NPI with pre-prod records that
+  // already exist under a DIFFERENT speciality entirely; a third facility is genuinely new.
+  // The collisions must be dropped (with a warning) without blocking the genuinely-new one.
+  test("planSpecialitySync drops cross-speciality NPI collisions but keeps the genuinely-new facility", () => {
+    const prod: SpecialityTree = {
+      types: [
+        {
+          typeUid: "prod-t1",
+          name: "Follow-up Visit",
+          specialities: [
+            {
+              name: "Orthopedics",
+              specialityUid: "prod-sp-ortho",
+              referredProviders: [
+                { name: "Loren Tholcke", NPI: "1588191944" },
+                { name: "Reza Roghani", NPI: "1386941219" },
+                { name: "Omar Kadri", NPI: "1999999999" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const pre: SpecialityTree = {
+      types: [
+        {
+          typeUid: "pre-t1",
+          name: "Follow-up Visit",
+          specialities: [
+            { name: "Orthopedics", specialityUid: "pre-sp-ortho", referredProviders: [] },
+            {
+              name: "Podiatry", // a DIFFERENT speciality, same tenant
+              specialityUid: "pre-sp-podiatry",
+              referredProviders: [
+                { referredProviderUid: "pre-p-loren", name: "LOREN THOLCKE DO", NPI: "1588191944" },
+              ],
+            },
+          ],
+        },
+        {
+          typeUid: "pre-t2",
+          name: "Consultation", // a DIFFERENT order type entirely
+          specialities: [
+            {
+              name: "General",
+              specialityUid: "pre-sp-general",
+              referredProviders: [
+                { referredProviderUid: "pre-p-reza", name: "REZA ROGHANI MD", NPI: "1386941219" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const { actions } = planSpecialitySync(prod, pre, payerMap);
+
+    expect(actions).toHaveLength(1);
+    const merge = actions[0];
+    expect(merge?.itemName).toBe("Orthopedics");
+    const provs = (merge?.body["referredProviders"] ?? []) as Record<string, unknown>[];
+    // only the genuinely-new provider survives -- collateral damage avoided
+    expect(provs.map((p) => p["name"])).toEqual(["Omar Kadri"]);
+    expect(merge?.warnings?.some((w) => w.includes("1588191944") && w.includes("Podiatry"))).toBe(
+      true,
+    );
+    expect(
+      merge?.warnings?.some((w) => w.includes("1386941219") && w.includes("Consultation")),
+    ).toBe(true);
+  });
 });
 
 describe("sync_settings orders domain (pure)", () => {
