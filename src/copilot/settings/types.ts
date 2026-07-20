@@ -10,7 +10,7 @@ import type { HttpClient } from "../copilot-client.js";
 export interface SettingsSection {
   key: string; // stable id used in the `sections` param + output
   label: string;
-  group: string; // top-level grouping for coarse filtering / listing
+  tags: readonly string[]; // categories for coarse filtering / listing (many-to-many)
   path: string; // GET path (query string included where the UI sends one)
   kind: "object" | "list";
   envelope?: string; // dot-path to the payload inside the response (e.g. "data")
@@ -73,7 +73,7 @@ export interface SectionResult {
 export interface SettingSectionInfo {
   key: string;
   label: string;
-  group: string;
+  tags: string[];
   kind: "object" | "list";
   derived: boolean; // crawled (heavier) vs a plain single GET
   matchKey?: string; // list sections: the field items are matched/scoped by (omitted => content-set diff)
@@ -84,7 +84,7 @@ export interface SettingSectionInfo {
 export interface DiffSettingsOpts {
   profile?: string | null;
   sections?: string[];
-  groups?: string[];
+  tags?: string[];
   emr?: string;
   includeUnchanged?: boolean;
 }
@@ -104,7 +104,7 @@ export interface GetSettingsOpts {
   env: "prod" | "pre_prod";
   profile?: string | null;
   sections?: string[];
-  groups?: string[];
+  tags?: string[];
   emr?: string;
   normalized?: boolean; // default true = stripped like diff_settings; false = raw
 }
@@ -112,7 +112,7 @@ export interface GetSettingsOpts {
 export interface GetSettingsSection {
   key: string;
   label: string;
-  group: string;
+  tags: string[];
   kind: "object" | "list";
   count?: number; // list sections: row count
   data?: unknown;
@@ -188,7 +188,7 @@ export interface PayerLinkFinding {
 export interface PlanSettingsSyncOpts {
   profile?: string | null;
   sections?: string[];
-  groups?: string[];
+  tags?: string[];
   emr?: string;
   includeBodies?: boolean;
 }
@@ -224,7 +224,7 @@ export interface ExecutedAction {
 export interface ApplySettingsSyncOpts extends ApplyFilter {
   profile?: string | null;
   sections?: string[];
-  groups?: string[];
+  tags?: string[];
   emr?: string;
   // Optional audit hook; the server wires this to mcpLog(warning) so every live write is logged.
   onWrite?: (message: string, data?: Record<string, unknown>) => void;

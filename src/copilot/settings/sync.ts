@@ -49,11 +49,11 @@ interface SyncPlanContext {
 async function buildSyncPlan(opts: {
   profile?: string | null;
   sections?: string[];
-  groups?: string[];
+  tags?: string[];
   emr?: string;
 }): Promise<SyncPlanContext> {
-  // Validate + resolve the selection up front (unknown group/section fails fast, no login).
-  const chosen = selectSections(opts.sections, opts.groups, opts.emr);
+  // Validate + resolve the selection up front (unknown tag/section fails fast, no login).
+  const chosen = selectSections(opts.sections, opts.tags, opts.emr);
 
   // Collect the distinct syncers referenced by the chosen sections — several sections can
   // share one syncer (e.g. specialties/referred-providers/referred-facilities all point at

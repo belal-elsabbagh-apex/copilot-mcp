@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listSettingSections, SETTINGS_CATALOG, settingGroups } from "./catalog.js";
+import { listSettingSections, SETTINGS_CATALOG, settingTags } from "./catalog.js";
 
 describe("SETTINGS_CATALOG", () => {
   test("section keys are unique", () => {
@@ -24,44 +24,44 @@ describe("SETTINGS_CATALOG", () => {
     expect(SETTINGS_CATALOG.find((x) => x.key === "rendering-providers")?.derive).toBeUndefined();
   });
 
-  test("every section has a non-empty group", () => {
+  test("every section has a non-empty tags array", () => {
     for (const s of SETTINGS_CATALOG) {
-      expect(typeof s.group, `${s.key} group`).toBe("string");
-      expect(s.group.length, `${s.key} group`).toBeGreaterThan(0);
+      expect(Array.isArray(s.tags), `${s.key} tags`).toBe(true);
+      expect(s.tags.length, `${s.key} tags`).toBeGreaterThan(0);
     }
   });
 
-  test("the provider/facility directory sections share the 'providers' group", () => {
+  test("the provider/facility directory sections share the 'providers' tag", () => {
     for (const key of [
       "rendering-providers",
       "referred-providers",
       "referred-facilities",
       "referring-entities",
     ]) {
-      expect(SETTINGS_CATALOG.find((x) => x.key === key)?.group, key).toBe("providers");
+      expect(SETTINGS_CATALOG.find((x) => x.key === key)?.tags, key).toContain("providers");
     }
   });
 });
 
-describe("settingGroups + listSettingSections", () => {
-  test("settingGroups returns the distinct groups", () => {
-    const groups = settingGroups();
-    expect(new Set(groups).size).toBe(groups.length); // distinct
-    expect(groups).toContain("orders");
-    expect(groups).toContain("providers");
+describe("settingTags + listSettingSections", () => {
+  test("settingTags returns the distinct tags", () => {
+    const tags = settingTags();
+    expect(new Set(tags).size).toBe(tags.length); // distinct
+    expect(tags).toContain("orders");
+    expect(tags).toContain("providers");
   });
 
-  test("lists all sections with key/label/group/kind/derived", () => {
-    const { groups, sections } = listSettingSections({});
+  test("lists all sections with key/label/tags/kind/derived", () => {
+    const { tags, sections } = listSettingSections({});
     expect(sections.length).toBe(SETTINGS_CATALOG.length);
-    expect(groups).toEqual(settingGroups());
+    expect(tags).toEqual(settingTags());
     const spec = sections.find((s) => s.key === "specialties");
-    expect(spec).toMatchObject({ label: expect.any(String), group: "orders", derived: true });
+    expect(spec).toMatchObject({ label: expect.any(String), tags: ["orders"], derived: true });
     expect(sections.find((s) => s.key === "locations")?.derived).toBe(false);
   });
 
-  test("group filter narrows the listing", () => {
-    const { sections } = listSettingSections({ group: "providers" });
+  test("tag filter narrows the listing", () => {
+    const { sections } = listSettingSections({ tag: "providers" });
     expect(sections.map((s) => s.key).sort()).toEqual(
       [
         "referred-facilities",
@@ -76,11 +76,11 @@ describe("settingGroups + listSettingSections", () => {
     expect(listSettingSections({}).sections.some((s) => s.key === "emr-details")).toBe(false);
     const withEmr = listSettingSections({ emr: "NEXTGEN" });
     expect(withEmr.sections.some((s) => s.key === "emr-details")).toBe(true);
-    expect(withEmr.groups).toContain("emr");
+    expect(withEmr.tags).toContain("emr");
   });
 
-  test("unknown group throws a listing error", () => {
-    expect(() => listSettingSections({ group: "nope" })).toThrow(/unknown group/);
+  test("unknown tag throws a listing error", () => {
+    expect(() => listSettingSections({ tag: "nope" })).toThrow(/unknown tag/);
   });
 
   test("sections filter narrows to exact keys", () => {

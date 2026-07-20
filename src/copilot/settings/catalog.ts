@@ -45,28 +45,28 @@ export const SETTINGS_CATALOG: readonly SettingsSection[] = [
   ordersSection,
 ];
 
-// Distinct top-level groups, in catalog order.
-export const settingGroups = (): string[] => [...new Set(SETTINGS_CATALOG.map((s) => s.group))];
+// Distinct tags across the catalog, in catalog order.
+export const settingTags = (): string[] => [...new Set(SETTINGS_CATALOG.flatMap((s) => s.tags))];
 
 export function catalogWithEmr(emr: string | undefined): SettingsSection[] {
   return emr ? [...SETTINGS_CATALOG, emrSection(emr)] : [...SETTINGS_CATALOG];
 }
 
-// Pick sections from the catalog, narrowing by top-level group and/or exact key. Both
-// filters apply together (AND). Unknown groups/keys throw a clear, value-listing error.
+// Pick sections from the catalog, narrowing by tag (any match) and/or exact key. Both
+// filters apply together (AND). Unknown tags/keys throw a clear, value-listing error.
 export function selectSections(
   keys: string[] | undefined,
-  groups: string[] | undefined,
+  tags: string[] | undefined,
   emr: string | undefined,
 ): SettingsSection[] {
   let picked = catalogWithEmr(emr);
-  if (groups?.length) {
-    const valid = new Set(picked.map((s) => s.group));
-    const missing = groups.filter((g) => !valid.has(g));
+  if (tags?.length) {
+    const valid = new Set(picked.flatMap((s) => s.tags));
+    const missing = tags.filter((t) => !valid.has(t));
     if (missing.length)
-      throw new Error(`unknown group(s): ${missing.join(", ")}. Known: ${[...valid].join(", ")}`);
-    const want = new Set(groups);
-    picked = picked.filter((s) => want.has(s.group));
+      throw new Error(`unknown tag(s): ${missing.join(", ")}. Known: ${[...valid].join(", ")}`);
+    const want = new Set(tags);
+    picked = picked.filter((s) => s.tags.some((t) => want.has(t)));
   }
   if (keys?.length) {
     const missing = keys.filter((k) => !catalogWithEmr(emr).some((s) => s.key === k));
@@ -84,17 +84,17 @@ export function selectSections(
 
 // ---- Section listing (companion tool — pure, no network) ------------------
 
-// List the catalog sections diff_settings can compare, optionally narrowed by top-level
-// group and/or an explicit set of section keys (both applied as AND). Pure: reads the
-// static catalog, no creds/network. Unknown groups/keys throw a clear, value-listing error.
-export function listSettingSections(opts: { group?: string; sections?: string[]; emr?: string }): {
-  groups: string[];
+// List the catalog sections diff_settings can compare, optionally narrowed by a tag
+// and/or an explicit set of section keys (both applied as AND). Pure: reads the
+// static catalog, no creds/network. Unknown tag/keys throw a clear, value-listing error.
+export function listSettingSections(opts: { tag?: string; sections?: string[]; emr?: string }): {
+  tags: string[];
   sections: SettingSectionInfo[];
 } {
   const all = catalogWithEmr(opts.emr);
-  const allGroups = [...new Set(all.map((s) => s.group))];
-  if (opts.group && !allGroups.includes(opts.group))
-    throw new Error(`unknown group: ${opts.group}. Known: ${allGroups.join(", ")}`);
+  const allTags = [...new Set(all.flatMap((s) => s.tags))];
+  if (opts.tag && !allTags.includes(opts.tag))
+    throw new Error(`unknown tag: ${opts.tag}. Known: ${allTags.join(", ")}`);
   if (opts.sections?.length) {
     const known = new Set(all.map((s) => s.key));
     const missing = opts.sections.filter((k) => !known.has(k));
@@ -106,14 +106,14 @@ export function listSettingSections(opts: { group?: string; sections?: string[];
   }
   const want = opts.sections?.length ? new Set(opts.sections) : undefined;
   const sections = all
-    .filter((s) => (!opts.group || s.group === opts.group) && (!want || want.has(s.key)))
+    .filter((s) => (!opts.tag || s.tags.includes(opts.tag)) && (!want || want.has(s.key)))
     .map((s) => ({
       key: s.key,
       label: s.label,
-      group: s.group,
+      tags: [...s.tags],
       kind: s.kind,
       derived: !!s.derive,
       ...(s.matchKey ? { matchKey: s.matchKey } : {}),
     }));
-  return { groups: allGroups, sections };
+  return { tags: allTags, sections };
 }

@@ -53,8 +53,8 @@ function diffSection(
 // Log into both envs for the account, fetch every selected settings section, and
 // return the normalized prod<->pre-prod diff.
 export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettingsResult> {
-  // Select first so an unknown group/section fails fast (no needless login).
-  const chosen = selectSections(opts.sections, opts.groups, opts.emr);
+  // Select first so an unknown tag/section fails fast (no needless login).
+  const chosen = selectSections(opts.sections, opts.tags, opts.emr);
 
   const creds = resolveCreds(opts.profile ?? null);
   const prod = makeClient(creds.prod.be, "prod");
@@ -102,8 +102,8 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
 // diffSettings. Read-only. Stripped by default (same noise-stripping as diffSettings);
 // normalized=false returns the raw payload with real UIDs/timestamps visible.
 export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsResult> {
-  // Select first so an unknown group/section fails fast (no needless login).
-  const chosen = selectSections(opts.sections, opts.groups, opts.emr);
+  // Select first so an unknown tag/section fails fast (no needless login).
+  const chosen = selectSections(opts.sections, opts.tags, opts.emr);
 
   const creds = resolveCreds(opts.profile ?? null)[opts.env];
   const client = makeClient(creds.be, opts.env);
@@ -111,7 +111,7 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
 
   const sections: GetSettingsSection[] = [];
   for (const section of chosen) {
-    const head = { key: section.key, label: section.label, group: section.group };
+    const head = { key: section.key, label: section.label, tags: [...section.tags] };
     try {
       const raw = await fetchSection(client, section);
       const data = opts.normalized ? normalizeSectionValue(section, raw) : raw;

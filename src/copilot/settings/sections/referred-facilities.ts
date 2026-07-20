@@ -4,7 +4,7 @@ import type { SettingsSection } from "../types.js";
 export const referredFacilitiesSection: SettingsSection = {
   key: "referred-facilities",
   label: "Referred facilities",
-  group: "providers",
+  tags: ["providers"],
   path: "/api/v1/settings/orders/outbound/types/*/specialities", // crawled (see derive)
   kind: "list",
   matchKey: "name",

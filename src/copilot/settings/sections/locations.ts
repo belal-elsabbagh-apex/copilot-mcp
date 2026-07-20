@@ -3,7 +3,7 @@ import type { SettingsSection } from "../types.js";
 export const locationsSection: SettingsSection = {
   key: "locations",
   label: "Locations",
-  group: "locations",
+  tags: ["locations"],
   path: "/api/v1/settings/locations",
   kind: "list",
   matchKey: "name",

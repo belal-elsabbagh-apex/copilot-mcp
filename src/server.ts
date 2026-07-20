@@ -22,7 +22,7 @@
 //   - delete_queue_item        delete a 'New' queue item from the dev clone (pre_prod-only; fetch-first)
 //   - start_job                start job(s) for a dev-clone release (pre_prod-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
-//   - list_setting_sections    list the settings sections/groups the settings tools can scope to (read-only, no network)
+//   - list_setting_sections    list the settings sections/tags the settings tools can scope to (read-only, no network)
 //   - get_settings             fetch one env's settings sections (read-only)
 //   - plan_settings_sync       plan the additive prod -> pre-prod sync actions (read-only)
 //   - apply_settings_sync      execute selected planned sync actions against pre-prod (additive only)
@@ -350,7 +350,7 @@ server.registerTool(
       "names reset speciality/provider; placeOfService applied last, post-forReview; /process " +
       "retry loop) are handled internally. Reference uids (typeUid, orderNamesUids, specialityUid, " +
       "facility/provider uids) are the PRE-PROD tenant's own — discover them via get_settings " +
-      "(orders/specialties groups); never reuse prod uids. The result composes with " +
+      "(orders/specialties tags); never reuse prod uids. The result composes with " +
       "build_queue_item -> add_queue_item for dev-clone robot tests. If the order doesn't reach " +
       "forReview, the result's processMessage explains why (e.g. a missing reference) — check " +
       "get_settings/diff_settings for the implicated section. Returns " +
@@ -1570,9 +1570,9 @@ server.registerTool(
       "providers/facilities), and returns a normalized diff. READ-ONLY — never writes to either env. " +
       "Env-specific noise (UIDs, timestamps, dummy emails, CDN hosts) is stripped, and list " +
       "sections are matched by a semantic key (name) rather than UID, so only real drift shows. " +
-      "Unchanged sections are omitted unless includeUnchanged=true. Scope with groups (top-level, " +
-      "e.g. ['orders']) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
-      "to discover valid groups/keys. For a single env's raw values use get_settings; to " +
+      "Unchanged sections are omitted unless includeUnchanged=true. Scope with tags " +
+      "(e.g. ['orders']) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
+      "to discover valid tags/keys. For a single env's raw values use get_settings; to " +
       "reconcile drift use plan_settings_sync then apply_settings_sync. Returns " +
       "{account, prodBase, preProdBase, sectionsCompared, sectionsWithDiffs, sections:[...]}.",
     inputSchema: {
@@ -1580,10 +1580,10 @@ server.registerTool(
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
-      groups: z
+      tags: z
         .array(z.string())
         .optional()
-        .describe("Top-level groups to diff (e.g. ['orders','providers']); omit for all"),
+        .describe("Tags to diff (e.g. ['orders','providers']); omit for all"),
       sections: z
         .array(z.string())
         .optional()
@@ -1599,12 +1599,12 @@ server.registerTool(
         .describe("Include sections that are identical across envs (default: only differences)"),
     },
   },
-  async ({ profile, groups, sections, emr, includeUnchanged }) => {
+  async ({ profile, tags, sections, emr, includeUnchanged }) => {
     try {
       return ok(
         await diffSettings({
           profile: profile ?? null,
-          ...(groups ? { groups } : {}),
+          ...(tags ? { tags } : {}),
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           includeUnchanged,
@@ -1629,16 +1629,13 @@ server.registerTool(
     },
     description:
       "List the settings sections diff_settings / get_settings / plan_settings_sync can scope to: " +
-      "each section's key, label, top-level group, kind (object/list), whether it is 'derived' " +
+      "each section's key, label, tags, kind (object/list), whether it is 'derived' " +
       "(crawled from order types — heavier), and (for list sections) its matchKey — the field items " +
       "are matched/scoped by. Use this to drive FINE-GRAINED scoping: pass exact section keys via " +
-      "the `sections` param instead of the broader `groups`. Narrow this listing with `group` and/or " +
-      "`sections`. READ-ONLY, no network (reads the static catalog). Returns {groups, sections:[...]}.",
+      "the `sections` param instead of the broader `tags`. Narrow this listing with `tag` and/or " +
+      "`sections`. READ-ONLY, no network (reads the static catalog). Returns {tags, sections:[...]}.",
     inputSchema: {
-      group: z
-        .string()
-        .optional()
-        .describe("Only list sections in this top-level group (e.g. 'orders')"),
+      tag: z.string().optional().describe("Only list sections carrying this tag (e.g. 'orders')"),
       sections: z
         .array(z.string())
         .optional()
@@ -1649,11 +1646,11 @@ server.registerTool(
         .describe("Include the opt-in emr-details section for this EMR type"),
     },
   },
-  ({ group, sections, emr }) => {
+  ({ tag, sections, emr }) => {
     try {
       return ok(
         listSettingSections({
-          ...(group ? { group } : {}),
+          ...(tag ? { tag } : {}),
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
         }),
@@ -1680,21 +1677,21 @@ server.registerTool(
       "counterpart to diff_settings. Logs into that env only and returns each selected section's " +
       "payload, stripped of env-specific noise (UIDs, timestamps, per-section ignore fields) by " +
       "default (list sections also report a row count). READ-ONLY — never writes. Scope with " +
-      "groups (top-level) and/or sections (exact keys) — combined as AND; use list_setting_sections " +
+      "tags and/or sections (exact keys) — combined as AND; use list_setting_sections " +
       "to discover them; crawled sections (specialties / referred-* / orders) are heavier. Pass " +
       "normalized=false for the raw payload with real UIDs/timestamps visible (e.g. to copy a UID " +
       "for another call). Returns " +
-      "{account, env, base, sectionsFetched, sections:[{key,label,group,kind,count?,data|error}]}.",
+      "{account, env, base, sectionsFetched, sections:[{key,label,tags,kind,count?,data|error}]}.",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to read (required — never assumed)"),
       profile: z
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
-      groups: z
+      tags: z
         .array(z.string())
         .optional()
-        .describe("Top-level groups to fetch (e.g. ['orders']); omit for all"),
+        .describe("Tags to fetch (e.g. ['orders']); omit for all"),
       sections: z
         .array(z.string())
         .optional()
@@ -1713,13 +1710,13 @@ server.registerTool(
         ),
     },
   },
-  async ({ env, profile, groups, sections, emr, normalized }) => {
+  async ({ env, profile, tags, sections, emr, normalized }) => {
     try {
       return ok(
         await getSettings({
           env,
           profile: profile ?? null,
-          ...(groups ? { groups } : {}),
+          ...(tags ? { tags } : {}),
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           normalized,
@@ -1769,10 +1766,7 @@ server.registerTool(
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
-      groups: z
-        .array(z.string())
-        .optional()
-        .describe("Top-level groups to plan for (e.g. ['orders'])"),
+      tags: z.array(z.string()).optional().describe("Tags to plan for (e.g. ['orders'])"),
       sections: z.array(z.string()).optional().describe("Exact section keys to plan for"),
       emr: z.string().optional().describe("EMR type to include emrDetailsSettings"),
       includeBodies: z
@@ -1784,12 +1778,12 @@ server.registerTool(
         ),
     },
   },
-  async ({ profile, groups, sections, emr, includeBodies }) => {
+  async ({ profile, tags, sections, emr, includeBodies }) => {
     try {
       return ok(
         await planSettingsSyncOp({
           profile: profile ?? null,
-          ...(groups ? { groups } : {}),
+          ...(tags ? { tags } : {}),
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           includeBodies,
@@ -1816,7 +1810,7 @@ server.registerTool(
       "Execute additive prod -> pre-prod settings sync actions. PRE-PROD ONLY; additive only — " +
       "never overwrites or deletes existing pre-prod settings. SAFETY: it never accepts request " +
       "bodies — it RE-PLANS server-side (same computation and scoping args as plan_settings_sync; " +
-      "use the SAME groups/sections scope) and executes only the planned actions you select: pass " +
+      "use the SAME tags/sections scope) and executes only the planned actions you select: pass " +
       "actionIds (from plan_settings_sync, after reviewing with the user) OR all=true to apply " +
       "every planned action — exactly one of the two is required; calls with neither (or both) are " +
       "rejected. If pre-prod changed since planning, a stale id matches nothing and is reported " +
@@ -1830,10 +1824,10 @@ server.registerTool(
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
-      groups: z
+      tags: z
         .array(z.string())
         .optional()
-        .describe("Top-level groups to re-plan (must match the plan call's scope)"),
+        .describe("Tags to re-plan (must match the plan call's scope)"),
       sections: z
         .array(z.string())
         .optional()
@@ -1849,12 +1843,12 @@ server.registerTool(
         .describe("Explicitly apply EVERY planned action (mutually exclusive with actionIds)"),
     },
   },
-  async ({ profile, groups, sections, emr, actionIds, all }) => {
+  async ({ profile, tags, sections, emr, actionIds, all }) => {
     try {
       return ok(
         await applySettingsSync({
           profile: profile ?? null,
-          ...(groups ? { groups } : {}),
+          ...(tags ? { tags } : {}),
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           ...(actionIds ? { actionIds } : {}),

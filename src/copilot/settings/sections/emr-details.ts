@@ -5,7 +5,7 @@ import type { SettingsSection } from "../types.js";
 export const emrSection = (emr: string): SettingsSection => ({
   key: "emr-details",
   label: `EMR details (${emr})`,
-  group: "emr",
+  tags: ["emr"],
   path: `/api/v1/settings/emrDetailsSettings/${encodeURIComponent(emr)}`,
   kind: "object",
 });

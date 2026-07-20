@@ -147,14 +147,14 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
     },
-    diff_settings: { valid: { groups: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
-    list_setting_sections: { valid: { group: "orders" }, invalid: { group: 123 } },
+    diff_settings: { valid: { tags: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
+    list_setting_sections: { valid: { tag: "orders" }, invalid: { tag: 123 } },
     get_settings: {
-      valid: { env: "pre_prod", profile: "ossm", groups: ["orders"] },
+      valid: { env: "pre_prod", profile: "ossm", tags: ["orders"] },
       invalid: { profile: "ossm" }, // env is required
     },
     plan_settings_sync: {
-      valid: { profile: "ossm", groups: ["orders"] },
+      valid: { profile: "ossm", tags: ["orders"] },
       invalid: {}, // profile is required
     },
     apply_settings_sync: {
