@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.1] - 2026-07-20
+
+### Fixed
+
+- **`apply_settings_sync`: every planned specialities create/merge action 400'd** (#2).
+  The write bodies carried two GET-only fields the BE's write schema rejects —
+  `source` (confirmed live: `POST .../specialities` 400'd with `"referredFacilities[0].
+  source" is not allowed` until stripped) and `specialityName` (each facility/provider
+  row's echo of its parent speciality's name, per a captured HAR of the Settings UI's
+  edit-specialty PUT). Both are now stripped from create bodies and from the
+  existing-item side of a merge (which previously wasn't cleaned at all).
+
 ## [1.19.0] - 2026-07-19
 
 ### Removed
