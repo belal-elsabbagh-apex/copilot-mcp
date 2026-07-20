@@ -321,7 +321,7 @@ describe("sync_settings (pure)", () => {
     );
     const facs = body["referredFacilities"] as Record<string, unknown>[];
     expect(facs).toHaveLength(2);
-    // existing kept verbatim (uid + already-valid pre-prod payer link preserved)
+    // existing kept (uid + already-valid pre-prod payer link preserved)
     expect(facs[0]).toEqual({
       referredFacilityUid: "pre-f-1",
       name: "Existing Fac",
@@ -334,13 +334,48 @@ describe("sync_settings (pure)", () => {
     });
   });
 
+  // Regression: a captured HAR of the Settings UI's "edit specialty" PUT showed the real
+  // request drops specialityUid/specialityName/createdAt/updatedAt from EXISTING facility rows
+  // (while keeping their own referredFacilityUid) — fields the GET crawl echoes onto every row.
+  // apply_settings_sync was resending them verbatim, which the BE 400'd on every merge action.
+  test("buildMergedSpecialityBody strips echoed parent/timestamp fields from existing facilities", () => {
+    const { body } = buildMergedSpecialityBody(
+      {
+        name: "Orthopedics",
+        specialityUid: "pre-sp-ortho",
+        referredFacilities: [
+          {
+            referredFacilityUid: "pre-f-1",
+            name: "Existing Fac",
+            specialityUid: "pre-sp-ortho", // echoed parent uid — must be stripped
+            specialityName: "Orthopedics", // echoed parent name — must be stripped
+            createdAt: "2026-01-01T00:00:00.000Z", // noise — must be stripped
+            updatedAt: "2026-01-02T00:00:00.000Z", // noise — must be stripped
+            payersProviderId: [{ payerUid: "pre-payer-A", providerId: "9", linked: true }],
+          },
+        ],
+      },
+      [],
+      [],
+      payerMap,
+    );
+    const facs = body["referredFacilities"] as Record<string, unknown>[];
+    expect(facs[0]).toEqual({
+      referredFacilityUid: "pre-f-1",
+      name: "Existing Fac",
+      payersProviderId: [{ payerUid: "pre-payer-A", providerId: "9", linked: true }],
+    });
+  });
+
   // Full field set verified two ways: a captured HAR of the Settings UI's "edit referred
   // facility" PUT (specialities/{uid}, full-replace body) and a live GET .../specialities
   // read. Field NAMES/shape below are real; values are synthetic (no real
   // provider/facility PII belongs in a committed fixture). This pins that
   // cleanReferralForWrite's generic "copy everything except uid-suffixed keys +
-  // createdAt/updatedAt/updatedBy" strategy actually preserves every one of them — not
-  // just the couple of fields the smaller tests above use.
+  // createdAt/updatedAt/updatedBy/specialityName/source" strategy actually preserves every
+  // other field — not just the couple the smaller tests above use. `source` is included
+  // because a live POST .../specialities with it present 400'd with "referredFacilities[0].
+  // source is not allowed" (see issue #2) — the write schema rejects it outright.
   const FULL_FACILITY = {
     referredFacilityUid: "00000000-0000-0000-0000-000000000f01", // own uid — must be stripped
     name: "Synthetic Rehab Center",
@@ -357,6 +392,7 @@ describe("sync_settings (pure)", () => {
     includeReferralForm: true,
     isAdditionAllowed: false,
     milesThreshold: null,
+    source: null, // BE-rejected echo field — must be stripped
     createdAt: "2026-06-28T16:12:37.801Z", // noise — must be stripped
     updatedAt: "2026-06-28T16:16:07.011Z", // noise — must be stripped
     specialityUid: "00000000-0000-0000-0000-000000000s01", // own uid — must be stripped
@@ -364,10 +400,18 @@ describe("sync_settings (pure)", () => {
     payersProviderId: [{ payerUid: "prod-payer-A", providerId: "42", linked: true }],
   };
 
-  test("cleanReferralForWrite preserves every referred-facility field except uid/timestamp noise", () => {
+  test("cleanReferralForWrite preserves every referred-facility field except uid/timestamp/echo noise", () => {
     const { item, droppedPayers } = cleanReferralForWrite(FULL_FACILITY, payerMap);
     expect(droppedPayers).toEqual([]);
-    const { referredFacilityUid, createdAt, updatedAt, specialityUid, ...rest } = FULL_FACILITY;
+    const {
+      referredFacilityUid,
+      createdAt,
+      updatedAt,
+      specialityUid,
+      specialityName,
+      source,
+      ...rest
+    } = FULL_FACILITY;
     expect(item).toEqual({
       ...rest,
       payersProviderId: [{ payerUid: "pre-payer-A", providerId: "42", linked: true }],
@@ -393,6 +437,7 @@ describe("sync_settings (pure)", () => {
     includeReferralForm: false,
     isAdditionAllowed: false,
     milesThreshold: null,
+    source: null, // BE-rejected echo field — must be stripped
     createdAt: "2026-02-07T08:07:46.754Z", // noise — must be stripped
     updatedAt: "2026-02-07T08:07:46.754Z", // noise — must be stripped
     specialityUid: null,
@@ -406,7 +451,15 @@ describe("sync_settings (pure)", () => {
       payerMap,
     );
     const prov = (body["referredProviders"] as Record<string, unknown>[])[0] ?? {};
-    const { referredProviderUid, createdAt, updatedAt, specialityUid, ...rest } = FULL_PROVIDER;
+    const {
+      referredProviderUid,
+      createdAt,
+      updatedAt,
+      specialityUid,
+      specialityName,
+      source,
+      ...rest
+    } = FULL_PROVIDER;
     expect(prov).toEqual(rest);
   });
 

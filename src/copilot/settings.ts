@@ -319,7 +319,12 @@ export const settingGroups = (): string[] => [...new Set(SETTINGS_CATALOG.map((s
 const canonical = (v: unknown): string => JSON.stringify(v) ?? "undefined";
 
 // Fields that differ across envs by construction and carry no semantic meaning.
-const NOISE_KEYS = new Set(["createdAt", "updatedAt", "updatedBy"]);
+// specialityName is the parent speciality's name, echoed onto every facility/provider row by
+// the GET — verified (via a captured HAR of the Settings UI's "edit specialty" PUT) that the
+// real UI never resends it. source is a GET-only field the create/merge write schema rejects
+// outright (verified live: POST .../specialities 400s with "referredFacilities[0].source is
+// not allowed" until it is stripped).
+const NOISE_KEYS = new Set(["createdAt", "updatedAt", "updatedBy", "specialityName", "source"]);
 const isNoiseKey = (k: string): boolean => NOISE_KEYS.has(k) || /uid$/i.test(k);
 
 // Recursively drop env-specific fields and sort keys/arrays so two semantically equal
@@ -822,6 +827,24 @@ const stripOwnUids = (rec: Record<string, unknown>): Record<string, unknown> => 
   return out;
 };
 
+// The parent speciality's own uid, echoed onto every facility/provider row by the GET (like
+// specialityName in NOISE_KEYS) — must be dropped, but unlike NOISE_KEYS this can't be matched
+// generically: the row's OWN uid (referredFacilityUid / referredProviderUid) also ends in "Uid"
+// and must survive.
+const ECHOED_PARENT_UID_KEY = "specialityUid";
+
+// Existing pre-prod facility/provider rows are kept as-is on a merge PUT (never treated as new,
+// so their own uid must survive) but still carry echo fields off the GET response
+// (specialityUid/specialityName/createdAt/updatedAt) that the real UI does not resend (verified
+// via a captured HAR of the "edit specialty" PUT). Strip only those.
+const stripEchoedFields = (item: unknown): Record<string, unknown> => {
+  if (!isRecord(item)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(item))
+    if (!NOISE_KEYS.has(k) && k !== ECHOED_PARENT_UID_KEY) out[k] = v;
+  return out;
+};
+
 // Clean a prod facility/provider for writing into pre-prod: strip its own UIDs and remap the
 // nested payersProviderId links prod->pre.
 export function cleanReferralForWrite(
@@ -879,8 +902,12 @@ export function buildMergedSpecialityBody(
   prodOnlyProviders: unknown[],
   payerMap: ReadonlyMap<string, string>,
 ): { body: Record<string, unknown>; droppedPayers: string[] } {
-  const existingFacs = asArray(prop(preSpeciality, "referredFacilities")).filter(isRecord);
-  const existingProvs = asArray(prop(preSpeciality, "referredProviders")).filter(isRecord);
+  const existingFacs = asArray(prop(preSpeciality, "referredFacilities"))
+    .filter(isRecord)
+    .map(stripEchoedFields);
+  const existingProvs = asArray(prop(preSpeciality, "referredProviders"))
+    .filter(isRecord)
+    .map(stripEchoedFields);
   const newFacs = cleanMany(prodOnlyFacilities, payerMap);
   const newProvs = cleanMany(prodOnlyProviders, payerMap);
   const body: Record<string, unknown> = {
