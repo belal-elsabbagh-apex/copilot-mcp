@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.4] - 2026-07-20
+
+### Changed
+
+- **`copilot/settings.ts` split into a `copilot/settings/` directory**, one file per catalog
+  section (`sections/`) implementing a unified `SettingsSection` interface, assembled by
+  `catalog.ts`. Write/sync behavior is now pluggable via a `SectionSyncer` interface
+  (`types.ts`) that a section attaches via an optional `sync` field, replacing the previous
+  hardcoded section-key arrays in the plan/apply dispatch — `specialities.ts` and `orders.ts`
+  are the two current syncer implementations, each owning its own crawl + plan logic and
+  sharing nothing but the interface. Internal only: no tool behavior, schema, or output shape
+  changed.
+
 ## [1.19.3] - 2026-07-20
 
 ### Added

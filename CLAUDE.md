@@ -13,7 +13,7 @@ on GitHub Packages.
 
 ```bash
 bun test                       # full suite (bun's runner, src/**/*.test.ts)
-bun test src/copilot/settings.test.ts  # one file
+bun test src/copilot/settings          # one module (a directory)
 bun test -t "diffList"         # tests matching a name
 bun run typecheck              # tsc --noEmit (strict; exactOptionalPropertyTypes, verbatimModuleSyntax)
 bun run lint                   # biome check src   (bunx biome check --write src to autofix)
@@ -31,7 +31,7 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - `src/server.ts` — entry point + tool/resource wiring (stays at the root).
 - `src/config/` — `config.ts` (validated config loading).
 - `src/copilot/` — Copilot BE domain: `copilot-client.ts`, `mirror.ts`, `sweep.ts`, `analyze.ts`,
-  `output-analysis.ts`, `output-schema.ts`, `settings.ts`, `doctor.ts`.
+  `output-analysis.ts`, `output-schema.ts`, `settings/`, `doctor.ts`.
 - `src/uipath/` — UiPath Orchestrator domain: `uipath.ts`, `queue.ts`, `queue-item.ts`, `faults.ts`.
 - `src/mcp/` — MCP-protocol concerns: `prompts.ts`, `notify.ts`, `feedback.ts`, `reference.ts`.
 - `src/shared/` — cross-cutting helpers: `util.ts`.
@@ -48,10 +48,16 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **`config/config.ts`** loads one validated config (single-file `COPILOT_MCP_CONFIG`, or split legacy
   files via `COPILOT_MCP_LOCAL_DIR`). `resolveCreds(profile)` returns `{ prod, pre_prod }` creds.
   Profiles are dynamic — read them with `listProfiles()`; never hardcode profile names.
-- **`copilot/settings.ts`** (diff_settings / get_settings / plan_settings_sync / apply_settings_sync):
-  the hard part is cross-env noise. It strips env-specific fields (`stripNoise`: UIDs, timestamps,
-  dummy emails, CDN hosts) and matches list items by a **semantic key** (`matchKey`, usually `name`),
-  never by UID. The pure diff/plan/id functions are unit-tested; keep them pure.
+- **`copilot/settings/`** (diff_settings / get_settings / plan_settings_sync / apply_settings_sync):
+  one file per catalog section under `sections/` implementing the `SettingsSection` interface
+  (`types.ts`), assembled into `SETTINGS_CATALOG` by `catalog.ts`. The hard part is cross-env
+  noise. `diff-engine.ts` strips env-specific fields (`stripNoise`: UIDs, timestamps, dummy
+  emails, CDN hosts) and matches list items by a **semantic key** (`matchKey`, usually `name`),
+  never by UID. The pure diff/plan/id functions are unit-tested; keep them pure. Write/sync
+  behavior is pluggable: a section optionally carries a `sync: SectionSyncer` (see the
+  Invariants entry below) — `specialities.ts` and `orders.ts` are the two current
+  implementations, each owning its own crawl + plan logic. `index.ts` barrels the module's
+  public surface for `server.ts` and other consumers.
 - **`mcp/notify.ts`**: `mcpLog()` sends MCP `notifications/message`; `reportProgress()` sends
   `notifications/progress` only when the caller passed a progressToken. Both are no-throw side-channels.
 - **`uipath/faults.ts`** (`build_faulted_job_issue` + the `report-faulted-uipath-jobs` prompt):
@@ -123,7 +129,10 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `payersProviderId[].payerUid` / the CPT `payers` map for orders, plus orders' `facilitiesUids` and
   `authSubCategoryUids` / `referralSubCategoryUids`. Anything with no pre-prod match is **dropped with a
   warning** rather than linked to the wrong entity. Sections with no verified write endpoint are reported
-  under `skippedSections` — add new domains via a `SectionSyncer`, only with a verified endpoint.
+  under `skippedSections` automatically (a section's `sync` field is simply omitted) — add a new
+  syncable domain by writing a `SectionSyncer` (`copilot/settings/types.ts`) and attaching it to the
+  relevant section(s)' `sync` field, only once its write endpoint is verified; `sync.ts`'s dispatch
+  needs no changes.
 - Tools return via the `ok()` / `err()` helpers and declare all four annotation hints
   (readOnly/destructive/idempotent/openWorld); `server.test.ts` enforces the wiring.
 

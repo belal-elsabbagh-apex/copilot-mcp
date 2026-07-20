@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetConfigCache } from "../config/config.js";
-import { NotImplementedError } from "../copilot/settings.js";
+import { NotImplementedError } from "../copilot/settings/index.js";
 import {
   classify,
   ExpectedError,

@@ -62,7 +62,7 @@ import {
   getSettings,
   listSettingSections,
   planSettingsSyncOp,
-} from "./copilot/settings.js";
+} from "./copilot/settings/index.js";
 import { findStuckOrders } from "./copilot/sweep.js";
 import { formatMcpIssue, toolError } from "./mcp/feedback.js";
 import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
@@ -157,7 +157,7 @@ const cloneCandidate = (o: OrderRow): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.19.3";
+const VERSION = "1.19.4";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
