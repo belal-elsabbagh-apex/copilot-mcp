@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-07-20
+
+### Added
+
+- **`search_orders`**: filter an account's Copilot orders by location, insurance,
+  referred-to, order type, auth/upload status, MRN, free-text search, or any of 5
+  date ranges, via `POST /orders/filter`. No existing tool exposed multi-dimension
+  order search — `get_order` is single-uid lookup, and `find_stuck_orders` /
+  `find_clone_candidates` only scan pages unfiltered-by-dimension. READ-ONLY, returns
+  slim non-PHI rows (no `patient` field), matching the existing bulk-tool convention
+  rather than `get_order`'s full-detail-with-patient shape. Defaults to
+  `type='Outbound Referral'`, `pageSize=100`, `pageNumber=1`.
+- **`get_order_category_stats`**: cheap per-folder order counts (For Review, PCP
+  Notes, Processing, Archived) for a given filter, via `POST /orders/category/stats`
+  — same filter dimensions as `search_orders`, no pagination.
+
+### Changed
+
+- **Consolidated the `/orders/filter` request-building + pagination logic**, which
+  had been duplicated independently three times (`copilot-client.ts`'s
+  `fetchOrder`/`verify`, `sweep.ts`'s `findStuckOrders`, and `find_clone_candidates`
+  in `server.ts`, each with its own local order-row interface), into shared
+  `filterOrders()`/`categoryStats()` helpers in `copilot-client.ts`. Adding the two
+  new tools was the trigger; no behavior change to the four existing call sites.
+
 ## [1.20.0] - 2026-07-20
 
 ### Changed
