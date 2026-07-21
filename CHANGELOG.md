@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-07-21
+
+### Added
+
+- **`stop_job`**: stop (`SoftStop`, graceful) or kill (`Kill`, immediate) a running job
+  in the dev-clone folder. `pre_prod`-only (schema `z.literal("pre_prod")` + domain
+  assert, same pattern as `add_queue_item`/`delete_queue_item`/`start_job`) and
+  fetch-first like `delete_queue_item`: resolves the caller's GUID `Key` to
+  Orchestrator's numeric `Id` scoped to the pre-prod folder (so a prod job's `Key`
+  resolves to nothing here), and refuses a job already `Successful`/`Faulted`/`Stopped`.
+
+### Changed
+
+- **UiPath HTTP errors are now typed (`UiPathApiError`: status/method/url/body)**
+  instead of a bare `Error` with the status baked into the message string, and
+  `uipathRequest` retries once on a 401 with a freshly-refetched token (a
+  revoked/expired OAuth token now self-heals instead of failing for the rest of the
+  process). `UiPathApiError` extends the existing `ExpectedError` so `classify()`
+  keeps treating upstream HTTP failures as expected, not a bug in this server.
+- **Stopped silently swallowing real UiPath errors as "not found."** Four read
+  helpers (`fetchJobDetailsById`, `getQueueDefinitionName`, `fetchJobVideoUrl`, plus
+  `fetchJobByKey`/`fetchFilteredJobLogs`) used to catch *any* error — network, auth,
+  500 — and return `null`/`""`/`[]`, indistinguishable from a legitimate empty
+  result. They now only swallow a genuine 404; everything else propagates.
+- **Batch/best-effort call sites report per-item errors instead of losing the whole
+  result.** `get_job`'s `jobKeys` batch, `get_job_logs`'s `jobKeys` batch,
+  `analyze_order_execution`'s per-job log/video fetch, and `pull_queue_item`'s
+  queue-name fallback lookup now attach a real failure to just the affected
+  item/job (`error`/`logsError`/`videoError`/`logDigestError`/`queueNameError`)
+  instead of either losing the rest of the batch or silently degrading. A single
+  explicit `get_job`/`get_job_logs` lookup still fails the call normally on a real
+  error, same as any other tool error.
+
 ## [1.21.0] - 2026-07-20
 
 ### Added
