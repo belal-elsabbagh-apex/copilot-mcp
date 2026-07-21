@@ -11,11 +11,14 @@ import { type Env, getUipath } from "../config/config.js";
 import { isRecord } from "../shared/util.js";
 import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
 import {
+  fetchJobByKey,
   getQueueItem,
   jobDeepLink,
   type QueueItem,
+  resolveFolder,
   scopeForEnv,
   toQueueItem,
+  type UiPathJob,
   uipathDelete,
   uipathPost,
 } from "./uipath.js";
@@ -189,4 +192,53 @@ export async function startJob(args: StartJobArgs): Promise<StartJobResult> {
     };
   });
   return { env: args.env, jobs };
+}
+
+// ---- stop_job ---------------------------------------------------------------
+
+export type StopJobStrategy = "SoftStop" | "Kill";
+
+export interface StopJobArgs {
+  env: Env; // asserted === "pre_prod"
+  jobKey: string; // GUID Key (from start_job / list_jobs / get_job)
+  strategy: StopJobStrategy;
+}
+
+export interface StopJobResult {
+  env: Env;
+  jobId: number;
+  jobKey: string;
+  strategy: StopJobStrategy;
+  stopped: true;
+}
+
+// A job already in one of these states has nothing left to stop.
+const TERMINAL_JOB_STATES = new Set(["Successful", "Faulted", "Stopped"]);
+
+export function assertStoppable(job: UiPathJob): void {
+  if (job.State && TERMINAL_JOB_STATES.has(job.State)) {
+    throw new Error(
+      `refusing to stop job '${job.Key}': state is already '${job.State}' (terminal)`,
+    );
+  }
+}
+
+// Stop (SoftStop) or kill a dev-clone job. StopJob addresses Orchestrator jobs by
+// numeric Id, not the GUID Key the rest of this API uses, so resolve the Key
+// first — scoped to the pre-prod folder, so a prod job's Key resolves to nothing
+// here. Fetch-first, like deleteQueueItem: refuses (no HTTP write issued) once the
+// job is already in a terminal state.
+export async function stopJob(args: StopJobArgs): Promise<StopJobResult> {
+  assertPreProd(args.env);
+  const jobKey = args.jobKey.trim();
+  if (!jobKey) throw new Error("jobKey is required");
+  const job = await fetchJobByKey(jobKey, resolveFolder("pre_prod"));
+  if (!job?.Id) throw new Error(`no dev-clone job found for key '${jobKey}'`);
+  assertStoppable(job);
+  await uipathPost(
+    `/odata/Jobs(${job.Id})/UiPath.Server.Configuration.OData.StopJob`,
+    { strategy: args.strategy },
+    scopeForEnv("pre_prod"),
+  );
+  return { env: args.env, jobId: Number(job.Id), jobKey, strategy: args.strategy, stopped: true };
 }

@@ -74,7 +74,7 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   add a default env or default profile, and never silently assume one. `profile` is validated
   against the config at call time by `resolveCreds`. UiPath-only tools (`list_jobs`, `get_job_logs`,
   `get_job`, `list_queues`, `list_processes`, `list_triggers`, `build_faulted_job_issue`,
-  `add_queue_item`, `delete_queue_item`, `start_job`) take `env` but **no `profile`** — UiPath
+  `add_queue_item`, `delete_queue_item`, `start_job`, `stop_job`) take `env` but **no `profile`** — UiPath
   authenticates globally (not per-profile creds), via `uipath.oauth` (client-credentials, tried
   first when configured) and/or the static `uipath.bearer` PAT (the fallback if `oauth` is absent or
   its token request fails — `uipath/auth.ts`'s `resolveBearerToken`, the single chokepoint
@@ -101,17 +101,19 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `submitOrder` (in `copilot-client.ts`) backs the `submit_preprod_order` tool, the only thing that
   may submit, always explicit. Do NOT expose the raw atoms (create draft / PUT field / process) as
   tools — the tool boundary is the safe transaction, not the HTTP verb.
-- **UiPath writes are dev-clone-only and guarded.** `add_queue_item`, `delete_queue_item` and
-  `start_job` (all in `uipath/actions.ts` — the ONLY module that mutates Orchestrator state) take
-  `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` in the domain
-  function. Every posted SpecificContent passes `guardQueueItemSafety` (`uipath/safety.ts`, pure,
-  unit-tested — the single enforcement point also used by `build_queue_item`/`pull_queue_item`):
-  IsApproved forced false; non-empty `serverURL`/`queueUrl` must match the configured pre-prod
-  values (fails closed when unconfigured); `<TO-FILL>` placeholders rejected.
-  `delete_queue_item` is fetch-first and refuses any item whose Status isn't `New`. The MCP never
-  repins releases and never creates queues — `list_processes`/`list_queues`/`list_triggers` are
-  the read-side discovery/verification tools (dev-clone queue ids differ from the prod ids in
-  `PORTALS`).
+- **UiPath writes are dev-clone-only and guarded.** `add_queue_item`, `delete_queue_item`,
+  `start_job`, and `stop_job` (all in `uipath/actions.ts` — the ONLY module that mutates
+  Orchestrator state) take `env: z.literal("pre_prod")` at the schema layer AND assert
+  `env === "pre_prod"` in the domain function. Every posted SpecificContent passes
+  `guardQueueItemSafety` (`uipath/safety.ts`, pure, unit-tested — the single enforcement point
+  also used by `build_queue_item`/`pull_queue_item`): IsApproved forced false; non-empty
+  `serverURL`/`queueUrl` must match the configured pre-prod values (fails closed when
+  unconfigured); `<TO-FILL>` placeholders rejected. `delete_queue_item` is fetch-first and
+  refuses any item whose Status isn't `New`; `stop_job` is likewise fetch-first (resolving the
+  caller's GUID Key to Orchestrator's numeric Id scoped to the pre-prod folder) and refuses a job
+  whose State is already `Successful`/`Faulted`/`Stopped`. The MCP never repins releases and
+  never creates queues — `list_processes`/`list_queues`/`list_triggers` are the read-side
+  discovery/verification tools (dev-clone queue ids differ from the prod ids in `PORTALS`).
 - **Settings sync is a plan/apply pair — additive, pre-prod-only.** `plan_settings_sync` is
   READ-ONLY and returns the planned actions, each with a stable id (`section:op:typeName:itemName`).
   `apply_settings_sync` never accepts request bodies — it **re-plans server-side** and executes only

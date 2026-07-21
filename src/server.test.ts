@@ -20,7 +20,7 @@ interface RegisteredTool {
 
 // Tools that mutate state (everything else is read-only). apply_settings_sync writes
 // additively to pre-prod only; the UiPath writes (add_queue_item, delete_queue_item,
-// start_job) are schema-restricted to the pre_prod dev clone.
+// start_job, stop_job) are schema-restricted to the pre_prod dev clone.
 const WRITE_TOOLS = new Set([
   "delete_preprod_order",
   "create_preprod_order",
@@ -29,6 +29,7 @@ const WRITE_TOOLS = new Set([
   "add_queue_item",
   "delete_queue_item",
   "start_job",
+  "stop_job",
 ]);
 // Tools that touch no external service (pure/local). All others set openWorldHint=true.
 const CLOSED_WORLD_TOOLS = new Set(["list_setting_sections", "build_mcp_issue"]);
@@ -65,6 +66,7 @@ const EXPECTED = [
   "add_queue_item",
   "delete_queue_item",
   "start_job",
+  "stop_job",
   "build_mcp_issue",
 ] as const;
 

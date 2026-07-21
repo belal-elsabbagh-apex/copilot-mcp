@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetConfigCache } from "../config/config.js";
-import { resetOAuthTokenCache } from "./auth.js";
+import { invalidateBearerToken } from "./auth.js";
+import { UiPathApiError } from "./errors.js";
 import { listRecentJobs } from "./uipath.js";
 
 const envCreds = (name: string) => ({
@@ -59,7 +60,7 @@ const realFetch = globalThis.fetch;
 beforeEach(() => {
   calls = [];
   responses = [];
-  resetOAuthTokenCache();
+  invalidateBearerToken();
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const headers: Record<string, string> = {};
     for (const [k, v] of new Headers(init?.headers).entries()) headers[k] = v;
@@ -75,7 +76,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = realFetch;
-  resetOAuthTokenCache();
+  invalidateBearerToken();
 });
 
 const jobsPage = (jobs: unknown[] = []): Response =>
@@ -127,8 +128,43 @@ describe("resolveBearerToken (exercised via uipathRequest/listRecentJobs)", () =
   test("propagates the oauth error when the token request fails and no bearer is configured", async () => {
     writeConfig({ oauth: { clientId: "id", clientSecret: "secret" } });
     responses.push(new Response("boom", { status: 500 }));
-    await expect(listRecentJobs(undefined, 1)).rejects.toThrow(/UiPath OAuth token request -> 500/);
+    const err = await listRecentJobs(undefined, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UiPathApiError);
+    expect((err as UiPathApiError).status).toBe(500);
+    expect((err as UiPathApiError).method).toBe("POST");
+    expect((err as UiPathApiError).body).toBe("boom");
     expect(calls.length).toBe(1);
+  });
+
+  test("retries once on a 401 with a freshly-refetched token", async () => {
+    writeConfig({ oauth: { clientId: "id", clientSecret: "secret" } });
+    responses.push(
+      tokenResponse("tok-1"),
+      new Response("expired", { status: 401 }),
+      tokenResponse("tok-2"),
+      jobsPage([{ Id: 1 }]),
+    );
+    const jobs = await listRecentJobs(undefined, 1);
+    expect(jobs.length).toBe(1);
+    expect(tokenCallsOf().length).toBe(2);
+    const jobCalls = calls.filter((c) => c.url.includes("/odata/Jobs"));
+    expect(jobCalls.length).toBe(2);
+    expect(jobCalls[0]?.headers["authorization"]).toBe("Bearer tok-1");
+    expect(jobCalls[1]?.headers["authorization"]).toBe("Bearer tok-2");
+  });
+
+  test("does not loop forever when the retried request also 401s", async () => {
+    writeConfig({ oauth: { clientId: "id", clientSecret: "secret" } });
+    responses.push(
+      tokenResponse("tok-1"),
+      new Response("still expired", { status: 401 }),
+      tokenResponse("tok-2"),
+      new Response("still expired", { status: 401 }),
+    );
+    const err = await listRecentJobs(undefined, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UiPathApiError);
+    expect((err as UiPathApiError).status).toBe(401);
+    expect(tokenCallsOf().length).toBe(2); // exactly one retry, not an infinite loop
   });
 
   test("derives the token URL from orchestratorUrl when oauth.tokenUrl is omitted", async () => {

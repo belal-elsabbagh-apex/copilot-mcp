@@ -6,8 +6,9 @@ import { type Env, getUipath } from "../config/config.js";
 import { isFailureLog } from "../copilot/output-analysis.js";
 import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
-import { chunk, isRecord } from "../shared/util.js";
-import { resolveBearerToken } from "./auth.js";
+import { chunk, isRecord, safeJsonParse } from "../shared/util.js";
+import { invalidateBearerToken, resolveBearerToken } from "./auth.js";
+import { isNotFound, UiPathApiError } from "./errors.js";
 
 export type { Env };
 
@@ -101,11 +102,15 @@ interface UipathRequestOpts {
 // `orgUnitId` is sent as X-UIPATH-OrganizationUnitId — the QueueItems/QueueDefinitions
 // endpoints are addressed by org-unit id, while Jobs accept the folder-path header.
 // Sending both is harmless. Returns parsed JSON (null for an empty body, e.g. a
-// DELETE 204), or throws with method + status + body snippet on a non-2xx.
+// DELETE 204), or throws a UiPathApiError (method/url/status/body) on a non-2xx.
+// A 401 gets exactly one retry with a freshly-refetched token — recovers a
+// revoked/expired OAuth token instead of failing for the rest of the process (a
+// no-op retry, harmless, when only a static bearer/PAT is configured).
 async function uipathRequest(
   method: HttpMethod,
   path: string,
   opts: UipathRequestOpts = {},
+  attempt = 0,
 ): Promise<unknown> {
   const cfg = getUipath();
   const qs = new URLSearchParams(opts.params ?? {}).toString();
@@ -126,16 +131,15 @@ async function uipathRequest(
     },
     ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
   });
+  if (res.status === 401 && attempt === 0) {
+    invalidateBearerToken();
+    return uipathRequest(method, path, opts, attempt + 1);
+  }
   const text = await res.text();
   if (res.status >= 400) {
-    throw new Error(`UiPath ${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    throw new UiPathApiError(method, url, res.status, safeJsonParse(text));
   }
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  return text ? safeJsonParse(text) : null;
 }
 
 async function uipathGet(
@@ -233,33 +237,40 @@ async function fetchJobDetailsById(jobId: string, folder?: string): Promise<UiPa
         folder,
       ),
     );
-  } catch {
-    return null;
+  } catch (e) {
+    if (isNotFound(e)) return null;
+    throw e;
   }
 }
 
 // Single job by its GUID Key (the collection is keyed by numeric Id, so a Key
 // lookup needs an OData $filter). Returns the job incl. OutputArguments, or null
 // if no job matches. Used by build_faulted_job_issue, which is given only a Key.
+// A $filter query, not a single-entity fetch: a non-matching key comes back as a
+// normal empty result set (200, no rows) — there's no legitimate "not found"
+// exception here, so any thrown error is a real failure and propagates.
 export async function fetchJobByKey(jobKey: string, folder?: string): Promise<UiPathJob | null> {
   const key = jobKey.trim();
   if (!key) return null;
-  try {
-    const data = await uipathGet(
-      "/odata/Jobs",
-      {
-        $filter: `Key eq ${key}`,
-        $top: "1",
-        $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
-        $expand: JOB_EXPAND,
-      },
-      folder,
-    );
-    const job = odataValues<unknown>(data)[0];
-    return job !== undefined ? toUiPathJob(job) : null;
-  } catch {
-    return null;
-  }
+  const data = await uipathGet(
+    "/odata/Jobs",
+    {
+      $filter: `Key eq ${key}`,
+      $top: "1",
+      $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
+      $expand: JOB_EXPAND,
+    },
+    folder,
+  );
+  const job = odataValues<unknown>(data)[0];
+  return job !== undefined ? toUiPathJob(job) : null;
+}
+
+// One job lookup's outcome: `job` is null both when the key genuinely doesn't
+// resolve AND when the lookup itself failed — check `error` to tell them apart.
+export interface JobLookup {
+  job: UiPathJob | null;
+  error?: unknown; // set when the lookup threw; job is null in that case
 }
 
 // Fetch several jobs by GUID Key in one MCP round-trip. Each key still costs its
@@ -268,15 +279,18 @@ export async function fetchJobByKey(jobKey: string, folder?: string): Promise<Ui
 // OutputArguments (collection nulls it regardless of $select), so a collection
 // batch call can't replace this when detail is needed. Bounded concurrency (chunks
 // of 10, matching confirmJobsForOrder) keeps a large batch from hammering Orchestrator.
+// Promise.allSettled so one key's real failure doesn't lose every other key's result —
+// callers see it via that key's `error` instead of it vanishing or failing the batch.
 export async function fetchJobsForKeys(
   jobKeys: string[],
   folder?: string,
-): Promise<Record<string, UiPathJob | null>> {
-  const out: Record<string, UiPathJob | null> = {};
+): Promise<Record<string, JobLookup>> {
+  const out: Record<string, JobLookup> = {};
   for (const batch of chunk(jobKeys, 10)) {
-    const results = await Promise.all(batch.map((key) => fetchJobByKey(key, folder)));
+    const results = await Promise.allSettled(batch.map((key) => fetchJobByKey(key, folder)));
     batch.forEach((key, i) => {
-      out[key] = results[i] ?? null;
+      const r = results[i];
+      out[key] = r?.status === "fulfilled" ? { job: r.value } : { job: null, error: r?.reason };
     });
   }
   return out;
@@ -365,26 +379,25 @@ export interface JobLogResult {
   // Rows matching the server-side filters (@odata.count), before the 500 cap
   // and before onlyFailures/tail. null when Orchestrator omits the count.
   totalMatching: number | null;
+  error?: unknown; // set when the fetch itself failed; logs/totalMatching stay empty/null
 }
 
 // Robot execution logs for a single job, oldest first. RobotLogs is keyed by the
-// job's GUID `Key` (not its numeric Id).
+// job's GUID `Key` (not its numeric Id). A $filter query, like fetchJobByKey: no
+// matching rows is a normal empty result, not an exception, so any thrown error
+// here is a real failure and propagates.
 export async function fetchFilteredJobLogs(
   jobKey: string,
   folder?: string,
   filter: JobLogFilter = {},
 ): Promise<JobLogResult> {
   if (!jobKey) return { logs: [], totalMatching: null };
-  try {
-    const data = await uipathGet("/odata/RobotLogs", jobLogQueryParams(jobKey, filter), folder);
-    const count = isRecord(data) ? data["@odata.count"] : undefined;
-    return {
-      logs: refineJobLogs(odataValues<JobLog>(data), filter),
-      totalMatching: typeof count === "number" ? count : null,
-    };
-  } catch {
-    return { logs: [], totalMatching: null };
-  }
+  const data = await uipathGet("/odata/RobotLogs", jobLogQueryParams(jobKey, filter), folder);
+  const count = isRecord(data) ? data["@odata.count"] : undefined;
+  return {
+    logs: refineJobLogs(odataValues<JobLog>(data), filter),
+    totalMatching: typeof count === "number" ? count : null,
+  };
 }
 
 export async function fetchJobLogs(jobKey: string, folder?: string): Promise<JobLog[]> {
@@ -397,6 +410,8 @@ export async function fetchJobLogs(jobKey: string, folder?: string): Promise<Job
 // return wrong/empty results rather than erroring, so one HTTP call per key is a
 // hard platform limit. What this collapses is MCP round-trips, not HTTP calls:
 // bounded concurrency (chunks of 10) instead of one tool call per job.
+// Promise.allSettled so one key's real failure doesn't lose every other key's
+// logs — callers see it via that key's `error` instead of it vanishing.
 export async function fetchJobLogsForKeys(
   jobKeys: string[],
   folder?: string,
@@ -404,11 +419,13 @@ export async function fetchJobLogsForKeys(
 ): Promise<Record<string, JobLogResult>> {
   const out: Record<string, JobLogResult> = {};
   for (const batch of chunk(jobKeys, 10)) {
-    const results = await Promise.all(
+    const results = await Promise.allSettled(
       batch.map((key) => fetchFilteredJobLogs(key, folder, filter)),
     );
     batch.forEach((key, i) => {
-      out[key] = results[i] ?? { logs: [], totalMatching: null };
+      const r = results[i];
+      out[key] =
+        r?.status === "fulfilled" ? r.value : { logs: [], totalMatching: null, error: r?.reason };
     });
   }
   return out;
@@ -431,8 +448,9 @@ export async function fetchJobVideoUrl(jobKey: string, folder?: string): Promise
       }
     }
     return "";
-  } catch {
-    return "";
+  } catch (e) {
+    if (isNotFound(e)) return "";
+    throw e;
   }
 }
 
@@ -524,8 +542,9 @@ export async function getQueueDefinitionName(
       scope.orgUnitId,
     );
     return strField(data, "Name");
-  } catch {
-    return "";
+  } catch (e) {
+    if (isNotFound(e)) return "";
+    throw e;
   }
 }
 

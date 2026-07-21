@@ -14,6 +14,7 @@ import {
   type Env,
   fetchJobLogs,
   fetchJobVideoUrl,
+  type JobLog,
   jobDeepLink,
   listRecentJobs,
   resolveFolder,
@@ -42,7 +43,9 @@ export interface JobAnalysis {
   analysis: OutputComment[];
   fault: JobFault | null; // structured headline error for non-SUCCESS jobs
   videoUrl?: string | null;
+  videoError?: string; // includeVideo was requested but the fetch itself failed — best-effort
   logDigest?: JobLogDigest; // condensed logs — the raw dump stays in get_job_logs
+  logsError?: string; // includeLogs was requested but the fetch itself failed — best-effort
 }
 
 export interface AnalyzeResult {
@@ -154,8 +157,29 @@ async function toJobAnalysis(
 ): Promise<JobAnalysis> {
   const output = parseOutput(job.OutputArguments);
   const norm = normalizeOutput(output);
-  const logs = includeLogs ? await fetchJobLogs(job.Key ?? "", scope) : [];
-  const videoUrl = includeVideo ? await fetchJobVideoUrl(job.Key ?? "", scope) : "";
+
+  // Both are per-job, best-effort attachments inside a potentially large multi-job
+  // report — a real fetch failure here must not fail the whole analysis, but it
+  // must not vanish either, so it's attached to this job as logsError/videoError.
+  let logs: JobLog[] = [];
+  let logsError: string | undefined;
+  if (includeLogs) {
+    try {
+      logs = await fetchJobLogs(job.Key ?? "", scope);
+    } catch (e) {
+      logsError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  let videoUrl = "";
+  let videoError: string | undefined;
+  if (includeVideo) {
+    try {
+      videoUrl = await fetchJobVideoUrl(job.Key ?? "", scope);
+    } catch (e) {
+      videoError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   const resultRaw = output["out_Result"];
   const verdict = jobVerdict(job.State, output);
   return {
@@ -175,7 +199,9 @@ async function toJobAnalysis(
     analysis: analyzeOutput(output, logs),
     fault: verdict === "SUCCESS" ? null : extractFault(job, logs),
     ...(includeVideo ? { videoUrl: videoUrl || null } : {}),
+    ...(videoError ? { videoError } : {}),
     ...(includeLogs ? { logDigest: digestLogs(logs) } : {}),
+    ...(logsError ? { logsError } : {}),
   };
 }
 

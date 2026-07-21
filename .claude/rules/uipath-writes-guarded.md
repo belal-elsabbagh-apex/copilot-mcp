@@ -4,9 +4,9 @@ files: src/uipath/actions.ts, src/uipath/safety.ts
 ---
 
 `src/uipath/actions.ts` is the ONLY module that mutates Orchestrator state, via
-`add_queue_item`, `delete_queue_item`, and `start_job`. All three take `env: z.literal("pre_prod")`
-at the schema layer AND assert `env === "pre_prod"` again in the domain function — dev-clone
-only, defense in depth.
+`add_queue_item`, `delete_queue_item`, `start_job`, and `stop_job`. All four take
+`env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` again in the
+domain function — dev-clone only, defense in depth.
 
 Every posted `SpecificContent` passes `guardQueueItemSafety` (`src/uipath/safety.ts`, pure,
 unit-tested — the single enforcement point, also used by `build_queue_item`/`pull_queue_item`):
@@ -16,6 +16,9 @@ unit-tested — the single enforcement point, also used by `build_queue_item`/`p
 - `<TO-FILL>` placeholders are rejected.
 
 `delete_queue_item` is fetch-first and refuses to delete any item whose `Status` isn't `New`.
+`stop_job` is likewise fetch-first (resolving the caller's GUID `Key` to Orchestrator's numeric
+`Id` scoped to the pre-prod folder — so a prod job's `Key` resolves to nothing) and refuses to
+stop a job whose `State` is already `Successful`/`Faulted`/`Stopped`.
 
 The MCP never repins releases and never creates queues. `list_processes`/`list_queues`/
 `list_triggers` are read-only discovery/verification tools — dev-clone queue ids differ from
@@ -27,4 +30,5 @@ can trigger a real automation run against real patient data.
 **Violation signature:** a new Orchestrator write added outside `uipath/actions.ts`; a queue-item
 builder that sets `IsApproved` from caller input; a `serverURL`/`queueUrl` check that's
 skipped when the config value is empty (should fail closed, not open); `delete_queue_item`
-deleting without first re-fetching and checking `Status`.
+deleting without first re-fetching and checking `Status`; `stop_job` posting `StopJob` without
+first re-fetching and checking `State`.

@@ -4,7 +4,8 @@
 // `Authorization: Bearer` header — everything else in this file is in service of that.
 
 import { onConfigReload, type UipathConfig } from "../config/config.js";
-import { prop } from "../shared/util.js";
+import { prop, safeJsonParse } from "../shared/util.js";
+import { UiPathApiError } from "./errors.js";
 
 type OAuthConfig = NonNullable<UipathConfig["oauth"]>;
 
@@ -53,7 +54,7 @@ async function fetchOAuthToken(oauth: OAuthConfig, orchestratorUrl: string): Pro
   });
   const text = await res.text();
   if (res.status >= 400) {
-    throw new Error(`UiPath OAuth token request -> ${res.status}: ${text.slice(0, 300)}`);
+    throw new UiPathApiError("POST", tokenUrl, res.status, safeJsonParse(text));
   }
   let json: unknown;
   try {
@@ -90,7 +91,9 @@ export async function resolveBearerToken(cfg: UipathConfig): Promise<string> {
   return cfg.bearer;
 }
 
-// Test-only: clear the cached OAuth token between cases.
-export function resetOAuthTokenCache(): void {
+// Force a refetch on the next resolveBearerToken call — used in production by
+// uipathRequest's 401 retry (a revoked/expired OAuth token gets refreshed instead
+// of failing forever) and in tests to clear the cache between cases.
+export function invalidateBearerToken(): void {
   cached = undefined;
 }

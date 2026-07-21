@@ -30,6 +30,18 @@ export function msBetween(start: string | undefined, end: string | undefined): n
   return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
 }
 
+// Parse text as JSON; fall back to the raw string when it isn't valid JSON ("" ->
+// undefined). Centralizes the JSON-or-raw-text fallback needed wherever an HTTP
+// response body has to be read defensively.
+export function safeJsonParse(text: string): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 // Split into fixed-size groups (last group may be smaller). Used to bound fan-out
 // concurrency when a batch of independent requests replaces a per-item MCP call.
 export function chunk<T>(items: T[], size: number): T[][] {

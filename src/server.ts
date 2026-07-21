@@ -83,7 +83,7 @@ import {
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
 import { msBetween, stringProp } from "./shared/util.js";
-import { addQueueItem, deleteQueueItem, startJob } from "./uipath/actions.js";
+import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
 import { listQueue, pullQueueItem } from "./uipath/queue.js";
@@ -96,6 +96,7 @@ import {
   type JobLog,
   type JobLogFilter,
   type JobLogResult,
+  type JobLookup,
   jobDeepLink,
   listQueueDefinitions,
   listRecentJobs,
@@ -533,8 +534,11 @@ server.registerTool(
       "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
       "or an explicit folder. If Orchestrator rejects the OutputArguments filter, it falls back to scanning " +
       "the `top` most-recent jobs — pass `since` for prod. Optionally enrich with the order's current BE " +
-      "status (same env). Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, " +
-      "jobs:[{key, state, verdict, durationMs, gapSincePreviousJobMs, fault, logDigest, ...}]}.",
+      "status (same env). Per-job logDigest/video fetches are best-effort — one job's fetch " +
+      "failure never fails the whole call, it surfaces on just that job as logsError/videoError. " +
+      "Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, " +
+      "jobs:[{key, state, verdict, durationMs, gapSincePreviousJobMs, fault, logDigest, logsError?, " +
+      "videoError?, ...}]}.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Copilot orderUid to trace"),
       env: z
@@ -931,9 +935,12 @@ server.registerTool(
       "job in the batch — by default the full (capped) log set is returned, but each Message is " +
       "truncated to 400 chars (pass fullMessages=true for the untruncated text, e.g. to read a " +
       "complete stack trace). READ-ONLY. " +
-      "Returns {jobKey,folder,logs[],returned,totalMatching?,truncated,videoUrl?} for a single " +
-      "jobKey, or {env,folder,count,jobs:[{jobKey,logs[],returned,totalMatching?,truncated," +
-      "videoUrl?}]} for jobKeys.",
+      "A jobKeys batch never fails as a whole on one job's error — that job's entry carries " +
+      "error instead, the rest still return. videoUrl is always best-effort: a failure there " +
+      "surfaces as videoError, never blocks the logs. " +
+      "Returns {jobKey,folder,logs[],returned,totalMatching?,truncated,videoUrl?,videoError?} " +
+      "for a single jobKey, or {env,folder,count,jobs:[{jobKey,logs[],returned,totalMatching?," +
+      "truncated,error?,videoUrl?,videoError?}]} for jobKeys.",
     inputSchema: {
       jobKey: z
         .string()
@@ -1024,10 +1031,11 @@ server.registerTool(
       const byKey = await fetchJobLogsForKeys(keys, resolved, filter);
       const jobs = await Promise.all(
         keys.map(async (key) => {
-          const { logs, totalMatching }: JobLogResult = byKey[key] ?? {
-            logs: [],
-            totalMatching: null,
-          };
+          const result: JobLogResult = byKey[key] ?? { logs: [], totalMatching: null };
+          // A single explicit jobKey lookup fails like any other tool error; a
+          // jobKeys batch keeps going and attaches the failure to just this key.
+          if (result.error && !jobKeys) throw result.error;
+          const { logs, totalMatching } = result;
           const entry: Record<string, unknown> = {
             jobKey: key,
             logs: fullMessages ? logs : logs.map((l) => ({ ...l, Message: truncate(l.Message) })),
@@ -1037,7 +1045,16 @@ server.registerTool(
             truncated: totalMatching !== null && totalMatching > 500,
           };
           if (totalMatching !== null) entry["totalMatching"] = totalMatching;
-          if (includeVideo) entry["videoUrl"] = await fetchJobVideoUrl(key, resolved);
+          if (result.error) entry["error"] = toMessage(result.error);
+          // Video is a secondary attachment, always best-effort — never fails the
+          // primary logs result, single jobKey or batch alike.
+          if (includeVideo) {
+            try {
+              entry["videoUrl"] = await fetchJobVideoUrl(key, resolved);
+            } catch (e) {
+              entry["videoError"] = toMessage(e);
+            }
+          }
           return entry;
         }),
       );
@@ -1204,6 +1221,17 @@ server.registerTool(
   },
 );
 
+// get_job's per-key result: `error` is a real lookup failure (job resolution
+// itself threw); `logDigestError` is the includeLogDigest attachment failing —
+// always best-effort, never fatal on its own.
+interface JobKeyResult {
+  key: string;
+  found: boolean;
+  job?: Record<string, unknown>;
+  error?: string;
+  logDigestError?: string;
+}
+
 // Shape one job's detail (output parsed, optional fault + log digest) — shared by
 // get_job's single-jobKey and batched jobKeys paths so they stay in sync.
 function shapeJobDetail(
@@ -1261,10 +1289,14 @@ server.registerTool(
       "job's parsed OutputArguments with token/callbackContext stripped. With includeLogDigest=true " +
       "it also returns a structured fault (headline error, stable signature, exception type) and a " +
       "condensed failure-focused log digest — if the digest is not enough, call get_job_logs " +
-      "(also batchable via jobKeys) for the complete raw logs. " +
+      "(also batchable via jobKeys) for the complete raw logs. A jobKeys batch never fails as a " +
+      "whole on one key's error — that key's entry carries error instead, the rest still return; " +
+      "a single jobKey fails the call normally, like any other error. includeLogDigest is always " +
+      "best-effort: a failure fetching it surfaces as logDigestError, never blocks the job data. " +
       "Returns {env, folder, found, job:{id,key,state,processName,processVersion,robotName," +
-      "creationTime,endTime,durationMs,deepLink,output,fault?,logDigest?}} for a single jobKey, or " +
-      "{env, folder, count, jobs:[{key,found,job?}]} for jobKeys.",
+      "creationTime,endTime,durationMs,deepLink,output,fault?,logDigest?},logDigestError?} for a " +
+      "single jobKey, or {env, folder, count, jobs:[{key,found,job?,error?,logDigestError?}]} for " +
+      "jobKeys.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -1302,17 +1334,40 @@ server.registerTool(
       const keys = jobKeys ?? [jobKey ?? ""];
       const byKey = await fetchJobsForKeys(keys, resolved);
       const results = await Promise.all(
-        keys.map(async (key) => {
-          const job = byKey[key] ?? null;
-          if (!job) return { key, found: false };
-          const logs = includeLogDigest ? await fetchJobLogs(key, resolved) : [];
-          return { key, found: true, job: shapeJobDetail(job, logs, includeLogDigest) };
+        keys.map(async (key): Promise<JobKeyResult> => {
+          const lookup: JobLookup = byKey[key] ?? { job: null };
+          // A single explicit jobKey lookup fails like any other tool error; a
+          // jobKeys batch keeps going and attaches the failure to just this key.
+          if (lookup.error && !jobKeys) throw lookup.error;
+          if (lookup.error) return { key, found: false, error: toMessage(lookup.error) };
+          if (!lookup.job) return { key, found: false };
+          let logs: JobLog[] = [];
+          let logDigestError: string | undefined;
+          if (includeLogDigest) {
+            try {
+              logs = await fetchJobLogs(key, resolved);
+            } catch (e) {
+              logDigestError = toMessage(e);
+            }
+          }
+          return {
+            key,
+            found: true,
+            job: shapeJobDetail(lookup.job, logs, includeLogDigest),
+            ...(logDigestError ? { logDigestError } : {}),
+          };
         }),
       );
       if (jobKeys) return ok({ env, folder: resolved, count: results.length, jobs: results });
       const only = results[0];
       if (!only?.found) return ok({ env, folder: resolved, found: false });
-      return ok({ env, folder: resolved, found: true, job: only.job });
+      return ok({
+        env,
+        folder: resolved,
+        found: true,
+        job: only.job,
+        ...(only.logDigestError ? { logDigestError: only.logDigestError } : {}),
+      });
     } catch (e) {
       return toolError("get_job", e, VERSION);
     }
@@ -1458,6 +1513,52 @@ server.registerTool(
       return ok(result);
     } catch (e) {
       return toolError("start_job", e, VERSION);
+    }
+  },
+);
+
+// ---- stop_job ---------------------------------------------------------------
+server.registerTool(
+  "stop_job",
+  {
+    title: "Stop or kill a running UiPath job on the dev clone",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true, // aborts a run in progress
+      idempotentHint: true, // fetch-first: refuses (no HTTP write) once already terminal
+      openWorldHint: true,
+    },
+    description:
+      "Stop (SoftStop, graceful) or Kill (immediate) a job in the DEV-CLONE folder (pre_prod " +
+      "ONLY — the schema rejects prod). Takes the job's GUID Key (from start_job / list_jobs / " +
+      "get_job); StopJob addresses Orchestrator jobs by numeric Id internally, so this resolves " +
+      "the Key first, scoped to the pre-prod folder — a prod job's Key resolves to nothing here. " +
+      "Fetch-first: refuses if the job is already Successful/Faulted/Stopped. Use to abort a " +
+      "hung or misbehaving dev-clone run. Returns {env, jobId, jobKey, strategy, stopped}.",
+    inputSchema: {
+      env: z
+        .literal("pre_prod")
+        .describe(
+          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
+            "'prod' is rejected by the schema (required)",
+        ),
+      jobKey: z.string().min(8).describe("Job GUID Key (from start_job / list_jobs / get_job)"),
+      strategy: z
+        .enum(["SoftStop", "Kill"])
+        .optional()
+        .default("SoftStop")
+        .describe("SoftStop = graceful (default), Kill = immediate"),
+    },
+  },
+  async ({ env, jobKey, strategy }) => {
+    try {
+      const result = await stopJob({ env, jobKey, strategy });
+      mcpLog(server, "warning", `stopped dev-clone job ${jobKey} (${strategy})`, {
+        jobId: result.jobId,
+      });
+      return ok(result);
+    } catch (e) {
+      return toolError("stop_job", e, VERSION);
     }
   },
 );

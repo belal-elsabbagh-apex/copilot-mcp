@@ -85,6 +85,7 @@ export interface PullQueueItemResult {
   item: { id: number; status: string; creationTime: string; retryNumber: number };
   env: Env;
   queueName: string;
+  queueNameError?: string; // the queueDefinitionId fallback lookup failed — queueName may be stale
   queueDefinitionId: number;
   portal: PortalRef;
   isApprovedForced: true;
@@ -119,9 +120,17 @@ export async function pullQueueItem(args: PullQueueItemArgs): Promise<PullQueueI
   const item = await getQueueItem(txnId, scope);
 
   let queueName = normalizeQueueName(item.name);
+  // Secondary "try harder" lookup — best-effort: a real failure here shouldn't
+  // fail the whole pull when item.name is already a usable fallback, but it must
+  // still surface, not vanish.
+  let queueNameError: string | undefined;
   if ((!queueName || !resolvePortal(queueName).matched) && item.queueDefinitionId) {
-    const resolved = await getQueueDefinitionName(item.queueDefinitionId, scope);
-    if (resolved) queueName = normalizeQueueName(resolved);
+    try {
+      const resolved = await getQueueDefinitionName(item.queueDefinitionId, scope);
+      if (resolved) queueName = normalizeQueueName(resolved);
+    } catch (e) {
+      queueNameError = e instanceof Error ? e.message : String(e);
+    }
   }
   const portal = resolvePortal(queueName);
 
@@ -136,6 +145,7 @@ export async function pullQueueItem(args: PullQueueItemArgs): Promise<PullQueueI
     },
     env,
     queueName,
+    ...(queueNameError ? { queueNameError } : {}),
     queueDefinitionId: item.queueDefinitionId,
     portal: {
       matched: portal.matched,

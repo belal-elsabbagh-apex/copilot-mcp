@@ -6,12 +6,14 @@ import { resetConfigCache } from "../config/config.js";
 import {
   addQueueItem,
   assertDeletable,
+  assertStoppable,
   buildAddQueueItemBody,
   buildStartJobBody,
   deleteQueueItem,
   startJob,
+  stopJob,
 } from "./actions.js";
-import type { QueueItem } from "./uipath.js";
+import type { QueueItem, UiPathJob } from "./uipath.js";
 
 // ---- pure helpers ----------------------------------------------------------
 
@@ -65,6 +67,22 @@ describe("assertDeletable", () => {
   for (const status of ["InProgress", "Successful", "Failed", "Deleted", "Abandoned"]) {
     test(`refuses a ${status} item`, () => {
       expect(() => assertDeletable(item(status))).toThrow(/only 'New' items may be deleted/);
+    });
+  }
+});
+
+describe("assertStoppable", () => {
+  const job = (state: string): UiPathJob => ({ Id: "5", Key: "job-key-1", State: state });
+
+  for (const state of ["Pending", "Running", "Resumed", "Suspended", "Stopping"]) {
+    test(`passes a ${state} job`, () => {
+      expect(() => assertStoppable(job(state))).not.toThrow();
+    });
+  }
+
+  for (const state of ["Successful", "Faulted", "Stopped"]) {
+    test(`refuses a ${state} job`, () => {
+      expect(() => assertStoppable(job(state))).toThrow(/state is already/);
     });
   }
 });
@@ -266,5 +284,46 @@ describe("startJob", () => {
           "https://cloud.uipath.com/myorg/mytenant/orchestrator_/jobs(sidepanel:sidepanel/jobs/job-key-1/details)",
       },
     ]);
+  });
+});
+
+describe("stopJob", () => {
+  const args = { env: "pre_prod" as const, jobKey: "job-key-1", strategy: "SoftStop" as const };
+
+  test("rejects env=prod before any fetch", async () => {
+    await expect(stopJob({ ...args, env: "prod" })).rejects.toThrow(/pre_prod-only/);
+    expect(calls.length).toBe(0);
+  });
+
+  test("throws when no job resolves for the key", async () => {
+    responses.push(json({ value: [] }));
+    await expect(stopJob(args)).rejects.toThrow(/no dev-clone job found/);
+    expect(calls.length).toBe(1);
+  });
+
+  test("fetches first and refuses a terminal job without issuing a POST", async () => {
+    responses.push(json({ value: [{ Id: 5, Key: "job-key-1", State: "Successful" }] }));
+    await expect(stopJob(args)).rejects.toThrow(/state is already 'Successful'/);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+
+  test("POSTs StopJob for a stoppable job", async () => {
+    responses.push(json({ value: [{ Id: 5, Key: "job-key-1", State: "Running" }] }));
+    responses.push(json({}));
+    const out = await stopJob(args);
+    expect(calls.length).toBe(2);
+    expect(calls[1]?.method).toBe("POST");
+    expect(calls[1]?.url).toBe(
+      `${UIPATH.orchestratorUrl}/odata/Jobs(5)/UiPath.Server.Configuration.OData.StopJob`,
+    );
+    expect(calls[1]?.body).toEqual({ strategy: "SoftStop" });
+    expect(out).toEqual({
+      env: "pre_prod",
+      jobId: 5,
+      jobKey: "job-key-1",
+      strategy: "SoftStop",
+      stopped: true,
+    });
   });
 });
