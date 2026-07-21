@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] - 2026-07-21
+
+### Changed
+
+- **Trimmed avoidable repetition out of several large, multi-row tool responses**,
+  found by auditing real transcripts for GET-type calls returning many same-shaped
+  elements:
+  - **`list_jobs`/`get_job`/`start_job`**: rows no longer carry a per-row `deepLink`
+    (a full Orchestrator URL differing only by the row's own `key` — measured at
+    36.5% of one real 57-row `list_jobs` payload). Each call now returns a single
+    top-level `jobDeepLinkBase` (a `"{key}"`-templated URL); build a job's link by
+    substituting its `key` into that template. **Breaking**: `deepLink` is no
+    longer present on job rows.
+  - **`search_orders`**: a row no longer repeats `insurance`/`orderType` when the
+    request already filtered to exactly one value for that dimension — restating
+    the filter the caller just supplied added no information. Still included when
+    that dimension is unfiltered or matches multiple values, since then per-row
+    values can differ. **Breaking**: `insurance`/`orderType` may now be absent from
+    a row.
+  - **`analyze_order_execution`/`get_job`'s `logDigest.failures`**: the underlying
+    failure-language heuristic (`isFailureLog`) now only scans the first 200
+    characters of a log message instead of the whole thing. Fixes a real false
+    positive found in the audit: a job that genuinely succeeded (`result:
+    SUBMITTED`) was still showing up in the digest because one log line embedded
+    an entire `result.json` object, and a generic word buried past character 400
+    of that blob incidentally matched — with no bearing on the actual outcome.
+    Genuine short failure messages (`"ABORT: ..."`, `"Unable to find submit
+    button"`, etc.) all front-load their meaning well within the new window, so
+    detection of real failures is unaffected.
+
 ## [1.22.0] - 2026-07-21
 
 ### Added

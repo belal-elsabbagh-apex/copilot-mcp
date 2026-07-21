@@ -172,6 +172,20 @@ export function slimOrderRow(o: BeOrder): SlimOrderRow {
   };
 }
 
+// Drop a row field when the caller's own filter already pins it to one value — repeating
+// it back on every row of a 100-row page is pure restatement of the request, not new
+// information. Left alone (not stripped) whenever the dimension is unfiltered or matches
+// more than one value, since then per-row values can differ and are informative.
+export function stripFilterEchoedFields<T extends SlimOrderRow>(
+  row: T,
+  args: Pick<OrderFilterDimensions, "insurances" | "orderType">,
+): T {
+  const out = { ...row };
+  if (args.insurances?.length === 1) delete out.insurance;
+  if (args.orderType?.length === 1) delete out.orderType;
+  return out;
+}
+
 export interface SearchOrdersResult {
   env: Env;
   profile: string;
@@ -195,7 +209,7 @@ export async function searchOrders(args: SearchOrdersArgs): Promise<SearchOrders
     pageNumber: body.pageNumber,
     totalNumberOfElements: total,
     count: rows.length,
-    rows: rows.map(slimOrderRow),
+    rows: rows.map((o) => stripFilterEchoedFields(slimOrderRow(o), args)),
   };
 }
 

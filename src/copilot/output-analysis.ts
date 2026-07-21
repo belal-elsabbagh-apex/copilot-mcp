@@ -88,6 +88,15 @@ const FAILURE_TERMS = [
 ];
 const FAILURE_PATTERN = new RegExp(`\\b(?:${FAILURE_TERMS.join("|")})\\b`, "i");
 
+// Free-text failure phrases front-load their meaning ("ABORT: ...", "Unable to find submit
+// button", "the request timed out" — all comfortably under this). Embedded data blobs (a full
+// result.json dump, HTML page titles, screenshot paths) can run many hundreds of characters and
+// incidentally contain one of these generic words deep inside with no bearing on the actual
+// outcome — bounding the scan avoids flagging those while still catching every real message.
+const FAILURE_SCAN_WINDOW = 200;
+const hasFailureLanguage = (message: string): boolean =>
+  FAILURE_PATTERN.test(message.slice(0, FAILURE_SCAN_WINDOW));
+
 interface AnalysisContext {
   output: Record<string, unknown>;
   logs: JobLog[];
@@ -148,7 +157,7 @@ const logFailureIndicatorsRule: AnalysisRule = {
     const n = logs.filter((l) => {
       const level = levelOf(l);
       if (ERROR_LEVELS.has(level) || WARN_LEVELS.has(level)) return false;
-      return FAILURE_PATTERN.test(l.Message || "");
+      return hasFailureLanguage(l.Message || "");
     }).length;
     return n === 0
       ? []
@@ -177,4 +186,4 @@ export function analyzeOutput(
 }
 
 export const isFailureLog = (log: JobLog): boolean =>
-  ERROR_LEVELS.has(levelOf(log)) || FAILURE_PATTERN.test(log.Message || "");
+  ERROR_LEVELS.has(levelOf(log)) || hasFailureLanguage(log.Message || "");

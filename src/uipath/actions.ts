@@ -13,7 +13,7 @@ import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
 import {
   fetchJobByKey,
   getQueueItem,
-  jobDeepLink,
+  jobDeepLinkBase,
   type QueueItem,
   resolveFolder,
   scopeForEnv,
@@ -150,11 +150,11 @@ export interface StartedJob {
   key: string;
   state: string;
   releaseName: string;
-  deepLink: string;
 }
 
 export interface StartJobResult {
   env: Env;
+  jobDeepLinkBase: string;
   jobs: StartedJob[];
 }
 
@@ -182,16 +182,14 @@ export async function startJob(args: StartJobArgs): Promise<StartJobResult> {
   const rows = isRecord(data) && Array.isArray(data["value"]) ? data["value"] : [];
   const jobs: StartedJob[] = rows.map((raw: unknown) => {
     const r = isRecord(raw) ? raw : {};
-    const key = typeof r["Key"] === "string" ? r["Key"] : "";
     return {
       id: typeof r["Id"] === "number" ? r["Id"] : 0,
-      key,
+      key: typeof r["Key"] === "string" ? r["Key"] : "",
       state: typeof r["State"] === "string" ? r["State"] : "",
       releaseName: typeof r["ReleaseName"] === "string" ? r["ReleaseName"] : "",
-      deepLink: key ? jobDeepLink(key) : "",
     };
   });
-  return { env: args.env, jobs };
+  return { env: args.env, jobDeepLinkBase: jobDeepLinkBase(), jobs };
 }
 
 // ---- stop_job ---------------------------------------------------------------

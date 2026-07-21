@@ -10,6 +10,7 @@ import {
   getOrderCategoryStats,
   searchOrders,
   slimOrderRow,
+  stripFilterEchoedFields,
 } from "./order-search.js";
 
 // ---- pure helpers -----------------------------------------------------------
@@ -125,6 +126,46 @@ describe("slimOrderRow", () => {
   });
 });
 
+// ---- stripFilterEchoedFields --------------------------------------------------
+
+describe("stripFilterEchoedFields", () => {
+  const row = { insurance: "OPTUM CARE NETWORK", orderType: "Consultation Referral" };
+
+  test("drops insurance when the request filtered to exactly one insurance", () => {
+    const out = stripFilterEchoedFields(row, { insurances: ["OPTUM CARE NETWORK"] });
+    expect(out).not.toHaveProperty("insurance");
+    expect(out.orderType).toBe("Consultation Referral");
+  });
+
+  test("drops orderType when the request filtered to exactly one order type", () => {
+    const out = stripFilterEchoedFields(row, { orderType: ["Consultation Referral"] });
+    expect(out).not.toHaveProperty("orderType");
+    expect(out.insurance).toBe("OPTUM CARE NETWORK");
+  });
+
+  test("keeps both fields when a dimension is unfiltered", () => {
+    const out = stripFilterEchoedFields(row, {});
+    expect(out).toEqual(row);
+  });
+
+  test("keeps both fields when a dimension matches more than one value", () => {
+    const out = stripFilterEchoedFields(row, {
+      insurances: ["OPTUM CARE NETWORK", "Regal Medical Group"],
+      orderType: ["Consultation Referral", "Follow-up Visit"],
+    });
+    expect(out).toEqual(row);
+  });
+
+  test("drops both fields when both dimensions are single-valued", () => {
+    const out = stripFilterEchoedFields(row, {
+      insurances: ["OPTUM CARE NETWORK"],
+      orderType: ["Consultation Referral"],
+    });
+    expect(out).not.toHaveProperty("insurance");
+    expect(out).not.toHaveProperty("orderType");
+  });
+});
+
 // ---- HTTP wiring (config fixture + fetch stub) -------------------------------
 
 const envCreds = (name: string) => ({
@@ -220,6 +261,8 @@ describe("searchOrders", () => {
     expect(out.count).toBe(1);
     expect(out.totalNumberOfElements).toBe(1);
     expect(out.rows[0]?.referredTo).toEqual({ name: "Regal", npi: "111", external: undefined });
+    // insurances was filtered to a single value — the row shouldn't repeat it back.
+    expect(out.rows[0]).not.toHaveProperty("insurance");
   });
 });
 

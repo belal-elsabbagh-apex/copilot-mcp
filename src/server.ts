@@ -97,7 +97,7 @@ import {
   type JobLogFilter,
   type JobLogResult,
   type JobLookup,
-  jobDeepLink,
+  jobDeepLinkBase,
   listQueueDefinitions,
   listRecentJobs,
   listReleases,
@@ -149,7 +149,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.22.0";
+const VERSION = "1.23.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -873,7 +873,8 @@ server.registerTool(
       "correlation. READ-ONLY. To diagnose a job from the list, call get_job with " +
       "includeLogDigest=true (condensed failure digest + fault signature) — get_job also takes a " +
       "jobKeys array to diagnose several jobs from this list in one call. Returns {env, folder, count, " +
-      "jobs:[{id,key,state,processName,processVersion,robotName,creationTime,endTime,durationMs,deepLink}]}.",
+      "jobDeepLinkBase, jobs:[{id,key,state,processName,processVersion,robotName,creationTime,endTime," +
+      'durationMs}]}. Build a job\'s Orchestrator link by substituting its key for "{key}" in jobDeepLinkBase.',
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -895,6 +896,7 @@ server.registerTool(
         env,
         folder: resolved,
         count: jobs.length,
+        jobDeepLinkBase: jobDeepLinkBase(),
         jobs: jobs.map((j) => ({
           id: j.Id,
           key: j.Key,
@@ -905,7 +907,6 @@ server.registerTool(
           creationTime: j.CreationTime,
           endTime: j.EndTime,
           durationMs: msBetween(j.CreationTime, j.EndTime),
-          deepLink: j.Key ? jobDeepLink(j.Key) : "",
         })),
       });
     } catch (e) {
@@ -1258,7 +1259,6 @@ function shapeJobDetail(
     creationTime: job.CreationTime,
     endTime: job.EndTime,
     durationMs: msBetween(job.CreationTime, job.EndTime),
-    deepLink: job.Key ? jobDeepLink(job.Key) : "",
     output,
     ...(includeLogDigest
       ? {
@@ -1293,10 +1293,11 @@ server.registerTool(
       "whole on one key's error — that key's entry carries error instead, the rest still return; " +
       "a single jobKey fails the call normally, like any other error. includeLogDigest is always " +
       "best-effort: a failure fetching it surfaces as logDigestError, never blocks the job data. " +
-      "Returns {env, folder, found, job:{id,key,state,processName,processVersion,robotName," +
-      "creationTime,endTime,durationMs,deepLink,output,fault?,logDigest?},logDigestError?} for a " +
-      "single jobKey, or {env, folder, count, jobs:[{key,found,job?,error?,logDigestError?}]} for " +
-      "jobKeys.",
+      "Returns {env, folder, found, jobDeepLinkBase, job:{id,key,state,processName,processVersion," +
+      "robotName,creationTime,endTime,durationMs,output,fault?,logDigest?},logDigestError?} for a " +
+      "single jobKey, or {env, folder, count, jobDeepLinkBase, jobs:[{key,found,job?,error?," +
+      "logDigestError?}]} for jobKeys. Build a job's Orchestrator link by substituting its key for " +
+      '"{key}" in jobDeepLinkBase.',
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])
@@ -1358,13 +1359,23 @@ server.registerTool(
           };
         }),
       );
-      if (jobKeys) return ok({ env, folder: resolved, count: results.length, jobs: results });
+      const base = jobDeepLinkBase();
+      if (jobKeys) {
+        return ok({
+          env,
+          folder: resolved,
+          count: results.length,
+          jobDeepLinkBase: base,
+          jobs: results,
+        });
+      }
       const only = results[0];
-      if (!only?.found) return ok({ env, folder: resolved, found: false });
+      if (!only?.found) return ok({ env, folder: resolved, found: false, jobDeepLinkBase: base });
       return ok({
         env,
         folder: resolved,
         found: true,
+        jobDeepLinkBase: base,
         job: only.job,
         ...(only.logDigestError ? { logDigestError: only.logDigestError } : {}),
       });
@@ -1486,7 +1497,8 @@ server.registerTool(
       "version at START, not creation — if others are publishing, verify the release's " +
       "processVersion via list_processes right before starting (repinning is manual in the " +
       "Orchestrator UI; this MCP never repins). Poll the result with get_job. Returns " +
-      "{env, jobs:[{id,key,state,releaseName,deepLink}]}.",
+      "{env, jobDeepLinkBase, jobs:[{id,key,state,releaseName}]}. Build a job's Orchestrator " +
+      'link by substituting its key for "{key}" in jobDeepLinkBase.',
     inputSchema: {
       env: z
         .literal("pre_prod")
@@ -2074,9 +2086,11 @@ server.registerTool(
       "Filter an account's Copilot orders by any combination of location, insurance, referred-to, " +
       "order type, auth/upload status, MRN, free-text search, or any of 5 date ranges, via " +
       "POST /orders/filter. READ-ONLY. Returns slim, non-PHI rows (orderUid, status, dates, insurance, " +
-      "speciality, referredTo{name,npi,external}, auth/upload status — no patient data). Defaults to " +
-      "type='Outbound Referral', pageSize=100, pageNumber=1 (1-based). Use get_order for a single " +
-      "order's full detail including patient info.",
+      "speciality, referredTo{name,npi,external}, auth/upload status — no patient data). insurance/" +
+      "orderType are omitted from a row when the request already filtered to exactly one value for " +
+      "that dimension (it would just repeat the filter back). Defaults to type='Outbound Referral', " +
+      "pageSize=100, pageNumber=1 (1-based). Use get_order for a single order's full detail including " +
+      "patient info.",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to search (required)"),
       profile: z

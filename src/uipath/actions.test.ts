@@ -274,15 +274,11 @@ describe("startJob", () => {
     expect(calls[0]?.url).toBe(
       `${UIPATH.orchestratorUrl}/odata/Jobs/UiPath.Server.Configuration.OData.StartJobs`,
     );
+    expect(out.jobDeepLinkBase).toBe(
+      "https://cloud.uipath.com/myorg/mytenant/orchestrator_/jobs(sidepanel:sidepanel/jobs/{key}/details)",
+    );
     expect(out.jobs).toEqual([
-      {
-        id: 5,
-        key: "job-key-1",
-        state: "Pending",
-        releaseName: "Proc.Dev",
-        deepLink:
-          "https://cloud.uipath.com/myorg/mytenant/orchestrator_/jobs(sidepanel:sidepanel/jobs/job-key-1/details)",
-      },
+      { id: 5, key: "job-key-1", state: "Pending", releaseName: "Proc.Dev" },
     ]);
   });
 });
