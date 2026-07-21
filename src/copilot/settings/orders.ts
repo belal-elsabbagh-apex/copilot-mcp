@@ -61,10 +61,11 @@ function crawlOrderNamesFlat(client: HttpClient): Promise<Record<string, unknown
   const cached = orderNamesCache.get(client);
   if (cached) return cached;
   const run = (async (): Promise<Record<string, unknown>[]> => {
-    const rows: Record<string, unknown>[] = [];
-    for (const t of await listOrderTypes(client))
-      rows.push(...(await fetchOrderNames(client, t.typeUid)));
-    return rows;
+    const types = await listOrderTypes(client);
+    // Every type's names GET is independent of every other type's — fetch them
+    // concurrently instead of paying each round-trip in turn.
+    const perType = await Promise.all(types.map((t) => fetchOrderNames(client, t.typeUid)));
+    return perType.flat();
   })();
   orderNamesCache.set(client, run);
   return run;
@@ -84,13 +85,17 @@ export interface OrderNameTree {
 }
 
 export async function crawlOrderNameTree(client: HttpClient): Promise<OrderNameTree> {
-  const types: OrderNameType[] = [];
-  for (const t of await listOrderTypes(client))
-    types.push({
-      typeUid: t.typeUid,
-      name: t.name,
-      names: await fetchOrderNames(client, t.typeUid),
-    });
+  const orderTypes = await listOrderTypes(client);
+  // Same independence as crawlOrderNamesFlat — fetch every type's names concurrently.
+  const types = await Promise.all(
+    orderTypes.map(
+      async (t): Promise<OrderNameType> => ({
+        typeUid: t.typeUid,
+        name: t.name,
+        names: await fetchOrderNames(client, t.typeUid),
+      }),
+    ),
+  );
   return { types };
 }
 
@@ -140,15 +145,20 @@ async function buildPreTypeRefs(
   pre: HttpClient,
   preTree: OrderNameTree,
 ): Promise<Map<string, PreTypeRefs>> {
-  const out = new Map<string, PreTypeRefs>();
-  for (const t of preTree.types) {
-    out.set(t.name, {
-      facilityUidByName: await fetchFacilityUidByName(pre, t.typeUid),
-      authSubCatUidByName: harvestSubCatUidByName(t.names, "authSubCategories"),
-      referralSubCatUidByName: harvestSubCatUidByName(t.names, "referralSubCategories"),
-    });
-  }
-  return out;
+  // Same independence again — each type's facility lookup is its own GET.
+  const entries = await Promise.all(
+    preTree.types.map(
+      async (t): Promise<[string, PreTypeRefs]> => [
+        t.name,
+        {
+          facilityUidByName: await fetchFacilityUidByName(pre, t.typeUid),
+          authSubCatUidByName: harvestSubCatUidByName(t.names, "authSubCategories"),
+          referralSubCatUidByName: harvestSubCatUidByName(t.names, "referralSubCategories"),
+        },
+      ],
+    ),
+  );
+  return new Map(entries);
 }
 
 // Rewrite a CPT's payers map prod->pre: remap both the map key and each entry's inner payerUid,

@@ -41,17 +41,24 @@ export function crawlSpecialities(client: HttpClient): Promise<SpecialtyCrawl> {
     const typesRes = await client.req("GET", "/api/v1/settings/orders/outbound/types");
     if (typesRes.status >= 400)
       throw new Error(`GET /settings/orders/outbound/types -> ${typesRes.status}`);
+    const validTypes = asArray(typesRes.data)
+      .map((t) => ({ typeUid: stringProp(t, "typeUid"), typeName: stringProp(t, "name") ?? "" }))
+      .filter((t): t is { typeUid: string; typeName: string } => !!t.typeUid);
+    // Every type's specialities GET is independent of every other type's — fetch them
+    // concurrently instead of paying each round-trip in turn.
+    const perType = await Promise.all(
+      validTypes.map(async ({ typeUid, typeName }) => {
+        const r = await client.req(
+          "GET",
+          `/api/v1/settings/orders/outbound/types/${typeUid}/specialities`,
+        );
+        if (r.status >= 400) throw new Error(`GET specialities(${typeName}) -> ${r.status}`);
+        return { typeName, rows: envelopeRows(r.data) };
+      }),
+    );
     const out: SpecialtyCrawl = { specialties: [], providers: [], facilities: [] };
-    for (const t of asArray(typesRes.data)) {
-      const typeUid = stringProp(t, "typeUid");
-      const typeName = stringProp(t, "name") ?? "";
-      if (!typeUid) continue;
-      const r = await client.req(
-        "GET",
-        `/api/v1/settings/orders/outbound/types/${typeUid}/specialities`,
-      );
-      if (r.status >= 400) throw new Error(`GET specialities(${typeName}) -> ${r.status}`);
-      for (const s of envelopeRows(r.data)) {
+    for (const { typeName, rows } of perType) {
+      for (const s of rows) {
         out.specialties.push({ type: typeName, name: stringProp(s, "name") ?? "" });
         for (const p of asArray(prop(s, "referredProviders")))
           if (isRecord(p)) out.providers.push(p);
@@ -87,18 +94,20 @@ export async function crawlSpecialityTree(client: HttpClient): Promise<Specialit
   const typesRes = await client.req("GET", "/api/v1/settings/orders/outbound/types");
   if (typesRes.status >= 400)
     throw new Error(`GET /settings/orders/outbound/types -> ${typesRes.status}`);
-  const types: CrawledType[] = [];
-  for (const t of asArray(typesRes.data)) {
-    const typeUid = stringProp(t, "typeUid");
-    const name = stringProp(t, "name") ?? "";
-    if (!typeUid) continue;
-    const r = await client.req(
-      "GET",
-      `/api/v1/settings/orders/outbound/types/${typeUid}/specialities`,
-    );
-    if (r.status >= 400) throw new Error(`GET specialities(${name}) -> ${r.status}`);
-    types.push({ typeUid, name, specialities: envelopeRows(r.data).filter(isRecord) });
-  }
+  const validTypes = asArray(typesRes.data)
+    .map((t) => ({ typeUid: stringProp(t, "typeUid"), name: stringProp(t, "name") ?? "" }))
+    .filter((t): t is { typeUid: string; name: string } => !!t.typeUid);
+  // Same independence as crawlSpecialities — fetch every type's specialities concurrently.
+  const types = await Promise.all(
+    validTypes.map(async ({ typeUid, name }): Promise<CrawledType> => {
+      const r = await client.req(
+        "GET",
+        `/api/v1/settings/orders/outbound/types/${typeUid}/specialities`,
+      );
+      if (r.status >= 400) throw new Error(`GET specialities(${name}) -> ${r.status}`);
+      return { typeUid, name, specialities: envelopeRows(r.data).filter(isRecord) };
+    }),
+  );
   return { types };
 }
 

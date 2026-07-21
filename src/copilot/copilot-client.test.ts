@@ -1,11 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   categoryStats,
   fetchOrder,
   filterOrders,
   type HttpClient,
   type HttpResponse,
+  makeClient,
   type ReqBody,
+  reqWithRefresh,
+  submitOrder,
   verify,
 } from "./copilot-client.js";
 
@@ -109,5 +112,88 @@ describe("verify", () => {
   test("returns null (not a throw) on a non-2xx response", async () => {
     const { client } = stubClient([{ status: 500, data: {}, text: "boom" }]);
     expect(await verify(client, "u1")).toBeNull();
+  });
+});
+
+describe("reqWithRefresh", () => {
+  test("passes a successful response straight through, no refresh call", async () => {
+    const { client, calls } = stubClient([{ status: 200, data: { ok: true }, text: "" }]);
+    const r = await reqWithRefresh(client, "PUT", "/api/v1/orders/u1", { json: { a: 1 } });
+    expect(r.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      method: "PUT",
+      path: "/api/v1/orders/u1",
+      body: { json: { a: 1 } },
+    });
+  });
+
+  test("on a 403 missing_token, refreshes then retries once and returns the retry's result", async () => {
+    const { client, calls } = stubClient([
+      { status: 403, data: {}, text: "missing_token" },
+      { status: 200, data: { ok: true }, text: "" },
+    ]);
+    const r = await reqWithRefresh(client, "PUT", "/api/v1/orders/u1", { json: { a: 1 } });
+    expect(r.status).toBe(200);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "PUT /api/v1/orders/u1",
+      "GET /api/v1/physician/refresh",
+      "PUT /api/v1/orders/u1",
+    ]);
+  });
+
+  test("a 403 for any other reason is not retried", async () => {
+    const { client, calls } = stubClient([{ status: 403, data: {}, text: "forbidden" }]);
+    const r = await reqWithRefresh(client, "PUT", "/api/v1/orders/u1", { json: { a: 1 } });
+    expect(r.status).toBe(403);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("submitOrder", () => {
+  test("retries once on 403 missing_token, then verifies", async () => {
+    const { client, calls } = stubClient([
+      { status: 403, data: {}, text: "missing_token" }, // 1st submit attempt
+      { status: 200, data: {}, text: "" }, // GET refresh (response unused)
+      { status: 200, data: {}, text: "" }, // retried submit, succeeds
+      { status: 200, data: { data: [{ orderUid: "u1", status: "inProgress" }] }, text: "" }, // verify
+    ]);
+    const clientTagged: HttpClient = { ...client, env: "pre_prod" };
+    const result = await submitOrder(clientTagged, "u1");
+    expect(result?.status).toBe("inProgress");
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "POST /api/v1/orders/u1/submit",
+      "GET /api/v1/physician/refresh",
+      "POST /api/v1/orders/u1/submit",
+      "POST /api/v1/orders/filter",
+    ]);
+  });
+});
+
+describe("makeClient req()", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("parses a JSON body", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
+    const r = await makeClient("http://stub.invalid").req("GET", "/x");
+    expect(r.data).toEqual({ ok: true });
+  });
+
+  test("falls back to the raw text for a non-JSON body", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response("not json", { status: 200 })) as typeof fetch;
+    const r = await makeClient("http://stub.invalid").req("GET", "/x");
+    expect(r.data).toBe("not json");
+  });
+
+  test("an empty body parses to undefined, same as uipath.ts's client (safeJsonParse)", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response("", { status: 204 })) as typeof fetch;
+    const r = await makeClient("http://stub.invalid").req("DELETE", "/x");
+    expect(r.data).toBeUndefined();
   });
 });

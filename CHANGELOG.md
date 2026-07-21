@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] - 2026-07-21
+
+### Fixed
+
+- **`build_faulted_job_issue` no longer fails outright on a transient robot-logs
+  fetch error.** A prior change made `fetchFilteredJobLogs` propagate any non-404
+  error instead of swallowing it, but this tool's logs fetch wasn't updated to
+  catch per-item errors like its sibling batch paths (`get_job`, `analyze.ts`) —
+  so a genuinely faulted job with a flaky logs fetch discarded an otherwise-valid
+  job lookup. The logs fetch is now isolated in its own try/catch and degrades to
+  a `logsError` field (issue still built from the job alone) instead of rejecting
+  the whole call.
+
+### Changed
+
+- **Deduplicated the 403 `missing_token` session-refresh retry** (previously
+  hand-copied in three places: `mirror.ts`'s PUTs, its note-upload POST, and
+  `copilot-client.ts`'s `submitOrder`) into one shared `reqWithRefresh` helper.
+- **`find_stuck_orders`'s `crossCheckUipath` cross-check now batches its
+  Orchestrator lookups** (`chunk(10)` + `Promise.allSettled`, the same shape
+  `uipath.ts` already uses for job batches) instead of awaiting one order at a
+  time — latency no longer scales linearly with the number of stuck orders found.
+- **`diff_settings`/`get_settings` fetch every catalog section concurrently**
+  instead of one at a time; same for the orders and specialities tree crawls
+  (`settings/orders.ts`, `settings/specialities.ts`) — each order type's/
+  speciality's GET is independent, so they no longer pay each round-trip in turn.
+- **`copilot-client.ts`'s `req()` now reuses `shared/util.ts`'s `safeJsonParse`**
+  instead of a hand-rolled JSON/raw-text fallback that disagreed with `uipath.ts`
+  on how an empty response body is represented (`""` vs `undefined`).
+- **`queue-item.ts`'s `toMDY` is now a thin wrapper around `copilot-client.ts`'s
+  `toMDY`** instead of a second, independently-drifting copy of the same
+  date-parsing rules.
+- **`mintPreprodOrder` reports progress via an optional `onProgress` callback**,
+  wired to `reportProgress` in `create_preprod_order`'s handler — a caller
+  watching a mint that's mid-retry (up to 6 `/process` attempts, 5s apart) now
+  sees live progress instead of nothing until the tool returns.
+
 ## [1.23.0] - 2026-07-21
 
 ### Changed

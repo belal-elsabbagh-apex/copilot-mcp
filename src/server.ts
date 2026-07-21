@@ -149,7 +149,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.23.0";
+const VERSION = "1.23.1";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -385,11 +385,19 @@ server.registerTool(
         .describe("Place of service — applied LAST, post-forReview"),
     },
   },
-  async (a) => {
+  async (a, extra) => {
     try {
       const creds = resolveCreds(a.profile);
       const pre = makeClient(creds.pre_prod.be, "pre_prod");
       await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+      // Ported by mintPreprodOrder alongside its own console.log calls — surfaces
+      // its ~15-step sequence (up to 6 /process retries at 5s apart) to the client
+      // instead of leaving a multi-retry mint with no visible feedback at all.
+      let step = 0;
+      const onProgress = (message: string): void => {
+        step++;
+        reportProgress(extra, step, undefined, message);
+      };
       const spec: MintSpec = {
         patientName: a.patientName,
         patientBirthDate: toMDY(a.patientBirthDate) ?? "",
@@ -415,7 +423,7 @@ server.registerTool(
         })),
         placeOfService: a.placeOfService ?? "",
       };
-      const result = await mintPreprodOrder(pre, spec);
+      const result = await mintPreprodOrder(pre, spec, onProgress);
       // Audit trail: surface every pre-prod order mint to the client log.
       mcpLog(server, "warning", `minted pre-prod order ${result.newUid}`, {
         profile: a.profile,
@@ -1081,10 +1089,12 @@ server.registerTool(
     description:
       "Read a faulted UiPath job (by its GUID Key) and its robot logs, and BUILD a ready-to-post " +
       "GitHub issue payload for the RPA repo. READ-ONLY: this does NOT post to GitHub — it returns " +
-      "{repo,title,body,labels,faultSignature,searchQuery,recurrenceComment,found}. The caller (the " +
-      "report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search with " +
-      "`searchQuery`, then add `recurrenceComment` to the matching open issue, or create_issue with " +
-      "title/body/labels. `faultSignature` is the normalized error (stable across reruns) used to dedupe.",
+      "{repo,title,body,labels,faultSignature,searchQuery,recurrenceComment,found,logsError?}. The " +
+      "logs fetch is best-effort: a failure surfaces as logsError (issue still built from the job " +
+      "alone) instead of failing the whole call. The caller (the report-faulted-uipath-jobs prompt) " +
+      "hands this to the host's GitHub MCP server: search with `searchQuery`, then add " +
+      "`recurrenceComment` to the matching open issue, or create_issue with title/body/labels. " +
+      "`faultSignature` is the normalized error (stable across reruns) used to dedupe.",
     inputSchema: {
       env: z
         .enum(["prod", "pre_prod"])

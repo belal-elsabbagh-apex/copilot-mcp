@@ -5,7 +5,7 @@
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
 import type { Env } from "../config/config.js";
-import { envelopeRows, isRecord, prop, stringProp } from "../shared/util.js";
+import { envelopeRows, isRecord, prop, safeJsonParse, stringProp } from "../shared/util.js";
 
 // orderMode sent on every /orders/filter call (orders + pcp notes).
 export const ORDER_MODE = '["orders_only_mode","pcp_notes_mode"]';
@@ -162,15 +162,26 @@ export function makeClient(base: string, env?: Env): HttpClient {
       if (i > 0) jar.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
     }
     const text = await res.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
-    }
-    return { status: res.status, data, text };
+    return { status: res.status, data: safeJsonParse(text), text };
   }
   return env ? { base, env, req } : { base, req };
+}
+
+// Retries once on a 403 missing_token (session-cookie race) — the same race recurs at
+// every write call site (mintPreprodOrder's PUTs and note upload, submitOrder), so they
+// all share this instead of hand-copying the check-refresh-retry sequence.
+export async function reqWithRefresh(
+  c: HttpClient,
+  method: string,
+  path: string,
+  body?: ReqBody,
+): Promise<HttpResponse> {
+  let r = await c.req(method, path, body);
+  if (r.status === 403 && /missing_token/.test(r.text)) {
+    await c.req("GET", "/api/v1/physician/refresh");
+    r = await c.req(method, path, body);
+  }
+  return r;
 }
 
 export async function login(c: HttpClient, email: string, password: string): Promise<void> {
@@ -317,15 +328,9 @@ export async function verify(c: HttpClient, uid: string): Promise<OrderVerify | 
 // mirroring every other write in this codebase.
 export async function submitOrder(pre: HttpClient, uid: string): Promise<OrderVerify | null> {
   assertPreProdClient(pre, "submitOrder");
-  let r = await pre.req("POST", `/api/v1/orders/${uid}/submit`, {
+  const r = await reqWithRefresh(pre, "POST", `/api/v1/orders/${uid}/submit`, {
     json: { actionsHistory: ["submit_action"] },
   });
-  if (r.status === 403 && /missing_token/.test(r.text)) {
-    await pre.req("GET", "/api/v1/physician/refresh");
-    r = await pre.req("POST", `/api/v1/orders/${uid}/submit`, {
-      json: { actionsHistory: ["submit_action"] },
-    });
-  }
   if (r.status >= 400) throw new Error(`/submit failed ${r.status}: ${r.text.slice(0, 300)}`);
   await new Promise((resolve) => setTimeout(resolve, 1500));
   return verify(pre, uid);

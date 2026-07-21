@@ -64,29 +64,30 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
     login(pre, creds.pre_prod.email, creds.pre_prod.password),
   ]);
 
-  const results: SectionResult[] = [];
-  let withDiffs = 0;
-
-  for (const section of chosen) {
-    let result: SectionResult;
-    try {
-      const [pData, qData] = await Promise.all([
-        fetchSection(prod, section),
-        fetchSection(pre, section),
-      ]);
-      result = { key: section.key, label: section.label, ...diffSection(section, pData, qData) };
-    } catch (e) {
-      result = {
-        key: section.key,
-        label: section.label,
-        kind: section.kind,
-        equal: false,
-        error: toMessage(e),
-      };
-    }
-    if (!result.equal) withDiffs++;
-    results.push(result);
-  }
+  // Every section's prod/pre-prod fetch is independent of every other section's —
+  // run them all concurrently instead of paying each section's round-trip in turn.
+  // Order is preserved (Promise.all resolves in input order) and one section's
+  // failure never blocks the rest (caught per-section, same as the sequential form).
+  const results: SectionResult[] = await Promise.all(
+    chosen.map(async (section): Promise<SectionResult> => {
+      try {
+        const [pData, qData] = await Promise.all([
+          fetchSection(prod, section),
+          fetchSection(pre, section),
+        ]);
+        return { key: section.key, label: section.label, ...diffSection(section, pData, qData) };
+      } catch (e) {
+        return {
+          key: section.key,
+          label: section.label,
+          kind: section.kind,
+          equal: false,
+          error: toMessage(e),
+        };
+      }
+    }),
+  );
+  const withDiffs = results.filter((r) => !r.equal).length;
 
   return {
     account: opts.profile ?? "(default)",
@@ -109,22 +110,24 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
   const client = makeClient(creds.be, opts.env);
   await login(client, creds.email, creds.password);
 
-  const sections: GetSettingsSection[] = [];
-  for (const section of chosen) {
-    const head = { key: section.key, label: section.label, tags: [...section.tags] };
-    try {
-      const raw = await fetchSection(client, section);
-      const data = opts.normalized ? normalizeSectionValue(section, raw) : raw;
-      sections.push({
-        ...head,
-        kind: section.kind,
-        ...(Array.isArray(data) ? { count: data.length } : {}),
-        data,
-      });
-    } catch (e) {
-      sections.push({ ...head, kind: section.kind, error: toMessage(e) });
-    }
-  }
+  // Same independence as diffSettings — fetch every section concurrently.
+  const sections: GetSettingsSection[] = await Promise.all(
+    chosen.map(async (section): Promise<GetSettingsSection> => {
+      const head = { key: section.key, label: section.label, tags: [...section.tags] };
+      try {
+        const raw = await fetchSection(client, section);
+        const data = opts.normalized ? normalizeSectionValue(section, raw) : raw;
+        return {
+          ...head,
+          kind: section.kind,
+          ...(Array.isArray(data) ? { count: data.length } : {}),
+          data,
+        };
+      } catch (e) {
+        return { ...head, kind: section.kind, error: toMessage(e) };
+      }
+    }),
+  );
 
   return {
     account: opts.profile ?? "(default)",

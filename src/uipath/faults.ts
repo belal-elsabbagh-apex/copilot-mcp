@@ -151,12 +151,18 @@ export async function buildFaultedJobIssue(
   env: Env,
   jobKey: string,
   opts: BuildOptions = {},
-): Promise<FaultedJobIssue & { found: boolean }> {
+): Promise<FaultedJobIssue & { found: boolean; logsError?: string }> {
   const folder = resolveFolder(env, opts.folder);
-  const [job, logs] = await Promise.all([
-    fetchJobByKey(jobKey, folder),
-    fetchJobLogs(jobKey, folder),
-  ]);
+  const job = await fetchJobByKey(jobKey, folder);
+  // Logs are a best-effort attachment — a transient logs-fetch failure must not
+  // discard an otherwise-valid job lookup, same convention as analyze.ts.
+  let logs: JobLog[] = [];
+  let logsError: string | undefined;
+  try {
+    logs = await fetchJobLogs(jobKey, folder);
+  } catch (e) {
+    logsError = e instanceof Error ? e.message : String(e);
+  }
   const resolved: UiPathJob = job ?? { Key: jobKey, State: "Faulted" };
   const issue = formatFaultedJobIssue(resolved, logs, {
     env,
@@ -165,5 +171,5 @@ export async function buildFaultedJobIssue(
     labels: opts.labels,
     deepLink: jobDeepLink(jobKey),
   });
-  return { ...issue, found: job !== null };
+  return { ...issue, found: job !== null, ...(logsError ? { logsError } : {}) };
 }

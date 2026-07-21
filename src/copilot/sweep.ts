@@ -4,6 +4,7 @@
 // the Orchestrator search in uipath.ts.
 
 import { type Env, resolveCreds } from "../config/config.js";
+import { chunk } from "../shared/util.js";
 import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "../uipath/uipath.js";
 import { type BeOrder, filterOrders, login, makeClient, ORDER_MODE } from "./copilot-client.js";
 
@@ -114,16 +115,34 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
 
   if (args.crossCheckUipath) {
     const folder = resolveFolder(env);
-    for (const s of stuck) {
-      if (!s.orderUid) continue;
-      try {
-        const jobs = await searchJobsByOrderId(s.orderUid, args.since, args.top ?? 50, folder);
-        s.uipath = uipathVerdict(jobs);
-      } catch (e) {
-        s.uipath = { verdict: `error: ${e instanceof Error ? e.message : String(e)}`, jobCount: 0 };
-      }
-    }
+    await crossCheckUipath(stuck, (orderUid) =>
+      searchJobsByOrderId(orderUid, args.since, args.top ?? 50, folder),
+    );
   }
 
   return { env, scanned, statuses, found: stuck.length, stuck };
+}
+
+// Bounded-concurrency batches (same chunk()+Promise.allSettled shape as uipath.ts's
+// fetchJobsForKeys) instead of one Orchestrator lookup at a time — a real per-order
+// failure lands on that order's uipath.verdict, never lost and never blocking the
+// rest of the batch. `search` is injected so this is unit-testable without HTTP.
+export async function crossCheckUipath(
+  stuck: StuckOrder[],
+  search: (orderUid: string) => Promise<UiPathJob[]>,
+): Promise<void> {
+  const candidates = stuck.filter((s): s is StuckOrder & { orderUid: string } => !!s.orderUid);
+  for (const batch of chunk(candidates, 10)) {
+    const results = await Promise.allSettled(batch.map((s) => search(s.orderUid)));
+    batch.forEach((s, i) => {
+      const r = results[i];
+      s.uipath =
+        r?.status === "fulfilled"
+          ? uipathVerdict(r.value)
+          : {
+              verdict: `error: ${r?.reason instanceof Error ? r.reason.message : String(r?.reason)}`,
+              jobCount: 0,
+            };
+    });
+  }
 }

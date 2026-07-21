@@ -53,3 +53,48 @@ describe("pre-prod write guard", () => {
     await expect(mintPreprodOrder(stubClient(), SPEC)).rejects.toThrow(/pre_prod-only/);
   });
 });
+
+// A client that answers every call in the mint sequence with a generic success —
+// draft creation, every PUT, /process (always "forReview" so the final retry loop
+// returns on its first attempt, no real sleep), /note/upload, and /orders/filter
+// (verify's lookup) all resolve on the first try.
+function happyClient(): HttpClient {
+  return {
+    base: "http://stub.invalid",
+    env: "pre_prod",
+    req: async (_method: string, path: string) => {
+      if (path === "/api/v1/orders")
+        return { status: 200, data: { order: { orderUid: "new-uid" } }, text: "" };
+      if (path.endsWith("/process")) return { status: 200, data: { msg: "forReview" }, text: "" };
+      if (path === "/api/v1/orders/filter")
+        return {
+          status: 200,
+          data: { data: [{ orderUid: "new-uid", status: "forReview" }] },
+          text: "",
+        };
+      return { status: 200, data: {}, text: "" }; // PUTs, note/upload
+    },
+  };
+}
+
+describe("mintPreprodOrder progress reporting", () => {
+  test("calls onProgress at each milestone, in addition to the ported console.log calls", async () => {
+    const messages: string[] = [];
+    const result = await mintPreprodOrder(happyClient(), SPEC, (m) => messages.push(m));
+    expect(result.newUid).toBe("new-uid");
+    expect(messages).toContain("new draft: new-uid");
+    expect(messages).toContain("PUT patient: ok");
+    expect(messages).toContain("PUT orderNames: ok");
+    expect(messages.some((m) => m.startsWith("/process"))).toBe(true);
+    expect(messages).toContain("/note/upload: ok");
+    expect(messages).toContain("verify: done");
+    // SPEC.clinicProviderUid is "" — sentBy is left to the FE default.
+    expect(messages).toContain("(sentBy: left to FE default — clinicProvider not mapped)");
+  });
+
+  test("onProgress defaults to a no-op when the caller doesn't pass one", async () => {
+    await expect(mintPreprodOrder(happyClient(), SPEC)).resolves.toMatchObject({
+      newUid: "new-uid",
+    });
+  });
+});

@@ -11,6 +11,7 @@ import {
   type HttpClient,
   type OrderVerify,
   pad,
+  reqWithRefresh,
   verify,
 } from "./copilot-client.js";
 
@@ -52,18 +53,22 @@ function buildDummyPdf(): Buffer {
   return Buffer.from(pdf, "latin1");
 }
 
+// Client-visible progress, one call per mint milestone — in addition to (not instead
+// of) the ported console.log calls, which stay local-diagnostic (stderr, VERBOSE-gated
+// by the caller). Defaults to a no-op so mintPreprodOrder's callers aren't required to
+// wire one up.
+export type MintProgress = (message: string) => void;
+const noopProgress: MintProgress = () => {};
+
 type PutFn = (body: Record<string, unknown>, label: string) => Promise<unknown>;
 
-function mkPut(c: HttpClient, uid: string): PutFn {
+function mkPut(c: HttpClient, uid: string, onProgress: MintProgress): PutFn {
   return async function put(body, label) {
-    let r = await c.req("PUT", `/api/v1/orders/${uid}`, { json: body });
-    if (r.status === 403 && /missing_token/.test(r.text)) {
-      await c.req("GET", "/api/v1/physician/refresh");
-      r = await c.req("PUT", `/api/v1/orders/${uid}`, { json: body });
-    }
+    const r = await reqWithRefresh(c, "PUT", `/api/v1/orders/${uid}`, { json: body });
     if (r.status >= 400)
       throw new Error(`PUT ${label} failed ${r.status}: ${r.text.slice(0, 300)}`);
     console.log(`  PUT ${label}: ok`);
+    onProgress(`PUT ${label}: ok`);
     return r.data;
   };
 }
@@ -83,13 +88,16 @@ async function postProcess(c: HttpClient, uid: string): Promise<ProcResult> {
 async function processUntilForReview(
   c: HttpClient,
   uid: string,
+  onProgress: MintProgress,
   attempts = 6,
   delayMs = 5000,
 ): Promise<ProcResult> {
   let body: ProcResult = {};
   for (let i = 0; i < attempts; i++) {
     body = await postProcess(c, uid);
-    console.log(`  /process [${i}]: ${body.msg ?? JSON.stringify(body).slice(0, 120)}`);
+    const msg = `/process [${i}]: ${body.msg ?? JSON.stringify(body).slice(0, 120)}`;
+    console.log(`  ${msg}`);
+    onProgress(msg);
     if (/forreview/i.test(body.msg ?? "")) return body;
     if (i < attempts - 1) await sleep(delayMs);
   }
@@ -143,7 +151,11 @@ export interface MintResult {
 // retry loop (async note OCR blocks it). `pre` must already be logged in to the
 // pre-prod tenant. Always stops at forReview — never submits; see
 // copilot-client.ts's submitOrder for that as a separate, explicit step.
-export async function mintPreprodOrder(pre: HttpClient, spec: MintSpec): Promise<MintResult> {
+export async function mintPreprodOrder(
+  pre: HttpClient,
+  spec: MintSpec,
+  onProgress: MintProgress = noopProgress,
+): Promise<MintResult> {
   assertPreProdClient(pre, "mintPreprodOrder");
   // "" sentinels -> omitted keys, so the wire bodies match the legacy mirror exactly.
   const orUndef = (s: string): string | undefined => s || undefined;
@@ -155,7 +167,8 @@ export async function mintPreprodOrder(pre: HttpClient, spec: MintSpec): Promise
   const newUid = stringProp(prop(draftRes.data, "order"), "orderUid");
   if (!newUid) throw new Error(`create draft returned no orderUid: ${draftRes.text.slice(0, 200)}`);
   console.log(`  new draft: ${newUid}`);
-  const put = mkPut(pre, newUid);
+  onProgress(`new draft: ${newUid}`);
+  const put = mkPut(pre, newUid, onProgress);
 
   // Step 2: patient
   await put(
@@ -198,7 +211,10 @@ export async function mintPreprodOrder(pre: HttpClient, spec: MintSpec): Promise
   );
   // Step 8: sent by — only when a valid pre-prod uid is known (prod's may not exist)
   if (spec.clinicProviderUid) await put({ clinicProviderUid: spec.clinicProviderUid }, "sentBy");
-  else console.log("  (sentBy: left to FE default — clinicProvider not mapped)");
+  else {
+    console.log("  (sentBy: left to FE default — clinicProvider not mapped)");
+    onProgress("(sentBy: left to FE default — clinicProvider not mapped)");
+  }
   // Step 9: facility (auto-sets POS + fax)
   if (spec.referredFacilityUid)
     await put({ referredFacilityUid: spec.referredFacilityUid }, "facility");
@@ -224,30 +240,31 @@ export async function mintPreprodOrder(pre: HttpClient, spec: MintSpec): Promise
   // Step 12: first /process (usually incomplete: appointmentDate missing)
   let proc = await postProcess(pre, newUid);
   console.log(`  /process (1st): ${proc.msg}`);
+  onProgress(`/process (1st): ${proc.msg}`);
   // Step 14: appointment date
   if (spec.appointmentDate) {
     await put({ appointmentDate: spec.appointmentDate }, "appointmentDate");
     if (/incomplete/i.test(proc.msg ?? "")) {
       proc = await postProcess(pre, newUid);
       console.log(`  /process (after appt): ${proc.msg}`);
+      onProgress(`/process (after appt): ${proc.msg}`);
     }
   }
   // Step 15: note upload (dummy PDF, async OCR on BE)
   const fd = new FormData();
   fd.append("pdfFile", new Blob([buildDummyPdf()], { type: "application/pdf" }), "note.pdf");
-  let up = await pre.req("POST", `/api/v1/orders/${newUid}/note/upload`, { form: fd });
-  if (up.status === 403 && /missing_token/.test(up.text)) {
-    await pre.req("GET", "/api/v1/physician/refresh");
-    up = await pre.req("POST", `/api/v1/orders/${newUid}/note/upload`, { form: fd });
-  }
+  const up = await reqWithRefresh(pre, "POST", `/api/v1/orders/${newUid}/note/upload`, {
+    form: fd,
+  });
   if (up.status >= 400)
     throw new Error(`/note/upload failed ${up.status}: ${up.text.slice(0, 300)}`);
   console.log("  /note/upload: ok");
+  onProgress("/note/upload: ok");
   // Step 16: ICDs (manual; OCR can't read dummy PDF)
   const icds = spec.icdCodes.map((i) => ({ ...i, evidences: [] }));
   if (icds.length) await put({ ICDCodes: icds }, "ICDCodes");
   // Final /process retry loop until forReview (note upload async-blocks it)
-  proc = await processUntilForReview(pre, newUid);
+  proc = await processUntilForReview(pre, newUid, onProgress);
   if (!/forreview/i.test(proc.msg ?? ""))
     console.warn(`  !! order did not reach forReview: ${proc.msg}`);
   // Step 13: post-forReview corrections — requiredAuthorization FIRST, placeOfService LAST.
@@ -257,5 +274,6 @@ export async function mintPreprodOrder(pre: HttpClient, spec: MintSpec): Promise
 
   const v = await verify(pre, newUid);
   console.log(`  verify: ${JSON.stringify(v, null, 2)}`);
+  onProgress("verify: done");
   return { newUid, verify: v, processMessage: proc.msg };
 }

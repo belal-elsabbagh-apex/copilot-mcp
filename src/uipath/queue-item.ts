@@ -8,22 +8,23 @@
 import { randomUUID } from "node:crypto";
 import type { Env, UipathConfig } from "../config/config.js";
 import { getUipath, resolveCreds } from "../config/config.js";
-import { type BeOrder, fetchOrder, makeClient, pad } from "../copilot/copilot-client.js";
+import {
+  type BeOrder,
+  fetchOrder,
+  makeClient,
+  toMDY as toMDYStrict,
+} from "../copilot/copilot-client.js";
 import { prop, stringProp } from "../shared/util.js";
 import { guardQueueItemSafety } from "./safety.js";
 
-// Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error).
+// Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error) — the
+// date-parsing rules themselves live once, in copilot-client.ts's toMDY.
 export function toMDY(input: string | null | undefined): string {
-  if (!input) return "";
-  const s = String(input).trim();
-  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (us) return `${pad(us[1] ?? "")}/${pad(us[2] ?? "")}/${us[3]}`;
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) return `${iso[2]}/${iso[3]}/${iso[1]}`;
-  const d = new Date(s);
-  if (!Number.isNaN(d.getTime()))
-    return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${d.getFullYear()}`;
-  return "";
+  try {
+    return toMDYStrict(input) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 export const decodeJwtId = (t: string | undefined): string | number | null => {

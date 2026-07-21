@@ -1,5 +1,15 @@
-import { describe, expect, test } from "bun:test";
-import { DEFAULT_LABELS, DEFAULT_REPO, formatFaultedJobIssue, normalizeError } from "./faults.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resetConfigCache } from "../config/config.js";
+import {
+  buildFaultedJobIssue,
+  DEFAULT_LABELS,
+  DEFAULT_REPO,
+  formatFaultedJobIssue,
+  normalizeError,
+} from "./faults.js";
 import type { JobLog, UiPathJob } from "./uipath.js";
 
 const job: UiPathJob = {
@@ -86,5 +96,80 @@ describe("formatFaultedJobIssue", () => {
     expect(issue.title).toBe("[UiPath Fault] Job ended in state Faulted (prod)");
     expect(issue.faultSignature).toBe("job ended in state faulted");
     expect(issue.body).toContain("(no logs)");
+  });
+});
+
+// ---- buildFaultedJobIssue (HTTP wiring) --------------------------------------
+
+const envCreds = (name: string) => ({
+  be: `https://be.${name}.example.com`,
+  email: `${name}@example.com`,
+  password: "pw",
+});
+
+const UIPATH = {
+  orchestratorUrl: "https://cloud.uipath.com/myorg/mytenant/orchestrator_",
+  bearer: "test-bearer",
+};
+
+const FIXTURE = {
+  copilot: { prod: envCreds("prod"), pre_prod: envCreds("preprod") },
+  uipath: UIPATH,
+};
+
+let dir: string;
+let prevConfig: string | undefined;
+
+const writeConfig = (config: unknown): void => {
+  writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+  resetConfigCache();
+};
+
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), "copilot-mcp-faults-"));
+  prevConfig = process.env["COPILOT_MCP_CONFIG"];
+  process.env["COPILOT_MCP_CONFIG"] = join(dir, "config.json");
+  writeConfig(FIXTURE);
+});
+
+afterAll(() => {
+  if (prevConfig === undefined) delete process.env["COPILOT_MCP_CONFIG"];
+  else process.env["COPILOT_MCP_CONFIG"] = prevConfig;
+  resetConfigCache();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+let responses: Response[];
+const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+  responses = [];
+  globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+    responses.shift() ?? new Response("{}", { status: 200 })) as typeof fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+const jobsOdata = (job: Record<string, unknown>): Response =>
+  new Response(JSON.stringify({ value: [job] }), { status: 200 });
+
+describe("buildFaultedJobIssue", () => {
+  test("returns found:true with no logsError when both the job and logs fetch succeed", async () => {
+    responses.push(jobsOdata({ Id: 1, Key: "job-1", State: "Faulted" }));
+    responses.push(new Response(JSON.stringify({ value: [] }), { status: 200 }));
+    const result = await buildFaultedJobIssue("prod", "job-1");
+    expect(result.found).toBe(true);
+    expect(result).not.toHaveProperty("logsError");
+  });
+
+  test("a transient logs-fetch failure degrades to logsError instead of rejecting the call", async () => {
+    responses.push(jobsOdata({ Id: 1, Key: "job-1", State: "Faulted" }));
+    responses.push(new Response("server error", { status: 500 }));
+    const result = await buildFaultedJobIssue("prod", "job-1");
+    expect(result.found).toBe(true);
+    expect(result.logsError).toBeDefined();
+    expect(result.body).toContain("(no logs)");
   });
 });
