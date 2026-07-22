@@ -74,10 +74,11 @@ export interface QueueItemResult {
 
 export async function buildQueueItem(
   orderUid: string,
-  opts: { profile?: string | null; env: Env }, // env is required — never defaulted (repo invariant)
+  opts: { profile?: string | null; env: Env; automationId?: string | null }, // env is required — never defaulted (repo invariant)
 ): Promise<QueueItemResult> {
   const profile = opts.profile ?? null;
   const env: Env = opts.env;
+  const automationId = opts.automationId?.trim();
   const uipath = getUipath();
   requireQueueFields(uipath);
 
@@ -117,6 +118,12 @@ export async function buildQueueItem(
   if (!token)
     notes.push(
       "WARNING: login returned no token — SpecificContent.token is empty; the bot's BE callbacks will fail.",
+    );
+  if (!automationId)
+    notes.push(
+      "WARNING: no automationId was supplied — SpecificContent.automationId is a placeholder " +
+        "random UUID, not the account's real UiPath automation id. Pass the correct value via " +
+        "the automationId argument before submitting.",
     );
 
   const s = (v: unknown): string => (v == null ? "" : String(v));
@@ -161,7 +168,7 @@ export async function buildQueueItem(
     Treatments: JSON.stringify(cpts.flatMap((c) => c.treatments ?? [])),
     Units: JSON.stringify(cpts.map((c) => String(c.units ?? ""))),
     appointmentDate: toMDY(o.appointmentDate),
-    automationId: randomUUID(),
+    automationId: automationId || randomUUID(),
     callbackContext: JSON.stringify({ physicianId, orderUid }),
     isSpeciality: !!(fac.isSpeciality ?? false),
     orderUid,

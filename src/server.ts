@@ -149,7 +149,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.23.1";
+const VERSION = "1.23.2";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -502,13 +502,23 @@ server.registerTool(
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
+      automationId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "The account's real UiPath automation id (from its UiPath asset), e.g. as seen on an " +
+            "existing queue item for the same account. Without it, SpecificContent.automationId " +
+            "falls back to a placeholder random UUID and a warning note is returned.",
+        ),
     },
   },
-  async ({ orderUid, env, profile }) => {
+  async ({ orderUid, env, profile, automationId }) => {
     try {
       const out = await buildQueueItem(orderUid, {
         profile: profile ?? null,
         env,
+        automationId: automationId ?? null,
       });
       return ok(out);
     } catch (e) {
