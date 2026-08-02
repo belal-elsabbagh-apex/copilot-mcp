@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { decodeJwtId, splitName, toMDY } from "./queue-item.js";
+import { decodeJwtId, resolveAutomationId, splitName, toMDY } from "./queue-item.js";
 
 describe("toMDY", () => {
   test("zero-pads US M/D/YYYY", () => {
@@ -26,6 +26,21 @@ describe("splitName", () => {
   });
   test("handles undefined", () => {
     expect(splitName(undefined)).toEqual({ last: "", first: "" });
+  });
+});
+
+describe("resolveAutomationId", () => {
+  test("an explicit automationId always wins over the account table", () => {
+    expect(resolveAutomationId("explicit-id", "kafri")).toBe("explicit-id");
+  });
+  test("resolves from a known account (profile), case-insensitively", () => {
+    expect(resolveAutomationId(undefined, "kafri")).toBe("c741d791-3e3b-4102-b95c-f94549949c9a");
+    expect(resolveAutomationId(undefined, "SCLC")).toBe("85619cc6-5e25-4219-ad12-fc9877aaf841");
+  });
+  test("returns undefined for an unknown/missing account and no explicit id", () => {
+    expect(resolveAutomationId(undefined, "unknown-account")).toBeUndefined();
+    expect(resolveAutomationId(undefined, null)).toBeUndefined();
+    expect(resolveAutomationId("", null)).toBeUndefined();
   });
 });
 

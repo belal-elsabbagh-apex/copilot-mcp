@@ -14,6 +14,7 @@ import {
   makeClient,
   toMDY as toMDYStrict,
 } from "../copilot/copilot-client.js";
+import { ACCOUNT_AUTOMATION_IDS } from "../mcp/reference.js";
 import { prop, stringProp } from "../shared/util.js";
 import { guardQueueItemSafety } from "./safety.js";
 
@@ -53,6 +54,16 @@ export function splitName(full: string | undefined): { last: string; first: stri
   return { last, first };
 }
 
+// An explicit automationId always wins; otherwise resolve it from `profile` (the account name
+// from config, e.g. "kafri"/"sclc"/"ossm") against the known account table, matched
+// case-insensitively. Returns undefined when neither source has one.
+export function resolveAutomationId(
+  explicit: string | null | undefined,
+  profile: string | null | undefined,
+): string | undefined {
+  return explicit?.trim() || ACCOUNT_AUTOMATION_IDS[(profile ?? "").toUpperCase()];
+}
+
 // Require the queue-build-specific UiPath fields (only needed by this tool).
 function requireQueueFields(
   u: UipathConfig,
@@ -78,7 +89,7 @@ export async function buildQueueItem(
 ): Promise<QueueItemResult> {
   const profile = opts.profile ?? null;
   const env: Env = opts.env;
-  const automationId = opts.automationId?.trim();
+  const automationId = resolveAutomationId(opts.automationId, profile);
   const uipath = getUipath();
   requireQueueFields(uipath);
 
@@ -121,9 +132,9 @@ export async function buildQueueItem(
     );
   if (!automationId)
     notes.push(
-      "WARNING: no automationId was supplied — SpecificContent.automationId is a placeholder " +
-        "random UUID, not the account's real UiPath automation id. Pass the correct value via " +
-        "the automationId argument before submitting.",
+      `WARNING: no automationId was supplied and none is known for account '${profile ?? "(none)"}' ` +
+        "— SpecificContent.automationId is a placeholder random UUID, not the account's real " +
+        "UiPath automation id. Pass the correct value via the automationId argument before submitting.",
     );
 
   const s = (v: unknown): string => (v == null ? "" : String(v));

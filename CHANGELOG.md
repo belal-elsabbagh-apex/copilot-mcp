@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] - 2026-08-02
+
+### Added
+
+- **New `copilot://reference/account-automation-ids` resource**: real UiPath
+  `automationId` values per account (`KAFRI`, `SCLC`, `OSSM`), confirmed by sampling a
+  successful queue item's `SpecificContent` for every portal with a submit queue
+  configured. Accounts with no successful job yet (AETNA, CIGNA, IEHP, ALIGNMENT, IHH)
+  are absent rather than guessed.
+
+### Changed
+
+- **`build_queue_item` now resolves `SpecificContent.automationId` from `profile`**
+  against that new account table when the caller doesn't pass one explicitly, instead
+  of always falling back to a random UUID. An explicitly-supplied `automationId` still
+  wins; the random-UUID-plus-warning fallback now only applies to accounts not yet in
+  the table.
+
 ## [1.23.2] - 2026-07-22
 
 ### Fixed

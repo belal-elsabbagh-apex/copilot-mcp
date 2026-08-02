@@ -73,6 +73,7 @@ import { formatMcpIssue, toolError } from "./mcp/feedback.js";
 import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
 import { registerPrompts } from "./mcp/prompts.js";
 import {
+  ACCOUNT_AUTOMATION_IDS,
   CONFIG_GUIDE,
   ORDER_LIFECYCLE,
   PORTALS,
@@ -149,7 +150,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.23.2";
+const VERSION = "1.24.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -507,9 +508,10 @@ server.registerTool(
         .min(1)
         .optional()
         .describe(
-          "The account's real UiPath automation id (from its UiPath asset), e.g. as seen on an " +
-            "existing queue item for the same account. Without it, SpecificContent.automationId " +
-            "falls back to a placeholder random UUID and a warning note is returned.",
+          "The account's real UiPath automation id (from its UiPath asset). Usually unnecessary — " +
+            "when omitted, it's resolved from `profile` against the known account table; only " +
+            "needed to override that or for an account not yet in the table (falls back to a " +
+            "placeholder random UUID + warning note in that case).",
         ),
     },
   },
@@ -673,6 +675,13 @@ jsonResource(
   "Portal registry",
   "Auth-submit portals: queue name -> queue def ids, account, platform family, build artifact, volume.",
   PORTALS,
+);
+jsonResource(
+  "account-automation-ids",
+  "copilot://reference/account-automation-ids",
+  "Account automation ids",
+  "Real UiPath automation ids per account (build_queue_item's automationId arg), confirmed from a successful queue item's SpecificContent. Accounts with no successful job yet are absent, not guessed.",
+  ACCOUNT_AUTOMATION_IDS,
 );
 jsonResource(
   "uipath-folders",

@@ -344,6 +344,18 @@ export const PORTALS: PortalEntry[] = [
   },
 ];
 
+// Real UiPath automation ids per account, confirmed from SpecificContent.automationId on a
+// successful queue item for each. Portals and accounts are many-to-many (a portal is a payer's
+// queue any provider group can submit through), so this is keyed by account, not by portal —
+// do not conflate with PortalEntry.account, which is a separate, approximate per-portal field.
+// Accounts with no confirmed automationId yet (no successful job to sample) are omitted rather
+// than guessed.
+export const ACCOUNT_AUTOMATION_IDS: Record<string, string> = {
+  KAFRI: "c741d791-3e3b-4102-b95c-f94549949c9a",
+  SCLC: "85619cc6-5e25-4219-ad12-fc9877aaf841",
+  OSSM: "21a5ab32-817c-4a4a-95a0-bff16605ca6b",
+};
+
 // Strip the trailing " auth (sync|submit) queue" suffix from a QueueDefinitions.Name
 // (e.g. "SCAN auth submit queue" -> "SCAN", "MOLINA auth sync queue" -> "MOLINA").
 const QUEUE_NAME_SUFFIX_RE = /\s+auth\s+(?:sync|submit)\s+queue\s*$/i;
