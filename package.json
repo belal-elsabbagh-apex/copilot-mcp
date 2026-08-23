@@ -1,6 +1,6 @@
 {
   "name": "@belal-elsabbagh-apex/copilot-mcp",
-  "version": "1.25.0",
+  "version": "1.25.1",
   "type": "module",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
   "author": "Belal Elsabbagh",
@@ -40,10 +40,10 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.0",
     "@types/node": "^22.20.0",
     "lefthook": "^2.1.9",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "zod": "^3.25.76"
   },
   "publishConfig": {

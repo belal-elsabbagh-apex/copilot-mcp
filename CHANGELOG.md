@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.1] - 2026-08-23
+
+No runtime changes — v1.25.0's code ships as-is. This release exists because
+v1.25.0's publish workflow never produced a package: CI and Publish both died with a
+4 GB heap OOM in `tsc --noEmit`.
+
+### Fixed
+
+- **`bun.lock` is now committed** (it was in `.gitignore`). CI therefore had no
+  lockfile at all, so `bun install --frozen-lockfile` failed on every run and the
+  `|| bun install` fallback silently re-resolved every `^` range to whatever was
+  newest on npm. `@types/bun@1.4.0` landed that way — enough extra type surface to
+  push `tsc` past the runner's 4 GB heap, while local installs stayed on the 1.3.14
+  the lockfile had always intended. Local and CI now install the same tree.
+- **The `|| bun install` fallback is gone** from all three workflows. A lockfile
+  mismatch is now a loud failure instead of a silent re-resolve.
+
+### Changed
+
+- **TypeScript 5.9 -> 7.0.2** (the native compiler). Typecheck went from ~17 s and a
+  peak near the 4 GB ceiling to ~2.8 s, so the OOM is fixed at the root rather than by
+  raising a memory limit.
+- **bun pinned to 1.4** in CI/publish/release (`bun-version: latest` was the other half
+  of the drift) and `@types/bun` moved to `^1.4.0` to match.
+
 ## [1.25.0] - 2026-08-23
 
 ### Added
