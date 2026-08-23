@@ -35,3 +35,17 @@ jobs:
 
       - name: Test
         run: bun test
+
+      # The published bin is executed by MCP hosts under *node* via npx, never bun,
+      # so bun-only CI never exercised the shipped artifact. Pinned to the
+      # engines.node floor (24) because that is the version that can actually break.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Smoke-test the built bundle under node
+        run: |
+          out=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | timeout 20 node dist/server.js)
+          echo "$out" | head -c 400
+          echo "$out" | grep -q '"serverInfo"'

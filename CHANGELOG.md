@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.0] - 2026-08-23
+
+Follow-on to v1.25.1's TypeScript 7 migration: the `tsconfig.json` is now aligned with
+Bun's TS7 template, and the node floor moves up to match what the toolchain actually
+targets.
+
+### Changed
+
+- **BREAKING: `engines.node` is now `>=24`** (was `>=18`). The published bin is executed
+  by MCP hosts under *node* via `npx`, so this is consumer-visible: a host still on node
+  18/20/22 will now fail at install with `EBADENGINE`. The floor was raised rather than
+  removed because dropping `engines.node` would not remove the constraint, only hide it —
+  turning a clean install error into a runtime `SyntaxError`. `engines.bun` moves to
+  `>=1.4.0`, matching the version all three workflows already pin.
+- **`tsconfig.json` adopted Bun's TS7 bundler-mode template** — `module: "Preserve"`,
+  `moduleResolution: "bundler"`, `moduleDetection: "force"`, `types: ["bun"]`, and
+  `lib`/`target` at `ESNext`. `esModuleInterop` and `isolatedModules` were dropped as
+  implied by `module: "Preserve"`, and `forceConsistentCasingInFileNames` as on by default.
+- **`@types/node` 22 -> 26.** `bun-types` only requires `*`, so the direct `^22.20.0`
+  devDependency was what pinned node typings two majors behind the runtime, leaving node
+  24/26 APIs untyped. `bun install` could not correct it on its own — `bun.lock` kept
+  22.20.0 because `*` was satisfied.
+
+### Fixed
+
+- **`include: ["src/**/*.ts"]` restored.** Without it, `allowJs` pulled the 0.5 MB minified
+  `dist/server.js` into the program, so every typecheck parsed its own build output.
+- **Strictness flags restored** that the generic template does not carry:
+  `exactOptionalPropertyTypes` (documented in CLAUDE.md as part of this project's
+  contract), `noImplicitReturns`, `allowUnreachableCode: false`, and
+  `allowUnusedLabels: false`. All four pass with zero errors, so their absence was a
+  silent loosening rather than a deliberate one. Dead `jsx`/`allowJs` options dropped —
+  there is no JSX and no `.js` in `src/`.
+
+### Added
+
+- **CI now runs the built bundle under node**, pinned to the `engines.node` floor: a
+  `setup-node` step plus a JSON-RPC `initialize` smoke check against `dist/server.js`.
+  All three workflows were bun-only, so the shipped artifact — the thing `npx` actually
+  executes — had never once been run by CI on the runtime it targets.
+
 ## [1.25.1] - 2026-08-23
 
 No runtime changes — v1.25.0's code ships as-is. This release exists because
