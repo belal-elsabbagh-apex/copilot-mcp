@@ -70,7 +70,13 @@ import {
 } from "./copilot/settings/index.js";
 import { findStuckOrders } from "./copilot/sweep.js";
 import { formatMcpIssue, toolError } from "./mcp/feedback.js";
-import { mcpLog, registerLogging, reportProgress } from "./mcp/notify.js";
+import {
+  mcpLog,
+  registerLogging,
+  reportProgress,
+  stepProgress,
+  withHeartbeat,
+} from "./mcp/notify.js";
 import { registerPrompts } from "./mcp/prompts.js";
 import {
   ACCOUNT_AUTOMATION_IDS,
@@ -150,7 +156,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.24.0";
+const VERSION = "1.25.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -240,7 +246,7 @@ server.registerTool(
         .describe("Pages of 50 recent orders to scan"),
     },
   },
-  async ({ profile, limit, scanPages }) => {
+  async ({ profile, limit, scanPages }, extra) => {
     try {
       const creds = resolveCreds(profile ?? null);
       const prod = makeClient(creds.prod.be, "prod");
@@ -261,6 +267,7 @@ server.registerTool(
           if (c) candidates.push(c);
           if (candidates.length >= limit) break;
         }
+        reportProgress(extra, page + 1, scanPages, `page ${page + 1}: ${candidates.length} found`);
       }
       return ok({ profile: profile ?? "(default)", scanned, found: candidates.length, candidates });
     } catch (e) {
@@ -515,13 +522,17 @@ server.registerTool(
         ),
     },
   },
-  async ({ orderUid, env, profile, automationId }) => {
+  async ({ orderUid, env, profile, automationId }, extra) => {
     try {
-      const out = await buildQueueItem(orderUid, {
-        profile: profile ?? null,
-        env,
-        automationId: automationId ?? null,
-      });
+      const out = await withHeartbeat(
+        extra,
+        "building queue item",
+        buildQueueItem(orderUid, {
+          profile: profile ?? null,
+          env,
+          automationId: automationId ?? null,
+        }),
+      );
       return ok(out);
     } catch (e) {
       return toolError("build_queue_item", e, VERSION);
@@ -617,7 +628,11 @@ server.registerTool(
   ) => {
     try {
       mcpLog(server, "debug", `analyzing order ${orderUid}`, { env });
-      reportProgress(extra, 0, 2, "tracing UiPath job");
+      // Real per-job progress (each job = up to 3 Orchestrator calls), with the optional
+      // order-state enrichment counted as one extra step so the total holds for the run.
+      const extraSteps = enrichOrderState ? 1 : 0;
+      let jobsDone = 0;
+      let jobTotal = 0;
       const out: Record<string, unknown> = {
         ...(await analyzeOrderExecution(orderUid, {
           env,
@@ -626,9 +641,13 @@ server.registerTool(
           top,
           includeLogs,
           includeVideo,
+          onProgress: (done, total, label) => {
+            jobsDone = done;
+            jobTotal = total;
+            reportProgress(extra, done, total + extraSteps, label);
+          },
         })),
       };
-      reportProgress(extra, 1, 2, enrichOrderState ? "enriching order state" : "done");
       if (enrichOrderState) {
         try {
           const envCreds = resolveCreds(profile ?? null)[env];
@@ -638,8 +657,8 @@ server.registerTool(
         } catch (e) {
           out["currentOrderState"] = { error: toMessage(e) };
         }
+        reportProgress(extra, jobsDone + 1, jobTotal + 1, "enriched order state");
       }
-      reportProgress(extra, 2, 2, "done");
       return ok(out);
     } catch (e) {
       return toolError("analyze_order_execution", e, VERSION);
@@ -806,7 +825,7 @@ server.registerTool(
         .describe("Numeric folder id (OrganizationUnitId) override when no url is given"),
     },
   },
-  async ({ url, txnId, env, folderId }) => {
+  async ({ url, txnId, env, folderId }, extra) => {
     try {
       if (!url && !env)
         throw new Error("env is required when pulling by txnId (no url to derive it from)");
@@ -818,7 +837,7 @@ server.registerTool(
             env: env as "prod" | "pre_prod",
             folderId: folderId ?? "",
           } as const);
-      return ok(await pullQueueItem(args));
+      return ok(await withHeartbeat(extra, "Orchestrator", pullQueueItem(args)));
     } catch (e) {
       return toolError("pull_queue_item", e, VERSION);
     }
@@ -866,17 +885,21 @@ server.registerTool(
       top: z.number().int().min(1).max(200).optional().default(50).describe("Max items to return"),
     },
   },
-  async ({ queueName, queueDefId, queueKind, env, status, top }) => {
+  async ({ queueName, queueDefId, queueKind, env, status, top }, extra) => {
     try {
       return ok(
-        await listQueue({
-          queueName: queueName ?? "",
-          queueDefId: queueDefId ?? 0,
-          queueKind: queueKind ?? "submit",
-          env,
-          status: status ?? "",
-          top,
-        }),
+        await withHeartbeat(
+          extra,
+          "Orchestrator",
+          listQueue({
+            queueName: queueName ?? "",
+            queueDefId: queueDefId ?? 0,
+            queueKind: queueKind ?? "submit",
+            env,
+            status: status ?? "",
+            top,
+          }),
+        ),
       );
     } catch (e) {
       return toolError("list_queue_items", e, VERSION);
@@ -915,10 +938,14 @@ server.registerTool(
         .describe("Substring filter on the process (ReleaseName), e.g. 'OPTUM'"),
     },
   },
-  async ({ env, folder, since, top, processName }) => {
+  async ({ env, folder, since, top, processName }, extra) => {
     try {
       const resolved = resolveFolder(env, folder);
-      const jobs = await listRecentJobs(since, top, resolved, processName);
+      const jobs = await withHeartbeat(
+        extra,
+        "Orchestrator",
+        listRecentJobs(since, top, resolved, processName),
+      );
       return ok({
         env,
         folder: resolved,
@@ -1033,18 +1060,21 @@ server.registerTool(
         ),
     },
   },
-  async ({
-    jobKey,
-    jobKeys,
-    env,
-    folder,
-    includeVideo,
-    minLevel,
-    contains,
-    onlyFailures,
-    tail,
-    fullMessages,
-  }) => {
+  async (
+    {
+      jobKey,
+      jobKeys,
+      env,
+      folder,
+      includeVideo,
+      minLevel,
+      contains,
+      onlyFailures,
+      tail,
+      fullMessages,
+    },
+    extra,
+  ) => {
     try {
       if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
       if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
@@ -1056,7 +1086,7 @@ server.registerTool(
         ...(tail !== undefined ? { tail } : {}),
       };
       const keys = jobKeys ?? [jobKey ?? ""];
-      const byKey = await fetchJobLogsForKeys(keys, resolved, filter);
+      const byKey = await fetchJobLogsForKeys(keys, resolved, filter, stepProgress(extra));
       const jobs = await Promise.all(
         keys.map(async (key) => {
           const result: JobLogResult = byKey[key] ?? { logs: [], totalMatching: null };
@@ -1356,36 +1386,49 @@ server.registerTool(
         ),
     },
   },
-  async ({ env, jobKey, jobKeys, folder, includeLogDigest }) => {
+  async ({ env, jobKey, jobKeys, folder, includeLogDigest }, extra) => {
     try {
       if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
       if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
       const resolved = resolveFolder(env, folder);
       const keys = jobKeys ?? [jobKey ?? ""];
       const byKey = await fetchJobsForKeys(keys, resolved);
+      // With includeLogDigest a 25-key batch is 50 Orchestrator calls — count them off
+      // as each key finishes rather than going quiet for the whole batch.
+      let keysDone = 0;
       const results = await Promise.all(
         keys.map(async (key): Promise<JobKeyResult> => {
-          const lookup: JobLookup = byKey[key] ?? { job: null };
-          // A single explicit jobKey lookup fails like any other tool error; a
-          // jobKeys batch keeps going and attaches the failure to just this key.
-          if (lookup.error && !jobKeys) throw lookup.error;
-          if (lookup.error) return { key, found: false, error: toMessage(lookup.error) };
-          if (!lookup.job) return { key, found: false };
-          let logs: JobLog[] = [];
-          let logDigestError: string | undefined;
-          if (includeLogDigest) {
-            try {
-              logs = await fetchJobLogs(key, resolved);
-            } catch (e) {
-              logDigestError = toMessage(e);
+          try {
+            const lookup: JobLookup = byKey[key] ?? { job: null };
+            // A single explicit jobKey lookup fails like any other tool error; a
+            // jobKeys batch keeps going and attaches the failure to just this key.
+            if (lookup.error && !jobKeys) throw lookup.error;
+            if (lookup.error) return { key, found: false, error: toMessage(lookup.error) };
+            if (!lookup.job) return { key, found: false };
+            let logs: JobLog[] = [];
+            let logDigestError: string | undefined;
+            if (includeLogDigest) {
+              try {
+                logs = await fetchJobLogs(key, resolved);
+              } catch (e) {
+                logDigestError = toMessage(e);
+              }
             }
+            return {
+              key,
+              found: true,
+              job: shapeJobDetail(lookup.job, logs, includeLogDigest),
+              ...(logDigestError ? { logDigestError } : {}),
+            };
+          } finally {
+            keysDone++;
+            reportProgress(
+              extra,
+              keysDone,
+              keys.length,
+              `diagnosed ${keysDone}/${keys.length} job(s)`,
+            );
           }
-          return {
-            key,
-            found: true,
-            job: shapeJobDetail(lookup.job, logs, includeLogDigest),
-            ...(logDigestError ? { logDigestError } : {}),
-          };
         }),
       );
       const base = jobDeepLinkBase();
@@ -1661,7 +1704,10 @@ server.registerTool(
         .describe("Max jobs to consider per order in the cross-check"),
     },
   },
-  async ({ env, profile, scanPages, statuses, olderThanHours, crossCheckUipath, since, top }) => {
+  async (
+    { env, profile, scanPages, statuses, olderThanHours, crossCheckUipath, since, top },
+    extra,
+  ) => {
     try {
       return ok(
         await findStuckOrders({
@@ -1673,6 +1719,7 @@ server.registerTool(
           crossCheckUipath,
           since,
           top,
+          onProgress: stepProgress(extra),
         }),
       );
     } catch (e) {
@@ -1729,7 +1776,7 @@ server.registerTool(
         .describe("Include sections that are identical across envs (default: only differences)"),
     },
   },
-  async ({ profile, tags, sections, emr, includeUnchanged }) => {
+  async ({ profile, tags, sections, emr, includeUnchanged }, extra) => {
     try {
       return ok(
         await diffSettings({
@@ -1738,6 +1785,7 @@ server.registerTool(
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           includeUnchanged,
+          onProgress: stepProgress(extra),
         }),
       );
     } catch (e) {
@@ -1840,7 +1888,7 @@ server.registerTool(
         ),
     },
   },
-  async ({ env, profile, tags, sections, emr, normalized }) => {
+  async ({ env, profile, tags, sections, emr, normalized }, extra) => {
     try {
       return ok(
         await getSettings({
@@ -1850,6 +1898,7 @@ server.registerTool(
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           normalized,
+          onProgress: stepProgress(extra),
         }),
       );
     } catch (e) {
@@ -1908,7 +1957,7 @@ server.registerTool(
         ),
     },
   },
-  async ({ profile, tags, sections, emr, includeBodies }) => {
+  async ({ profile, tags, sections, emr, includeBodies }, extra) => {
     try {
       return ok(
         await planSettingsSyncOp({
@@ -1917,6 +1966,7 @@ server.registerTool(
           ...(sections ? { sections } : {}),
           ...(emr ? { emr } : {}),
           includeBodies,
+          onProgress: stepProgress(extra),
         }),
       );
     } catch (e) {
@@ -1973,7 +2023,7 @@ server.registerTool(
         .describe("Explicitly apply EVERY planned action (mutually exclusive with actionIds)"),
     },
   },
-  async ({ profile, tags, sections, emr, actionIds, all }) => {
+  async ({ profile, tags, sections, emr, actionIds, all }, extra) => {
     try {
       return ok(
         await applySettingsSync({
@@ -1985,6 +2035,7 @@ server.registerTool(
           ...(all !== undefined ? { all } : {}),
           // Audit trail: surface every live write to the client log.
           onWrite: (message, data) => mcpLog(server, "warning", message, data),
+          onProgress: stepProgress(extra),
         }),
       );
     } catch (e) {
@@ -2203,11 +2254,15 @@ server.registerTool(
         .describe("Credential profile / account name from config (required)"),
     },
   },
-  async ({ env, profile }) => {
+  async ({ env, profile }, extra) => {
     try {
       const creds = resolveCreds(profile ?? null)[env];
       const client = makeClient(creds.be, env);
-      const token = await loginToken(client, creds.email, creds.password);
+      const token = await withHeartbeat(
+        extra,
+        `${env} login`,
+        loginToken(client, creds.email, creds.password),
+      );
       return ok({ env, profile, token });
     } catch (e) {
       return toolError("get_login_token", e, VERSION);
@@ -2298,9 +2353,9 @@ server.registerTool(
         .describe("Credential profile / account name from config to check (required)"),
     },
   },
-  async ({ profile }) => {
+  async ({ profile }, extra) => {
     try {
-      return ok(await runDoctor({ profile: profile ?? null }));
+      return ok(await runDoctor({ profile: profile ?? null, onProgress: stepProgress(extra) }));
     } catch (e) {
       return toolError("doctor", e, VERSION);
     }

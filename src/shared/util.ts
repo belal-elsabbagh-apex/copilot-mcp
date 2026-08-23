@@ -49,3 +49,9 @@ export function chunk<T>(items: T[], size: number): T[][] {
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
+
+// Progress callback for the tools whose slowness is many small steps rather than one
+// long call (settings section crawls, sync actions, page sweeps, per-job fetches).
+// Optional at every call site — a domain function must work with no reporter wired up.
+// server.ts forwards it to reportProgress(); everything else can ignore it.
+export type StepProgress = (done: number, total: number, label: string) => void;

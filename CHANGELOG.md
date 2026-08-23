@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] - 2026-08-23
+
+### Added
+
+- **Progress reporting on the long-running and many-step tools.** Only two tools
+  emitted `notifications/progress` before this (`create_preprod_order`, plus a
+  placeholder 0/2 on `analyze_order_execution`); a 21-section settings crawl or a
+  20-action sync ran silently for minutes. Two mechanisms, picked per tool by what it
+  actually spends its time on:
+  - **Step counters** where there is a real denominator — an optional
+    `onProgress?: StepProgress` on the domain function's opts, forwarded by
+    `server.ts`: `diff_settings` / `get_settings` (per catalog section, in completion
+    order, reported even for a section that errored), `plan_settings_sync` (per syncer
+    domain crawled), `apply_settings_sync` (per executed action),
+    `find_stuck_orders` (per scanned page, then per UiPath cross-check batch),
+    `get_job_logs` and `get_job` (per job key), `doctor` (per probe as it settles), and
+    `find_clone_candidates` (per page).
+  - **`withHeartbeat()`** for the tools that are slow because of one long round-trip
+    rather than many steps — `pull_queue_item`, `list_queue_items`, `list_jobs`,
+    `get_login_token`, `build_queue_item`. Reports elapsed time, not invented steps.
+    No timer is created at all when the client didn't send a `progressToken`, and it
+    is unref'd and always cleared, so a pending tick can neither outlive the request
+    nor hold the process open.
+
+### Changed
+
+- **`analyze_order_execution` reports real per-job progress** instead of the fixed
+  0/2 → 1/2 → 2/2 placeholder: one step per confirmed job analyzed (each job being up
+  to three Orchestrator calls), with the optional order-state enrichment counted as one
+  extra step so the total holds for the whole run.
+
 ## [1.24.0] - 2026-08-02
 
 ### Added

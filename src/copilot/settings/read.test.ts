@@ -87,6 +87,21 @@ describe("getSettings", () => {
     expect(out.sections[2]?.error).toContain("500");
     expect(out.sections[2]?.data).toBeUndefined();
   });
+
+  test("reports progress once per section, including the one that errored", async () => {
+    const steps: [number, number, string][] = [];
+    await getSettings({
+      env: "prod",
+      profile: null,
+      sections: SECTIONS,
+      onProgress: (done, total, label) => steps.push([done, total, label]),
+    });
+    expect(steps.map(([done, total]) => `${done}/${total}`)).toEqual(["1/3", "2/3", "3/3"]);
+    // Labels name the section that just finished, in completion order (not catalog order).
+    expect(steps.map(([, , label]) => label).sort()).toEqual(
+      ["Location groups", "Location regions", "Locations"].sort(),
+    );
+  });
 });
 
 describe("diffSettings", () => {
@@ -99,5 +114,15 @@ describe("diffSettings", () => {
     expect(out.sections[2]?.equal).toBe(false); // location-regions: 500 -> error, not equal
     expect(out.sections[2]?.error).toContain("500");
     expect(out.sectionsCompared).toBe(3);
+  });
+
+  test("reports progress once per section compared", async () => {
+    const steps: string[] = [];
+    await diffSettings({
+      profile: null,
+      sections: SECTIONS,
+      onProgress: (done, total) => steps.push(`${done}/${total}`),
+    });
+    expect(steps).toEqual(["1/3", "2/3", "3/3"]);
   });
 });

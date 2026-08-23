@@ -1,7 +1,7 @@
 // Read-only orchestration: diff_settings (cross-env) and get_settings (single-env).
 
 import { resolveCreds } from "../../config/config.js";
-import { prop } from "../../shared/util.js";
+import { prop, type StepProgress } from "../../shared/util.js";
 import { type HttpClient, login, makeClient } from "../copilot-client.js";
 import { selectSections } from "./catalog.js";
 import { diffList, diffObjects, normalizeSectionValue, stripNoise } from "./diff-engine.js";
@@ -50,6 +50,16 @@ function diffSection(
   return { kind: "list", equal, ...ld };
 }
 
+// Section fetches run concurrently, so "which step are we on" is a completion count,
+// not an index. Reported from a finally so an errored section still advances the bar.
+function sectionCounter(total: number, onProgress?: StepProgress): (label: string) => void {
+  let done = 0;
+  return (label) => {
+    done++;
+    onProgress?.(done, total, label);
+  };
+}
+
 // Log into both envs for the account, fetch every selected settings section, and
 // return the normalized prod<->pre-prod diff.
 export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettingsResult> {
@@ -68,6 +78,9 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
   // run them all concurrently instead of paying each section's round-trip in turn.
   // Order is preserved (Promise.all resolves in input order) and one section's
   // failure never blocks the rest (caught per-section, same as the sequential form).
+  // A section crawl is the classic many-small-steps tool: report each one as it lands
+  // (completion order, not catalog order) so a 20-section diff isn't a silent minute.
+  const done = sectionCounter(chosen.length, opts.onProgress);
   const results: SectionResult[] = await Promise.all(
     chosen.map(async (section): Promise<SectionResult> => {
       try {
@@ -84,6 +97,8 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
           equal: false,
           error: toMessage(e),
         };
+      } finally {
+        done(section.label);
       }
     }),
   );
@@ -111,6 +126,7 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
   await login(client, creds.email, creds.password);
 
   // Same independence as diffSettings — fetch every section concurrently.
+  const done = sectionCounter(chosen.length, opts.onProgress);
   const sections: GetSettingsSection[] = await Promise.all(
     chosen.map(async (section): Promise<GetSettingsSection> => {
       const head = { key: section.key, label: section.label, tags: [...section.tags] };
@@ -125,6 +141,8 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
         };
       } catch (e) {
         return { ...head, kind: section.kind, error: toMessage(e) };
+      } finally {
+        done(section.label);
       }
     }),
   );

@@ -2,7 +2,7 @@
 // diagnose the run. Ported from copilot-doctor src/jobMatcher.ts, extended with a
 // recent-scan fallback for when Orchestrator rejects the OutputArguments filter.
 
-import { isRecord, msBetween } from "../shared/util.js";
+import { isRecord, msBetween, type StepProgress } from "../shared/util.js";
 import {
   digestLogs,
   extractFault,
@@ -69,6 +69,7 @@ export interface AnalyzeOptions {
   top?: number | undefined;
   includeLogs?: boolean | undefined;
   includeVideo?: boolean | undefined; // default false — the video fetch is an extra round-trip
+  onProgress?: StepProgress | undefined;
 }
 
 // out_Result (flat schema) gives an explicit verdict; otherwise infer from job
@@ -215,6 +216,7 @@ export async function analyzeOrderExecution(
     top = 50,
     includeLogs = true,
     includeVideo = false,
+    onProgress,
   }: AnalyzeOptions = {},
 ): Promise<AnalyzeResult> {
   const scope = resolveFolder(env, folder);
@@ -236,8 +238,12 @@ export async function analyzeOrderExecution(
 
   const confirmed = await confirmJobsForOrder(acq.candidates, orderUid, scope);
   const jobs: JobAnalysis[] = [];
-  for (const job of confirmed)
+  // One job's analysis is up to three sequential Orchestrator calls (details, logs,
+  // video) — with includeLogs/includeVideo on, a multi-retry order is a long wait.
+  for (const [i, job] of confirmed.entries()) {
     jobs.push(await toJobAnalysis(job, scope, includeLogs, includeVideo));
+    onProgress?.(i + 1, confirmed.length, `analyzed job ${job.Key ?? "(no key)"}`);
+  }
 
   // Newest first (search ordered desc, but confirm batches can reorder).
   jobs.sort((a, b) => (b.creationTime ?? "").localeCompare(a.creationTime ?? ""));

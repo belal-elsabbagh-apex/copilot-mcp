@@ -3,6 +3,7 @@
 // public tool entry points (diff_settings / get_settings / plan_settings_sync /
 // apply_settings_sync / list_setting_sections).
 
+import type { StepProgress } from "../../shared/util.js";
 import type { HttpClient } from "../copilot-client.js";
 
 // ---- catalog entry ---------------------------------------------------------
@@ -87,6 +88,7 @@ export interface DiffSettingsOpts {
   tags?: string[];
   emr?: string;
   includeUnchanged?: boolean;
+  onProgress?: StepProgress;
 }
 
 export interface DiffSettingsResult {
@@ -107,6 +109,7 @@ export interface GetSettingsOpts {
   tags?: string[];
   emr?: string;
   normalized?: boolean; // default true = stripped like diff_settings; false = raw
+  onProgress?: StepProgress;
 }
 
 export interface GetSettingsSection {
@@ -186,6 +189,7 @@ export interface PayerLinkFinding {
 // ---- plan_settings_sync ----------------------------------------------------------
 
 export interface PlanSettingsSyncOpts {
+  onProgress?: StepProgress;
   profile?: string | null;
   sections?: string[];
   tags?: string[];
@@ -228,6 +232,7 @@ export interface ApplySettingsSyncOpts extends ApplyFilter {
   emr?: string;
   // Optional audit hook; the server wires this to mcpLog(warning) so every live write is logged.
   onWrite?: (message: string, data?: Record<string, unknown>) => void;
+  onProgress?: StepProgress;
 }
 
 export interface ApplySettingsSyncResult {

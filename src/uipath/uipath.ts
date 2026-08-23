@@ -6,7 +6,7 @@ import { type Env, getUipath } from "../config/config.js";
 import { isFailureLog } from "../copilot/output-analysis.js";
 import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
-import { chunk, isRecord, safeJsonParse } from "../shared/util.js";
+import { chunk, isRecord, type StepProgress, safeJsonParse } from "../shared/util.js";
 import { invalidateBearerToken, resolveBearerToken } from "./auth.js";
 import { isNotFound, UiPathApiError } from "./errors.js";
 
@@ -416,8 +416,10 @@ export async function fetchJobLogsForKeys(
   jobKeys: string[],
   folder?: string,
   filter: JobLogFilter = {},
+  onProgress?: StepProgress,
 ): Promise<Record<string, JobLogResult>> {
   const out: Record<string, JobLogResult> = {};
+  let fetched = 0;
   for (const batch of chunk(jobKeys, 10)) {
     const results = await Promise.allSettled(
       batch.map((key) => fetchFilteredJobLogs(key, folder, filter)),
@@ -427,6 +429,8 @@ export async function fetchJobLogsForKeys(
       out[key] =
         r?.status === "fulfilled" ? r.value : { logs: [], totalMatching: null, error: r?.reason };
     });
+    fetched += batch.length;
+    onProgress?.(fetched, jobKeys.length, `fetched logs for ${fetched} job(s)`);
   }
   return out;
 }

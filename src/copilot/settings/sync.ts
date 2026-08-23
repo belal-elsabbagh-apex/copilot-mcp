@@ -12,6 +12,7 @@
 // this file needs no changes.
 
 import { resolveCreds } from "../../config/config.js";
+import type { StepProgress } from "../../shared/util.js";
 import { assertPreProdClient, type HttpClient, login, makeClient } from "../copilot-client.js";
 import { selectSections } from "./catalog.js";
 import {
@@ -51,6 +52,7 @@ async function buildSyncPlan(opts: {
   sections?: string[];
   tags?: string[];
   emr?: string;
+  onProgress?: StepProgress;
 }): Promise<SyncPlanContext> {
   // Validate + resolve the selection up front (unknown tag/section fails fast, no login).
   const chosen = selectSections(opts.sections, opts.tags, opts.emr);
@@ -90,6 +92,9 @@ async function buildSyncPlan(opts: {
   const skipped: SyncSkip[] = [];
   const payerLinkFindings: PayerLinkFinding[] = [];
 
+  // A syncer.plan() is a full cross-env crawl of its domain (minutes for specialities) —
+  // report each one as it lands so a multi-domain plan isn't a silent wait.
+  let planned = 0;
   for (const syncer of syncers.values()) {
     const r = await syncer.plan({
       prod,
@@ -101,6 +106,12 @@ async function buildSyncPlan(opts: {
     actions.push(...r.actions);
     skipped.push(...r.skipped);
     if (r.payerLinkFindings) payerLinkFindings.push(...r.payerLinkFindings);
+    planned++;
+    opts.onProgress?.(
+      planned,
+      syncers.size,
+      `planned ${syncer.domain} (${r.actions.length} action(s))`,
+    );
   }
 
   ctx.actions = assignActionIds(actions);
@@ -145,9 +156,10 @@ export async function applySettingsSync(
   // existing-plus-additions (specialities merge only).
   const executed: ApplySettingsSyncResult["executed"] = [];
   if (selected.length && ctx.pre) assertPreProdClient(ctx.pre, "apply_settings_sync");
-  for (const a of selected) {
+  for (const [i, a] of selected.entries()) {
     if (!ctx.pre) break; // unreachable: actions imply a logged-in pre client
     const r = await ctx.pre.req(a.method, a.path, { json: a.body });
+    opts.onProgress?.(i + 1, selected.length, `${a.op} ${a.itemKind} '${a.itemName}'`);
     const okWrite = r.status < 400;
     opts.onWrite?.(
       `apply_settings_sync ${a.op} ${a.itemKind} '${a.itemName}' (type '${a.typeName}')`,

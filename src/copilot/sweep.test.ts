@@ -48,4 +48,19 @@ describe("crossCheckUipath", () => {
     const maxConcurrent = Math.max(...seenAtCall.map(([n]) => n ?? 0));
     expect(maxConcurrent).toBe(10);
   });
+
+  test("reports progress per completed batch, counting only real candidates", async () => {
+    // 11 with a uid + 1 without: the uid-less one is never queried, so it's not in the total.
+    const stuck = [
+      ...Array.from({ length: 11 }, (_, i) => stuckOrder(`u${i}`)),
+      stuckOrder(undefined),
+    ];
+    const steps: string[] = [];
+    await crossCheckUipath(
+      stuck,
+      async () => [],
+      (done, total) => steps.push(`${done}/${total}`),
+    );
+    expect(steps).toEqual(["10/11", "11/11"]);
+  });
 });

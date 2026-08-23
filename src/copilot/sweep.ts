@@ -4,7 +4,7 @@
 // the Orchestrator search in uipath.ts.
 
 import { type Env, resolveCreds } from "../config/config.js";
-import { chunk } from "../shared/util.js";
+import { chunk, type StepProgress } from "../shared/util.js";
 import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "../uipath/uipath.js";
 import { type BeOrder, filterOrders, login, makeClient, ORDER_MODE } from "./copilot-client.js";
 
@@ -38,6 +38,7 @@ export interface FindStuckArgs {
   crossCheckUipath?: boolean | undefined;
   since?: string | undefined;
   top?: number | undefined;
+  onProgress?: StepProgress | undefined;
 }
 
 export interface FindStuckResult {
@@ -87,6 +88,7 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
   const client = makeClient(creds.be, env);
   await login(client, creds.email, creds.password);
 
+  const onProgress = args.onProgress;
   const stuck: StuckOrder[] = [];
   let scanned = 0;
   for (let page = 0; page < scanPages; page++) {
@@ -111,12 +113,22 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
         ageHours: age,
       });
     }
+    onProgress?.(
+      page + 1,
+      scanPages,
+      `page ${page + 1}: ${scanned} scanned, ${stuck.length} stuck`,
+    );
   }
 
   if (args.crossCheckUipath) {
     const folder = resolveFolder(env);
-    await crossCheckUipath(stuck, (orderUid) =>
-      searchJobsByOrderId(orderUid, args.since, args.top ?? 50, folder),
+    // Offset past the page scan so progress stays monotonic across both phases. The
+    // candidate count isn't known until the scan finishes, so the total grows here —
+    // allowed (total is advisory), and better than reporting the cross-check silently.
+    await crossCheckUipath(
+      stuck,
+      (orderUid) => searchJobsByOrderId(orderUid, args.since, args.top ?? 50, folder),
+      (done, total, label) => onProgress?.(scanPages + done, scanPages + total, label),
     );
   }
 
@@ -130,8 +142,10 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
 export async function crossCheckUipath(
   stuck: StuckOrder[],
   search: (orderUid: string) => Promise<UiPathJob[]>,
+  onProgress?: StepProgress,
 ): Promise<void> {
   const candidates = stuck.filter((s): s is StuckOrder & { orderUid: string } => !!s.orderUid);
+  let checked = 0;
   for (const batch of chunk(candidates, 10)) {
     const results = await Promise.allSettled(batch.map((s) => search(s.orderUid)));
     batch.forEach((s, i) => {
@@ -144,5 +158,7 @@ export async function crossCheckUipath(
               jobCount: 0,
             };
     });
+    checked += batch.length;
+    onProgress?.(checked, candidates.length, `cross-checked ${checked} order(s) against UiPath`);
   }
 }

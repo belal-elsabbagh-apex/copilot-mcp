@@ -5,6 +5,7 @@
 
 import type { Env } from "../config/config.js";
 import { getUipath, resolveCreds } from "../config/config.js";
+import type { StepProgress } from "../shared/util.js";
 import { listRecentJobs, resolveFolder } from "../uipath/uipath.js";
 import { login, makeClient } from "./copilot-client.js";
 
@@ -40,7 +41,10 @@ const ENVS: readonly Env[] = ["prod", "pre_prod"];
 
 // Probe Copilot BE (login) for both envs and UiPath Orchestrator (list 1 job) for both
 // folders. Each check is independent; one failure never aborts the others.
-export async function runDoctor(opts: { profile?: string | null }): Promise<DoctorReport> {
+export async function runDoctor(opts: {
+  profile?: string | null;
+  onProgress?: StepProgress;
+}): Promise<DoctorReport> {
   const account = opts.profile ?? "(default)";
 
   // Config must resolve before anything else; surface that as the single failing check.
@@ -56,13 +60,23 @@ export async function runDoctor(opts: { profile?: string | null }): Promise<Doct
   }
   const uipath = getUipath();
 
+  // Four independent probes, each a login or an Orchestrator round-trip — report them
+  // as they settle (ok or not) rather than sitting silent until the slowest returns.
+  const TOTAL_CHECKS = ENVS.length * 2;
+  let settled = 0;
+  const track = (c: DoctorCheck): DoctorCheck => {
+    settled++;
+    opts.onProgress?.(settled, TOTAL_CHECKS, `${c.name}: ${c.ok ? "ok" : "failed"}`);
+    return c;
+  };
+
   const checks = await Promise.all([
     ...ENVS.map((env) =>
       probe(`copilot ${env} login`, creds[env].be, async () => {
         const client = makeClient(creds[env].be, env);
         await login(client, creds[env].email, creds[env].password);
         return "login OK";
-      }),
+      }).then(track),
     ),
     ...ENVS.map((env) =>
       probe(`uipath ${env} folder`, uipath.orchestratorUrl, async () => {
@@ -72,7 +86,7 @@ export async function runDoctor(opts: { profile?: string | null }): Promise<Doct
         return `reachable via ${authMode} (folder '${folder ?? "(default)"}', ${jobs.length} recent job${
           jobs.length === 1 ? "" : "s"
         } visible)`;
-      }),
+      }).then(track),
     ),
   ]);
 

@@ -11,6 +11,7 @@ import {
   type ServerRequest,
   SetLevelRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { StepProgress } from "../shared/util.js";
 
 // RFC-5424 severity, low -> high. A log line is emitted only when its level is at
 // least as severe as the client-requested minimum (default "info").
@@ -91,5 +92,46 @@ export function reportProgress(
     void extra.sendNotification({ method: "notifications/progress", params }).catch(() => {});
   } catch {
     // transport gone — drop it
+  }
+}
+
+/**
+ * Adapter: hand a domain function a StepProgress that forwards straight to this
+ * request's progress channel. Saves every fan-out handler in server.ts writing the
+ * same three-argument passthrough.
+ */
+export const stepProgress =
+  (extra: Extra): StepProgress =>
+  (done, total, label) =>
+    reportProgress(extra, done, total, label);
+
+/**
+ * Emit an elapsed-time heartbeat while `work` is in flight, then stop. For the tools
+ * that are slow because of ONE long round-trip (Orchestrator queue/job reads, a BE
+ * login) — there is no step sequence to count, so this reports time, not steps:
+ * `progress` is the tick number (monotonic, as the spec requires) and the message
+ * carries the elapsed seconds.
+ *
+ * No-ops entirely — no timer is ever created — when the client didn't ask for progress.
+ * The timer is unref'd and always cleared, so a pending tick can neither outlive the
+ * request nor hold the process open.
+ */
+export async function withHeartbeat<T>(
+  extra: Extra,
+  label: string,
+  work: Promise<T>,
+  everyMs = 5000,
+): Promise<T> {
+  if (extra._meta?.progressToken === undefined) return work;
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick++;
+    reportProgress(extra, tick, undefined, `${label}: waiting (${(tick * everyMs) / 1000}s)`);
+  }, everyMs);
+  timer.unref?.();
+  try {
+    return await work;
+  } finally {
+    clearInterval(timer);
   }
 }
