@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeOutput, outputMatchesOrder } from "./output-schema.js";
+import { normalizeOutput } from "./output-schema.js";
 
 describe("normalizeOutput — jobOutput (flat out_* schema)", () => {
   const raw = {
@@ -50,13 +50,5 @@ describe("normalizeOutput — unknown schema", () => {
     expect(n.schema).toBe("unknown");
     expect(n.orderUid).toBe("");
     expect(n.fields).toEqual([["foo", "bar"]]);
-  });
-});
-
-describe("outputMatchesOrder", () => {
-  test("matches on the normalized order uid", () => {
-    const raw = { out_OrderUid: "order-123" };
-    expect(outputMatchesOrder(raw, "order-123")).toBe(true);
-    expect(outputMatchesOrder(raw, "order-456")).toBe(false);
   });
 });

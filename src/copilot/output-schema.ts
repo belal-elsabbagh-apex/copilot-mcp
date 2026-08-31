@@ -81,6 +81,3 @@ export function normalizeOutput(raw: Record<string, unknown>): NormalizedOutput 
   }
   return { schema: "unknown", orderUid: "", fields: Object.entries(raw), raw };
 }
-
-export const outputMatchesOrder = (raw: Record<string, unknown>, orderId: string): boolean =>
-  normalizeOutput(raw).orderUid === orderId;

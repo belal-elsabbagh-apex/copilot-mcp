@@ -4,7 +4,6 @@
 
 import { type Env, getUipath } from "../config/config.js";
 import { isFailureLog } from "../copilot/output-analysis.js";
-import { outputMatchesOrder } from "../copilot/output-schema.js";
 import { folderIdFor } from "../mcp/reference.js";
 import { chunk, isRecord, type StepProgress, safeJsonParse } from "../shared/util.js";
 import { invalidateBearerToken, resolveBearerToken } from "./auth.js";
@@ -169,34 +168,6 @@ export async function uipathDelete(path: string, scope: FolderScope): Promise<un
   return uipathRequest("DELETE", path, { folder: scope.folderPath, orgUnitId: scope.orgUnitId });
 }
 
-// All jobs whose OutputArguments contains `orderId`, newest first (capped at
-// `top`). The Jobs collection nulls OutputArguments, so the match is a
-// server-side OData `contains`; per-job OutputArguments is loaded on demand.
-export async function searchJobsByOrderId(
-  orderId: string,
-  since?: string,
-  top = 50,
-  folder?: string,
-): Promise<UiPathJob[]> {
-  const needle = orderId.trim();
-  if (!needle) return [];
-  const escaped = needle.replace(/'/g, "''"); // OData single-quote escaping
-  let filter = `contains(OutputArguments, '${escaped}')`;
-  if (since) filter = `CreationTime gt ${new Date(since).toISOString()} and ${filter}`;
-  const data = await uipathGet(
-    "/odata/Jobs",
-    {
-      $filter: filter,
-      $orderby: "CreationTime desc",
-      $top: String(top),
-      $select: "Id,Key,State,ReleaseName,CreationTime",
-      $expand: JOB_EXPAND,
-    },
-    folder,
-  );
-  return odataValues<unknown>(data).map(toUiPathJob);
-}
-
 // Recent jobs in a folder, newest first — bounded by `since`/`top`, with NO
 // OutputArguments filter. Used as the reliable fallback when the `contains`
 // substring scan is rejected (UiPath intermittently 400/500s on OutputArguments
@@ -221,31 +192,13 @@ export async function listRecentJobs(
   return odataValues<unknown>(await uipathGet("/odata/Jobs", params, folder)).map(toUiPathJob);
 }
 
-// Single job detail — the single-job endpoint returns OutputArguments where the
-// collection omits it (confirmed: the collection nulls it even with an explicit
-// $select, regardless of folder/permissions — a platform limitation, not a bug here).
-async function fetchJobDetailsById(jobId: string, folder?: string): Promise<UiPathJob | null> {
-  if (!jobId) return null;
-  try {
-    return toUiPathJob(
-      await uipathGet(
-        `/odata/Jobs(${jobId})`,
-        {
-          $select: "Id,Key,State,ReleaseName,CreationTime,EndTime,OutputArguments,InputArguments",
-          $expand: JOB_EXPAND,
-        },
-        folder,
-      ),
-    );
-  } catch (e) {
-    if (isNotFound(e)) return null;
-    throw e;
-  }
-}
-
 // Single job by its GUID Key (the collection is keyed by numeric Id, so a Key
-// lookup needs an OData $filter). Returns the job incl. OutputArguments, or null
-// if no job matches. Used by build_faulted_job_issue, which is given only a Key.
+// lookup needs an OData $filter). Returns the job incl. OutputArguments: a single-row
+// `Key eq` filter DOES return it, unlike a broad/multi-row collection query (a
+// `contains` scan or a `Key in (...)` batch), which nulls OutputArguments regardless
+// of $select — a platform limitation, confirmed live. Returns null if no job matches.
+// Used by get_job, build_faulted_job_issue, and the queue-item order correlation in
+// analyze.ts (each order's ExecutorJobKey is resolved to its full job here).
 // A $filter query, not a single-entity fetch: a non-matching key comes back as a
 // normal empty result set (200, no rows) — there's no legitimate "not found"
 // exception here, so any thrown error is a real failure and propagates.
@@ -275,10 +228,11 @@ export interface JobLookup {
 
 // Fetch several jobs by GUID Key in one MCP round-trip. Each key still costs its
 // own HTTP call — confirmed live that the Jobs collection endpoint DOES support
-// `Key in (...)`/`or` correctly, but only the single-entity endpoint ever returns
-// OutputArguments (collection nulls it regardless of $select), so a collection
-// batch call can't replace this when detail is needed. Bounded concurrency (chunks
-// of 10, matching confirmJobsForOrder) keeps a large batch from hammering Orchestrator.
+// `Key in (...)`/`or` correctly, but a multi-row collection response nulls
+// OutputArguments (regardless of $select), whereas the single-row `Key eq` filter in
+// fetchJobByKey returns it — so a batched collection call can't replace this per-key
+// loop when detail is needed. Bounded concurrency (chunks of 10) keeps a large batch
+// from hammering Orchestrator.
 // Promise.allSettled so one key's real failure doesn't lose every other key's result —
 // callers see it via that key's `error` instead of it vanishing or failing the batch.
 export async function fetchJobsForKeys(
@@ -294,32 +248,6 @@ export async function fetchJobsForKeys(
     });
   }
   return out;
-}
-
-// Narrow search candidates to jobs whose normalized output truly belongs to
-// `orderId` (the `contains` filter can match incidental substrings). Loads each
-// candidate's OutputArguments in batches of 10.
-export async function confirmJobsForOrder(
-  jobs: UiPathJob[],
-  orderId: string,
-  folder?: string,
-): Promise<UiPathJob[]> {
-  const confirmed: UiPathJob[] = [];
-  for (const batch of chunk(jobs, 10)) {
-    const details = await Promise.allSettled(
-      batch.map((job) => fetchJobDetailsById(job.Id ?? "", folder)),
-    );
-    for (const result of details) {
-      const full = result.status === "fulfilled" ? result.value : null;
-      if (!full?.OutputArguments) continue;
-      try {
-        if (outputMatchesOrder(JSON.parse(full.OutputArguments), orderId)) confirmed.push(full);
-      } catch {
-        // Unparseable OutputArguments — not a confirmable match.
-      }
-    }
-  }
-  return confirmed;
 }
 
 // Optional narrowing for job-log fetches. All fields default off — an empty
@@ -718,4 +646,106 @@ export async function listQueueItems(
     scope.orgUnitId,
   );
   return odataValues<unknown>(data).map(toQueueItem);
+}
+
+// ---- Queue-item order correlation (the order → job correlation path) --------
+
+// A queue item projected to a PHI-SAFE shape. Every order flows through UiPath as a
+// queue item, and the item is the ONE place the orderUid reliably lives: a
+// queue-consumer job carries it in NEITHER its InputArguments NOR its (all-null,
+// when faulted) OutputArguments. The item links back to its job via ExecutorJobKey,
+// so this is the single correlation path — it reaches faulted/running consumer jobs
+// (which an OutputArguments scan structurally misses) as well as the successful ones.
+// SpecificContent carries member PHI + a JWT `token`, so it is NEVER surfaced: only
+// orderUid is read from it (to confirm), mirroring output-schema.ts's token stripping.
+export interface QueueItemMatch {
+  id: number;
+  reference: string;
+  status: string; // New / InProgress / Failed / Retried / Successful
+  executorJobKey: string; // "" when the item hasn't been picked up by a robot yet
+  processingExceptionType: string; // e.g. BusinessException; "" when none
+  retryNumber: number;
+  creationTime: string;
+}
+
+// Confirm a raw QueueItems DTO truly belongs to `orderId` (the
+// contains(SpecificData, uid) filter can match incidental substrings) and project
+// it to the PHI-safe QueueItemMatch. Returns null for a non-match. Pure —
+// unit-tested, no HTTP. Nested SpecificContent/orderUid filtering is NOT supported
+// by Orchestrator's OData, so the server filters the raw SpecificData JSON string
+// and this re-confirms against the parsed SpecificContent.orderUid client-side.
+export function confirmQueueItemMatch(raw: unknown, orderId: string): QueueItemMatch | null {
+  const orderUid = strField(recField(raw, "SpecificContent"), "orderUid");
+  if (!orderUid || orderUid !== orderId.trim()) return null;
+  return {
+    id: numField(raw, "Id"),
+    reference: strField(raw, "Reference"),
+    status: strField(raw, "Status"),
+    executorJobKey: strField(raw, "ExecutorJobKey"),
+    processingExceptionType: strField(raw, "ProcessingExceptionType"),
+    retryNumber: numField(raw, "RetryNumber"),
+    creationTime: strField(raw, "CreationTime"),
+  };
+}
+
+export type QueueSearchMode = "contains" | "recent-scan";
+
+export interface QueueItemSearchResult {
+  matches: QueueItemMatch[];
+  scanned: number; // raw rows examined (before client-side confirm)
+  searchMode: QueueSearchMode;
+  notes: string[];
+  searchError?: string; // set when tier 1 was rejected and the recent-scan fallback ran
+}
+
+// Find the queue item(s) an order flowed through, PHI-safe. Tier 1: server-side
+// contains(SpecificData, uid) — filter on the raw SpecificData JSON string (nested
+// SpecificContent/orderUid filtering isn't supported), ordered CreationTime desc so
+// a still-New (not-yet-picked-up) item isn't pushed past $top. Tier 2 on rejection:
+// a bounded recent-QueueItems scan confirmed client-side (mirrors acquireCandidates
+// / listRecentJobs). No $expand — the QueueItems endpoint nulls a nested $select and
+// 400s on an outer $select combined with $expand; the full item is read defensively.
+export async function searchQueueItemsByOrderId(
+  orderId: string,
+  scope: FolderScope,
+  top = 50,
+  since?: string,
+): Promise<QueueItemSearchResult> {
+  const needle = orderId.trim();
+  if (!needle) return { matches: [], scanned: 0, searchMode: "contains", notes: [] };
+  const confirmAll = (raws: unknown[]): QueueItemMatch[] =>
+    raws
+      .map((r) => confirmQueueItemMatch(r, needle))
+      .filter((m): m is QueueItemMatch => m !== null);
+  const escaped = needle.replace(/'/g, "''"); // OData single-quote escaping
+  try {
+    const raws = odataValues<unknown>(
+      await uipathGet(
+        "/odata/QueueItems",
+        {
+          $filter: `contains(SpecificData, '${escaped}')`,
+          $orderby: "CreationTime desc",
+          $top: String(top),
+        },
+        scope.folderPath,
+        scope.orgUnitId,
+      ),
+    );
+    return { matches: confirmAll(raws), scanned: raws.length, searchMode: "contains", notes: [] };
+  } catch (e) {
+    const searchError = e instanceof Error ? e.message : String(e);
+    const scanParams: Record<string, string> = { $orderby: "CreationTime desc", $top: String(top) };
+    if (since) scanParams["$filter"] = `CreationTime gt ${new Date(since).toISOString()}`;
+    const raws = odataValues<unknown>(
+      await uipathGet("/odata/QueueItems", scanParams, scope.folderPath, scope.orgUnitId),
+    );
+    const note = `SpecificData filter rejected by Orchestrator; fell back to scanning the ${raws.length} most-recent queue item(s).`;
+    return {
+      matches: confirmAll(raws),
+      scanned: raws.length,
+      searchMode: "recent-scan",
+      notes: [note],
+      searchError,
+    };
+  }
 }

@@ -1,6 +1,8 @@
 // Orchestration: trace a Copilot orderUid to its UiPath Orchestrator job(s) and
-// diagnose the run. Ported from copilot-doctor src/jobMatcher.ts, extended with a
-// recent-scan fallback for when Orchestrator rejects the OutputArguments filter.
+// diagnose the run. Correlation is queue-item based: every order flows through a
+// queue item that carries the orderUid + the ExecutorJobKey of the job that ran it,
+// so this reaches faulted/still-running consumer jobs an OutputArguments scan can't.
+// Ported from copilot-doctor src/jobMatcher.ts.
 
 import { isRecord, msBetween, type StepProgress } from "../shared/util.js";
 import {
@@ -10,15 +12,18 @@ import {
   type JobLogDigest,
 } from "../uipath/log-digest.js";
 import {
-  confirmJobsForOrder,
   type Env,
+  type FolderScope,
   fetchJobLogs,
+  fetchJobsForKeys,
   fetchJobVideoUrl,
   type JobLog,
   jobDeepLink,
-  listRecentJobs,
+  type QueueItemMatch,
+  type QueueSearchMode,
   resolveFolder,
-  searchJobsByOrderId,
+  resolveOrgUnitId,
+  searchQueueItemsByOrderId,
   type UiPathJob,
 } from "../uipath/uipath.js";
 import { analyzeOutput, type OutputComment } from "./output-analysis.js";
@@ -54,18 +59,19 @@ export interface AnalyzeResult {
   folder: string | undefined;
   matched: boolean;
   jobCount: number;
-  candidatesScanned: number;
+  queueItemsScanned: number; // raw queue items examined before client-side confirm
   summary: { latestState: string | null; verdict: string; reasons: string[] };
   jobs: JobAnalysis[];
-  searchMode: "contains" | "recent-scan";
+  searchMode: QueueSearchMode;
+  queueItemSignals?: QueueItemMatch[]; // PHI-safe status/exception hints per correlated item
   notes?: string[];
-  searchError?: string;
+  searchError?: string; // the queue-item search failed entirely
 }
 
 export interface AnalyzeOptions {
   env?: Env | undefined;
   folder?: string | undefined;
-  since?: string | undefined;
+  since?: string | undefined; // bounds the recent-scan fallback when the OData filter is rejected
   top?: number | undefined;
   includeLogs?: boolean | undefined;
   includeVideo?: boolean | undefined; // default false — the video fetch is an extra round-trip
@@ -91,65 +97,53 @@ const parseOutput = (oa: string | undefined): Record<string, unknown> => {
     return {};
   }
 };
-type SearchMode = "contains" | "recent-scan";
-interface Acquired {
-  candidates: UiPathJob[];
-  searchMode: SearchMode;
+
+// The order → job correlation, folded into analyzeOrderExecution.
+interface Correlation {
+  jobs: UiPathJob[]; // executor jobs resolved from the queue item(s), deduped by Key
+  signals: QueueItemMatch[]; // PHI-safe queue-item hints (status/exception/retry)
+  scanned: number;
+  searchMode: QueueSearchMode;
   notes: string[];
-  searchError: string | undefined;
-  fatal: string | undefined; // set when BOTH the contains scan and the fallback fail
+  searchError: string | undefined; // set when the recent-scan fallback ran
 }
 
-// Find candidate jobs for an order. Tier 1: server-side `contains(OutputArguments,
-// uid)` — broad (matches any job regardless of recency) and cheap when UiPath
-// accepts it. But Orchestrator intermittently rejects OutputArguments filtering
-// (400 "Invalid OData query options" / 500). Tier 2 on failure: a bounded recent-
-// jobs scan (CreationTime filter is reliable) confirmed client-side.
-async function acquireCandidates(
+// Resolve the order's queue item(s) → their ExecutorJobKey → the full job(s). A New,
+// not-yet-picked-up item has no ExecutorJobKey and so yields no job (correctly — no
+// run has happened yet), but it still surfaces as a signal. `logFolder` is the
+// folder-path scope the job lookups use; `scope` is the org-unit scope the QueueItems
+// endpoint requires. Propagates a total search failure to the caller (→ SEARCH_FAILED).
+async function correlate(
   orderUid: string,
-  since: string | undefined,
+  scope: FolderScope,
+  logFolder: string | undefined,
   top: number,
-  scope: string | undefined,
-): Promise<Acquired> {
-  try {
-    const candidates = await searchJobsByOrderId(orderUid, since, top, scope);
-    return {
-      candidates,
-      searchMode: "contains",
-      notes: [],
-      searchError: undefined,
-      fatal: undefined,
-    };
-  } catch (e) {
-    const searchError = e instanceof Error ? e.message : String(e);
-    try {
-      const candidates = await listRecentJobs(since, top, scope);
-      const tail = since
-        ? ` since ${since}.`
-        : ". Pass `since` (the order's run date) and/or raise `top` if not found.";
-      const note = `OutputArguments filter rejected by Orchestrator; fell back to scanning the ${candidates.length} most-recent job(s)${tail}`;
-      return {
-        candidates,
-        searchMode: "recent-scan",
-        notes: [note],
-        searchError,
-        fatal: undefined,
-      };
-    } catch (e2) {
-      const message = e2 instanceof Error ? e2.message : String(e2);
-      return {
-        candidates: [],
-        searchMode: "recent-scan",
-        notes: [],
-        searchError,
-        fatal: `${searchError} | fallback: ${message}`,
-      };
-    }
+  since: string | undefined,
+): Promise<Correlation> {
+  const q = await searchQueueItemsByOrderId(orderUid, scope, top, since);
+  const jobKeys = [...new Set(q.matches.map((m) => m.executorJobKey).filter((k) => k))];
+  const notes = [...q.notes];
+  let jobs: UiPathJob[] = [];
+  if (jobKeys.length) {
+    const looked = await fetchJobsForKeys(jobKeys, logFolder);
+    jobs = Object.values(looked)
+      .map((l) => l.job)
+      .filter((j): j is UiPathJob => j !== null);
+    const failed = Object.values(looked).filter((l) => l.error).length;
+    if (failed) notes.push(`${failed} executor job(s) failed to load from their queue-item key.`);
   }
+  return {
+    jobs,
+    signals: q.matches,
+    scanned: q.scanned,
+    searchMode: q.searchMode,
+    notes,
+    searchError: q.searchError,
+  };
 }
 
-// Hydrate one confirmed job into its diagnosis (state, verdict, normalized output,
-// analysis comments, structured fault, and optionally a condensed log digest + video).
+// Hydrate one job into its diagnosis (state, verdict, normalized output, analysis
+// comments, structured fault, and optionally a condensed log digest + video).
 async function toJobAnalysis(
   job: UiPathJob,
   scope: string | undefined,
@@ -206,6 +200,17 @@ async function toJobAnalysis(
   };
 }
 
+// The summary verdict when no job resolved: distinguish "queued, not yet picked up"
+// (a queue item exists but has no ExecutorJobKey) from a plain no-match.
+function noJobSummary(signals: QueueItemMatch[]): AnalyzeResult["summary"] {
+  if (!signals.length) return { latestState: null, verdict: "NO_MATCH", reasons: [] };
+  const verdict = signals.every((s) => !s.executorJobKey)
+    ? "QUEUED_NOT_PICKED_UP"
+    : "NO_JOB_RESOLVED";
+  const reasons = signals.map((s) => `queue item ${s.reference || s.id}: status=${s.status}`);
+  return { latestState: null, verdict, reasons };
+}
+
 // Analyze how `orderUid` executed on the Orchestrator. Read-only.
 export async function analyzeOrderExecution(
   orderUid: string,
@@ -220,32 +225,36 @@ export async function analyzeOrderExecution(
   }: AnalyzeOptions = {},
 ): Promise<AnalyzeResult> {
   const scope = resolveFolder(env, folder);
-  const acq = await acquireCandidates(orderUid, since, top, scope);
-  if (acq.fatal !== undefined) {
+  const qScope: FolderScope = { orgUnitId: resolveOrgUnitId(env), folderPath: scope ?? "" };
+
+  let corr: Correlation;
+  try {
+    corr = await correlate(orderUid, qScope, scope, top, since);
+  } catch (e) {
+    const searchError = e instanceof Error ? e.message : String(e);
     return {
       orderUid,
       env,
       folder: scope,
       matched: false,
       jobCount: 0,
-      candidatesScanned: 0,
-      summary: { latestState: null, verdict: "SEARCH_FAILED", reasons: [acq.fatal] },
+      queueItemsScanned: 0,
+      summary: { latestState: null, verdict: "SEARCH_FAILED", reasons: [searchError] },
       jobs: [],
-      searchMode: acq.searchMode,
-      searchError: acq.fatal,
+      searchMode: "contains",
+      searchError,
     };
   }
 
-  const confirmed = await confirmJobsForOrder(acq.candidates, orderUid, scope);
   const jobs: JobAnalysis[] = [];
   // One job's analysis is up to three sequential Orchestrator calls (details, logs,
   // video) — with includeLogs/includeVideo on, a multi-retry order is a long wait.
-  for (const [i, job] of confirmed.entries()) {
+  for (const [i, job] of corr.jobs.entries()) {
     jobs.push(await toJobAnalysis(job, scope, includeLogs, includeVideo));
-    onProgress?.(i + 1, confirmed.length, `analyzed job ${job.Key ?? "(no key)"}`);
+    onProgress?.(i + 1, corr.jobs.length, `analyzed job ${job.Key ?? "(no key)"}`);
   }
 
-  // Newest first (search ordered desc, but confirm batches can reorder).
+  // Newest first (search ordered desc, but key lookups can reorder).
   jobs.sort((a, b) => (b.creationTime ?? "").localeCompare(a.creationTime ?? ""));
   // Retry cadence: how long after the previous (older) run's end each run started.
   for (let i = 0; i < jobs.length; i++) {
@@ -262,17 +271,18 @@ export async function analyzeOrderExecution(
     folder: scope,
     matched: jobs.length > 0,
     jobCount: jobs.length,
-    candidatesScanned: acq.candidates.length,
+    queueItemsScanned: corr.scanned,
     summary: latest
       ? {
           latestState: latest.state ?? null,
           verdict: latest.verdict,
           reasons: latest.analysis.map((a) => a.message),
         }
-      : { latestState: null, verdict: "NO_MATCH", reasons: [] },
+      : noJobSummary(corr.signals),
     jobs,
-    searchMode: acq.searchMode,
-    ...(acq.notes.length ? { notes: acq.notes } : {}),
-    ...(acq.searchError ? { searchError: acq.searchError } : {}),
+    searchMode: corr.searchMode,
+    ...(corr.signals.length ? { queueItemSignals: corr.signals } : {}),
+    ...(corr.notes.length ? { notes: corr.notes } : {}),
+    ...(corr.searchError ? { searchError: corr.searchError } : {}),
   };
 }

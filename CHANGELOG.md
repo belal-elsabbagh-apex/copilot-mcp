@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.0] - 2026-08-24
+
+Correlate orders to their UiPath jobs via the queue item, not `OutputArguments`
+(GitHub issue #6). A queue-consumer job carries the orderUid in neither its
+`InputArguments` nor its (all-null, when faulted) `OutputArguments`, so the previous
+output-based scan structurally missed exactly the faulted/still-running jobs these
+tools exist to diagnose. The orderUid lives on the queue item, which links back to its
+job via `ExecutorJobKey` — a 1:1 relationship that makes this a strict superset of the
+old scan (which only ever saw successful jobs).
+
+### Changed
+
+- **`analyze_order_execution` now correlates via the order's UiPath queue item(s)**
+  instead of `contains(OutputArguments, uid)`. It resolves each confirmed queue item's
+  `ExecutorJobKey` to the full job, so faulted and still-running consumer jobs now get
+  full diagnosis (logs, fault, digest, video). A queue item still `New` (not yet picked
+  up by a robot) has no job and verdicts as `QUEUED_NOT_PICKED_UP`. Member PHI and the
+  JWT `token` in the queue item are never surfaced — only `orderUid` is read from it, to
+  confirm the match. New result fields: `queueItemsScanned` and `queueItemSignals`
+  (PHI-safe per-item status/exception/retry hints); `candidatesScanned` is removed.
+- **`find_stuck_orders`'s UiPath cross-check** derives its verdict from the queue
+  item's `Status` (adding the `queued-not-picked-up` verdict), which makes
+  `job-faulted`/`job-running` directly determinable rather than heuristic. The per-order
+  `uipath` summary is now `{verdict, queueItemCount, queueItemStatus?,
+  processingExceptionType?}` (was `{verdict, latestState?, jobCount, processNames?}`).
+
+### Removed
+
+- The dead `OutputArguments` correlation path: `searchJobsByOrderId`,
+  `confirmJobsForOrder` (and its private `fetchJobDetailsById`) in `uipath.ts`, and the
+  now-unused `outputMatchesOrder` in `output-schema.ts`. `listRecentJobs` stays (still
+  used by `get_job_logs` and `doctor`).
+
 ## [1.26.0] - 2026-08-23
 
 Follow-on to v1.25.1's TypeScript 7 migration: the `tsconfig.json` is now aligned with

@@ -156,7 +156,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.26.0";
+const VERSION = "1.27.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -559,15 +559,19 @@ server.registerTool(
       "Orchestrator. The digest is deliberately concise — benign lines are omitted and messages " +
       "truncated. IF THE DIGEST IS NOT ENOUGH to explain the failure, call get_job_logs with the " +
       "job's `key` for the complete raw logs (filters: minLevel/contains/onlyFailures/tail). " +
-      "READ-ONLY — never writes to UiPath or the BE. Correlates via " +
-      "the job's OutputArguments (handles both the flat out_* schema and the transactionItem schema); " +
-      "token/callbackContext are stripped from the returned output. Jobs live in a per-env UiPath folder " +
+      "READ-ONLY — never writes to UiPath or the BE. Correlates via the order's UiPath queue " +
+      "item(s): every order flows through a queue item carrying the orderUid + the ExecutorJobKey of " +
+      "the job that ran it, so this reaches faulted/still-running consumer jobs an output scan can't. " +
+      "A queue item still 'New' (not yet picked up by a robot) has no job and verdicts as " +
+      "QUEUED_NOT_PICKED_UP. Member PHI / the JWT token in the item are never surfaced; " +
+      "token/callbackContext are stripped from the returned job output. Jobs live in a per-env UiPath folder " +
       "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
-      "or an explicit folder. If Orchestrator rejects the OutputArguments filter, it falls back to scanning " +
-      "the `top` most-recent jobs — pass `since` for prod. Optionally enrich with the order's current BE " +
+      "or an explicit folder. If Orchestrator rejects the queue-item filter, it falls back to scanning " +
+      "the `top` most-recent queue items — pass `since` for prod. Optionally enrich with the order's current BE " +
       "status (same env). Per-job logDigest/video fetches are best-effort — one job's fetch " +
       "failure never fails the whole call, it surfaces on just that job as logsError/videoError. " +
-      "Returns {orderUid, env, folder, matched, jobCount, summary:{latestState,verdict,reasons}, " +
+      "Returns {orderUid, env, folder, matched, jobCount, queueItemsScanned, " +
+      "summary:{latestState,verdict,reasons}, queueItemSignals?, " +
       "jobs:[{key, state, verdict, durationMs, gapSincePreviousJobMs, fault, logDigest, logsError?, " +
       "videoError?, ...}]}.",
     inputSchema: {
@@ -585,7 +589,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "ISO date lower bound (only jobs created after this). Recommended for env=prod, and important if the OutputArguments filter is rejected and the tool falls back to scanning recent jobs",
+          "ISO date lower bound. Bounds the recent-scan fallback used when Orchestrator rejects the queue-item filter — recommended for env=prod",
         ),
       top: z
         .number()
@@ -1660,9 +1664,11 @@ server.registerTool(
     },
     description:
       "Scan recent orders in an env and flag the ones sitting in a non-terminal ('stuck') status " +
-      "(default inProgress/incomplete/pending). Optionally correlate each to its UiPath job(s) for a " +
-      "coarse verdict (no-job / job-faulted / job-running / job-successful-order-stuck). READ-ONLY. " +
-      "Returns {env, scanned, statuses, found, stuck:[{orderUid,status,ageHours,uipath?}]}.",
+      "(default inProgress/incomplete/pending). Optionally correlate each to its UiPath queue item(s) for a " +
+      "coarse verdict (no-job / job-faulted / job-running / queued-not-picked-up / " +
+      "job-successful-order-stuck), determined from the queue item's Status (PHI-safe — member data / " +
+      "tokens are never surfaced). READ-ONLY. Returns {env, scanned, statuses, found, " +
+      "stuck:[{orderUid,status,ageHours,uipath?:{verdict,queueItemCount,queueItemStatus?,processingExceptionType?}}]}.",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to scan (required)"),
       profile: z

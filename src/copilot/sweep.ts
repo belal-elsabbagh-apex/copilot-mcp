@@ -1,11 +1,11 @@
 // find_stuck_orders: page recent orders in an env and flag the ones sitting in a
-// non-terminal ("stuck") status, optionally correlating each to its UiPath job(s).
-// Read-only. Reuses the order-filter scan (same shape as find_clone_candidates) and
-// the Orchestrator search in uipath.ts.
+// non-terminal ("stuck") status, optionally correlating each to its UiPath queue
+// item(s). Read-only. Reuses the order-filter scan (same shape as
+// find_clone_candidates) and the queue-item correlation in uipath.ts.
 
 import { type Env, resolveCreds } from "../config/config.js";
 import { chunk, type StepProgress } from "../shared/util.js";
-import { resolveFolder, searchJobsByOrderId, type UiPathJob } from "../uipath/uipath.js";
+import { type QueueItemMatch, scopeForEnv, searchQueueItemsByOrderId } from "../uipath/uipath.js";
 import { type BeOrder, filterOrders, login, makeClient, ORDER_MODE } from "./copilot-client.js";
 
 // Statuses considered "stuck" by default: submitted-but-not-finished, or never
@@ -22,9 +22,9 @@ export interface StuckOrder {
   uipath?:
     | {
         verdict: string;
-        latestState?: string | undefined;
-        jobCount: number;
-        processNames?: string[] | undefined;
+        queueItemCount: number;
+        queueItemStatus?: string | undefined; // PHI-safe: New/InProgress/Failed/Retried/Successful
+        processingExceptionType?: string | undefined; // e.g. BusinessException
       }
     | undefined;
 }
@@ -59,23 +59,36 @@ function ageHours(row: BeOrder): number | null {
   return null;
 }
 
-// Summarize a list of candidate jobs into a coarse verdict. These are substring
-// matches on OutputArguments (not confirmed), so the verdict is a heuristic hint.
-function uipathVerdict(jobs: UiPathJob[]): {
-  verdict: string;
-  latestState?: string | undefined;
-  jobCount: number;
-  processNames?: string[] | undefined;
-} {
-  if (!jobs.length) return { verdict: "no-job", jobCount: 0 };
-  const states = jobs.map((j) => j.State ?? "");
-  const latestState = states[0];
-  const processNames = [...new Set(jobs.map((j) => j.ReleaseName).filter((n): n is string => !!n))];
+// Summarize an order's queue item(s) into a coarse verdict. The queue item is the
+// source of truth for what happened to the order: its Status directly determines
+// faulted (Failed) / running (InProgress) / stuck-but-succeeded (Successful), and a
+// New item with no ExecutorJobKey means "queued, not yet picked up" by a robot.
+// Statuses are read newest-first (CreationTime desc), so [0] is the latest.
+// Priority: faulted > running > queued-not-picked-up > successful-order-stuck.
+function uipathVerdict(queueItems: QueueItemMatch[]): NonNullable<StuckOrder["uipath"]> {
+  if (!queueItems.length) return { verdict: "no-job", queueItemCount: 0 };
+  const statuses = queueItems.map((q) => q.status);
+  const processingExceptionType = queueItems.find(
+    (q) => q.processingExceptionType,
+  )?.processingExceptionType;
+
+  const faulted = statuses.some((s) => s === "Failed");
+  const running = statuses.some((s) => s === "InProgress");
+  const queuedNotPicked = queueItems.some((q) => q.status === "New" && !q.executorJobKey);
+  const allSuccessful = statuses.every((s) => s === "Successful");
+
   let verdict = "job-found";
-  if (states.some((s) => s === "Faulted" || s === "Stopped")) verdict = "job-faulted";
-  else if (states.some((s) => s === "Running" || s === "Pending")) verdict = "job-running";
-  else if (states.every((s) => s === "Successful")) verdict = "job-successful-order-stuck";
-  return { verdict, latestState, jobCount: jobs.length, processNames };
+  if (faulted) verdict = "job-faulted";
+  else if (running) verdict = "job-running";
+  else if (queuedNotPicked) verdict = "queued-not-picked-up";
+  else if (allSuccessful) verdict = "job-successful-order-stuck";
+
+  return {
+    verdict,
+    queueItemCount: queueItems.length,
+    ...(statuses[0] ? { queueItemStatus: statuses[0] } : {}),
+    ...(processingExceptionType ? { processingExceptionType } : {}),
+  };
 }
 
 export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckResult> {
@@ -121,13 +134,15 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
   }
 
   if (args.crossCheckUipath) {
-    const folder = resolveFolder(env);
+    const scope = scopeForEnv(env);
+    const top = args.top ?? 50;
     // Offset past the page scan so progress stays monotonic across both phases. The
     // candidate count isn't known until the scan finishes, so the total grows here —
     // allowed (total is advisory), and better than reporting the cross-check silently.
     await crossCheckUipath(
       stuck,
-      (orderUid) => searchJobsByOrderId(orderUid, args.since, args.top ?? 50, folder),
+      async (orderUid) =>
+        (await searchQueueItemsByOrderId(orderUid, scope, top, args.since)).matches,
       (done, total, label) => onProgress?.(scanPages + done, scanPages + total, label),
     );
   }
@@ -138,16 +153,16 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
 // Bounded-concurrency batches (same chunk()+Promise.allSettled shape as uipath.ts's
 // fetchJobsForKeys) instead of one Orchestrator lookup at a time — a real per-order
 // failure lands on that order's uipath.verdict, never lost and never blocking the
-// rest of the batch. `search` is injected so this is unit-testable without HTTP.
+// rest of the batch. `correlate` is injected so this is unit-testable without HTTP.
 export async function crossCheckUipath(
   stuck: StuckOrder[],
-  search: (orderUid: string) => Promise<UiPathJob[]>,
+  correlate: (orderUid: string) => Promise<QueueItemMatch[]>,
   onProgress?: StepProgress,
 ): Promise<void> {
   const candidates = stuck.filter((s): s is StuckOrder & { orderUid: string } => !!s.orderUid);
   let checked = 0;
   for (const batch of chunk(candidates, 10)) {
-    const results = await Promise.allSettled(batch.map((s) => search(s.orderUid)));
+    const results = await Promise.allSettled(batch.map((s) => correlate(s.orderUid)));
     batch.forEach((s, i) => {
       const r = results[i];
       s.uipath =
@@ -155,7 +170,7 @@ export async function crossCheckUipath(
           ? uipathVerdict(r.value)
           : {
               verdict: `error: ${r?.reason instanceof Error ? r.reason.message : String(r?.reason)}`,
-              jobCount: 0,
+              queueItemCount: 0,
             };
     });
     checked += batch.length;

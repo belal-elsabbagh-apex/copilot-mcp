@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  confirmQueueItemMatch,
   type JobLog,
   jobLogQueryParams,
   refineJobLogs,
@@ -143,5 +144,54 @@ describe("toQueueItem", () => {
   test("robotName comes from $expand=Robot, empty string when unassigned", () => {
     expect(toQueueItem({ ...base, Robot: { Name: "ec2-bot-1" } }).robotName).toBe("ec2-bot-1");
     expect(toQueueItem({ ...base, Robot: null }).robotName).toBe("");
+  });
+});
+
+describe("confirmQueueItemMatch", () => {
+  const raw = (over: Record<string, unknown>) => ({
+    Id: 42,
+    Reference: "ref-1",
+    Status: "Failed",
+    ExecutorJobKey: "e6f6d5e4-da99-4bf5-bef9-10b529ab430e",
+    ProcessingExceptionType: "BusinessException",
+    RetryNumber: 1,
+    CreationTime: "2026-07-01T00:00:00Z",
+    SpecificContent: { orderUid: "ae03574b-1234", MemberID: "m1", token: "jwt.secret" },
+    ...over,
+  });
+
+  test("projects a real match to the PHI-safe shape (no SpecificContent surfaced)", () => {
+    const m = confirmQueueItemMatch(raw({}), "ae03574b-1234");
+    expect(m).toEqual({
+      id: 42,
+      reference: "ref-1",
+      status: "Failed",
+      executorJobKey: "e6f6d5e4-da99-4bf5-bef9-10b529ab430e",
+      processingExceptionType: "BusinessException",
+      retryNumber: 1,
+      creationTime: "2026-07-01T00:00:00Z",
+    });
+    // The projection carries no member PHI / JWT.
+    expect(JSON.stringify(m)).not.toContain("jwt.secret");
+    expect(JSON.stringify(m)).not.toContain("MemberID");
+  });
+
+  test("rejects an incidental substring hit whose SpecificContent.orderUid differs", () => {
+    expect(confirmQueueItemMatch(raw({}), "different-uid")).toBeNull();
+  });
+
+  test("rejects an item with no SpecificContent.orderUid", () => {
+    expect(
+      confirmQueueItemMatch(raw({ SpecificContent: { MemberID: "m1" } }), "ae03574b-1234"),
+    ).toBeNull();
+  });
+
+  test("a New, not-yet-picked-up item confirms with an empty executorJobKey", () => {
+    const m = confirmQueueItemMatch(
+      raw({ Status: "New", ExecutorJobKey: undefined, ProcessingExceptionType: undefined }),
+      "ae03574b-1234",
+    );
+    expect(m?.status).toBe("New");
+    expect(m?.executorJobKey).toBe("");
   });
 });
