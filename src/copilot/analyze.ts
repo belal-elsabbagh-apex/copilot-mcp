@@ -4,7 +4,7 @@
 // so this reaches faulted/still-running consumer jobs an OutputArguments scan can't.
 // Ported from copilot-doctor src/jobMatcher.ts.
 
-import { isRecord, msBetween, type StepProgress } from "../shared/util.js";
+import { chunk, isRecord, msBetween, type StepProgress } from "../shared/util.js";
 import {
   digestLogs,
   extractFault,
@@ -14,8 +14,8 @@ import {
 import {
   type Env,
   type FolderScope,
+  fetchJobByKey,
   fetchJobLogs,
-  fetchJobsForKeys,
   fetchJobVideoUrl,
   type JobLog,
   jobDeepLink,
@@ -71,7 +71,7 @@ export interface AnalyzeResult {
 export interface AnalyzeOptions {
   env?: Env | undefined;
   folder?: string | undefined;
-  since?: string | undefined; // bounds the recent-scan fallback when the OData filter is rejected
+  since?: string | undefined; // bounds the primary queue-item search (retried unbounded when nothing matches) and the recent-scan fallback
   top?: number | undefined;
   includeLogs?: boolean | undefined;
   includeVideo?: boolean | undefined; // default false — the video fetch is an extra round-trip
@@ -100,41 +100,39 @@ const parseOutput = (oa: string | undefined): Record<string, unknown> => {
 
 // The order → job correlation, folded into analyzeOrderExecution.
 interface Correlation {
-  jobs: UiPathJob[]; // executor jobs resolved from the queue item(s), deduped by Key
-  signals: QueueItemMatch[]; // PHI-safe queue-item hints (status/exception/retry)
+  signals: QueueItemMatch[]; // PHI-safe queue-item hints
+  jobKeys: string[]; // deduped ExecutorJobKeys, in queue-item order
   scanned: number;
   searchMode: QueueSearchMode;
   notes: string[];
   searchError: string | undefined; // set when the recent-scan fallback ran
 }
 
-// Resolve the order's queue item(s) → their ExecutorJobKey → the full job(s). A New,
-// not-yet-picked-up item has no ExecutorJobKey and so yields no job (correctly — no
-// run has happened yet), but it still surfaces as a signal. `logFolder` is the
-// folder-path scope the job lookups use; `scope` is the org-unit scope the QueueItems
-// endpoint requires. Propagates a total search failure to the caller (→ SEARCH_FAILED).
+// Resolve the order's queue item(s) → their ExecutorJobKey(s) — search only, no job
+// lookups (those are keyed by ExecutorJobKey and happen per-key in the hydration wave
+// below, since detail/logs/video all need only the Key this search already produced).
+// A New, not-yet-picked-up item has no ExecutorJobKey and so yields no key (correctly —
+// no run has happened yet), but it still surfaces as a signal. `since` narrows the
+// primary search; a single-order diagnostic favors recall, so a bounded search that
+// matches nothing is retried once, unbounded (never done in the bulk sweep path).
+// Propagates a total search failure to the caller (→ SEARCH_FAILED).
 async function correlate(
   orderUid: string,
   scope: FolderScope,
-  logFolder: string | undefined,
   top: number,
   since: string | undefined,
 ): Promise<Correlation> {
-  const q = await searchQueueItemsByOrderId(orderUid, scope, top, since);
-  const jobKeys = [...new Set(q.matches.map((m) => m.executorJobKey).filter((k) => k))];
+  let q = await searchQueueItemsByOrderId(orderUid, scope, top, since);
   const notes = [...q.notes];
-  let jobs: UiPathJob[] = [];
-  if (jobKeys.length) {
-    const looked = await fetchJobsForKeys(jobKeys, logFolder);
-    jobs = Object.values(looked)
-      .map((l) => l.job)
-      .filter((j): j is UiPathJob => j !== null);
-    const failed = Object.values(looked).filter((l) => l.error).length;
-    if (failed) notes.push(`${failed} executor job(s) failed to load from their queue-item key.`);
+  if (since && q.matches.length === 0) {
+    q = await searchQueueItemsByOrderId(orderUid, scope, top, undefined);
+    notes.push(...q.notes);
+    notes.push(`no queue item matched within since=${since}; retried without the time bound.`);
   }
+  const jobKeys = [...new Set(q.matches.map((m) => m.executorJobKey).filter((k) => k))];
   return {
-    jobs,
     signals: q.matches,
+    jobKeys,
     scanned: q.scanned,
     searchMode: q.searchMode,
     notes,
@@ -142,38 +140,55 @@ async function correlate(
   };
 }
 
-// Hydrate one job into its diagnosis (state, verdict, normalized output, analysis
-// comments, structured fault, and optionally a condensed log digest + video).
-async function toJobAnalysis(
-  job: UiPathJob,
+// One job key's hydration outcome: detail, robot logs, and video, each independently
+// best-effort (a real failure lands on its own *Error field, never lost, never fails
+// the others or the whole call).
+interface JobFetch {
+  job: UiPathJob | null;
+  jobError: string | undefined;
+  logs: JobLog[];
+  logsError: string | undefined;
+  videoUrl: string;
+  videoError: string | undefined;
+}
+
+// Detail, robot logs and video are all keyed by the Key the queue item already gave us, so
+// they go out together: the logs leg (up to 500 rows, the call's biggest payload) no longer
+// waits for the detail response. allSettled — each leg's failure stays on its own field.
+async function fetchJobBundle(
+  key: string,
   scope: string | undefined,
   includeLogs: boolean,
   includeVideo: boolean,
-): Promise<JobAnalysis> {
+): Promise<JobFetch> {
+  const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const [jobResult, logsResult, videoResult] = await Promise.allSettled([
+    fetchJobByKey(key, scope),
+    includeLogs ? fetchJobLogs(key, scope) : Promise.resolve<JobLog[]>([]),
+    includeVideo ? fetchJobVideoUrl(key, scope) : Promise.resolve(""),
+  ]);
+  return {
+    job: jobResult.status === "fulfilled" ? jobResult.value : null,
+    jobError: jobResult.status === "rejected" ? errMsg(jobResult.reason) : undefined,
+    logs: logsResult.status === "fulfilled" ? logsResult.value : [],
+    logsError: logsResult.status === "rejected" ? errMsg(logsResult.reason) : undefined,
+    videoUrl: videoResult.status === "fulfilled" ? videoResult.value : "",
+    videoError: videoResult.status === "rejected" ? errMsg(videoResult.reason) : undefined,
+  };
+}
+
+// Hydrate one job into its diagnosis (state, verdict, normalized output, analysis
+// comments, structured fault, and optionally a condensed log digest + video). Pure —
+// `fetched` already carries whatever toJobAnalysis needs, so this does no I/O.
+function toJobAnalysis(
+  job: UiPathJob,
+  fetched: JobFetch,
+  includeLogs: boolean,
+  includeVideo: boolean,
+): JobAnalysis {
   const output = parseOutput(job.OutputArguments);
   const norm = normalizeOutput(output);
-
-  // Both are per-job, best-effort attachments inside a potentially large multi-job
-  // report — a real fetch failure here must not fail the whole analysis, but it
-  // must not vanish either, so it's attached to this job as logsError/videoError.
-  let logs: JobLog[] = [];
-  let logsError: string | undefined;
-  if (includeLogs) {
-    try {
-      logs = await fetchJobLogs(job.Key ?? "", scope);
-    } catch (e) {
-      logsError = e instanceof Error ? e.message : String(e);
-    }
-  }
-  let videoUrl = "";
-  let videoError: string | undefined;
-  if (includeVideo) {
-    try {
-      videoUrl = await fetchJobVideoUrl(job.Key ?? "", scope);
-    } catch (e) {
-      videoError = e instanceof Error ? e.message : String(e);
-    }
-  }
+  const { logs, logsError, videoUrl, videoError } = fetched;
 
   const resultRaw = output["out_Result"];
   const verdict = jobVerdict(job.State, output);
@@ -229,7 +244,7 @@ export async function analyzeOrderExecution(
 
   let corr: Correlation;
   try {
-    corr = await correlate(orderUid, qScope, scope, top, since);
+    corr = await correlate(orderUid, qScope, top, since);
   } catch (e) {
     const searchError = e instanceof Error ? e.message : String(e);
     return {
@@ -247,11 +262,21 @@ export async function analyzeOrderExecution(
   }
 
   const jobs: JobAnalysis[] = [];
-  // One job's analysis is up to three sequential Orchestrator calls (details, logs,
-  // video) — with includeLogs/includeVideo on, a multi-retry order is a long wait.
-  for (const [i, job] of corr.jobs.entries()) {
-    jobs.push(await toJobAnalysis(job, scope, includeLogs, includeVideo));
-    onProgress?.(i + 1, corr.jobs.length, `analyzed job ${job.Key ?? "(no key)"}`);
+  // Detail, robot logs and video are fetched together per key (fetchJobBundle), so a
+  // multi-retry order's jobs no longer pay for each job's up-to-three Orchestrator round
+  // trips serially. Chunks of 5, not 10: each key now costs up to 3 concurrent calls
+  // (≤15 in flight, the same order as the previous per-job concurrency of 10 × 1 call).
+  let analyzed = 0;
+  let failedJobLookups = 0;
+  for (const batch of chunk(corr.jobKeys, 5)) {
+    await Promise.all(
+      batch.map(async (key) => {
+        const bundle = await fetchJobBundle(key, scope, includeLogs, includeVideo);
+        if (bundle.jobError !== undefined) failedJobLookups++;
+        if (bundle.job) jobs.push(toJobAnalysis(bundle.job, bundle, includeLogs, includeVideo));
+        onProgress?.(++analyzed, corr.jobKeys.length, `analyzed job ${key}`);
+      }),
+    );
   }
 
   // Newest first (search ordered desc, but key lookups can reorder).
@@ -264,6 +289,10 @@ export async function analyzeOrderExecution(
     cur.gapSincePreviousJobMs = msBetween(prev.endTime ?? prev.creationTime, cur.creationTime);
   }
   const latest = jobs[0];
+  const notes = [...corr.notes];
+  if (failedJobLookups) {
+    notes.push(`${failedJobLookups} executor job(s) failed to load from their queue-item key.`);
+  }
 
   return {
     orderUid,
@@ -282,7 +311,7 @@ export async function analyzeOrderExecution(
     jobs,
     searchMode: corr.searchMode,
     ...(corr.signals.length ? { queueItemSignals: corr.signals } : {}),
-    ...(corr.notes.length ? { notes: corr.notes } : {}),
+    ...(notes.length ? { notes } : {}),
     ...(corr.searchError ? { searchError: corr.searchError } : {}),
   };
 }

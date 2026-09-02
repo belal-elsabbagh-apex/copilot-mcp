@@ -156,7 +156,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.27.0";
+const VERSION = "1.28.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -566,8 +566,9 @@ server.registerTool(
       "QUEUED_NOT_PICKED_UP. Member PHI / the JWT token in the item are never surfaced; " +
       "token/callbackContext are stripped from the returned job output. Jobs live in a per-env UiPath folder " +
       "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
-      "or an explicit folder. If Orchestrator rejects the queue-item filter, it falls back to scanning " +
-      "the `top` most-recent queue items — pass `since` for prod. Optionally enrich with the order's current BE " +
+      "or an explicit folder. `since` narrows the queue-item search (automatically retried unbounded if nothing matches); " +
+      "if Orchestrator rejects the filter entirely it falls back to scanning the `top` most-recent " +
+      "queue items. Optionally enrich with the order's current BE " +
       "status (same env). Per-job logDigest/video fetches are best-effort — one job's fetch " +
       "failure never fails the whole call, it surfaces on just that job as logsError/videoError. " +
       "Returns {orderUid, env, folder, matched, jobCount, queueItemsScanned, " +
@@ -589,7 +590,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "ISO date lower bound. Bounds the recent-scan fallback used when Orchestrator rejects the queue-item filter — recommended for env=prod",
+          "ISO date lower bound on the queue item's CreationTime. Narrows the primary queue-item search (retried without the bound if nothing matches) and the recent-scan fallback — recommended for env=prod",
         ),
       top: z
         .number()
@@ -637,6 +638,22 @@ server.registerTool(
       const extraSteps = enrichOrderState ? 1 : 0;
       let jobsDone = 0;
       let jobTotal = 0;
+      // Started before the UiPath analysis, not after: BE login/verify shares no state
+      // with it, so the two used to run serially for no reason. The try/catch lives
+      // inside the IIFE so a BE failure can never surface as an unhandled rejection or
+      // fail the tool, exactly as before.
+      const enrichment = enrichOrderState
+        ? (async () => {
+            try {
+              const envCreds = resolveCreds(profile ?? null)[env];
+              const client = makeClient(envCreds.be, env);
+              await login(client, envCreds.email, envCreds.password);
+              return await verify(client, orderUid);
+            } catch (e) {
+              return { error: toMessage(e) };
+            }
+          })()
+        : null;
       const out: Record<string, unknown> = {
         ...(await analyzeOrderExecution(orderUid, {
           env,
@@ -652,15 +669,8 @@ server.registerTool(
           },
         })),
       };
-      if (enrichOrderState) {
-        try {
-          const envCreds = resolveCreds(profile ?? null)[env];
-          const client = makeClient(envCreds.be, env);
-          await login(client, envCreds.email, envCreds.password);
-          out["currentOrderState"] = await verify(client, orderUid);
-        } catch (e) {
-          out["currentOrderState"] = { error: toMessage(e) };
-        }
+      if (enrichment) {
+        out["currentOrderState"] = await enrichment;
         reportProgress(extra, jobsDone + 1, jobTotal + 1, "enriched order state");
       }
       return ok(out);
@@ -1699,7 +1709,7 @@ server.registerTool(
         .optional()
         .default(false)
         .describe("Correlate each stuck order to its UiPath job(s) for a verdict"),
-      since: z.string().optional().describe("ISO lower bound for the UiPath job search"),
+      since: z.string().optional().describe("ISO lower bound for the UiPath queue-item search"),
       top: z
         .number()
         .int()

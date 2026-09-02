@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.0] - 2026-09-03
+
+`analyze_order_execution` got materially slower in v1.27.0's queue-item correlation
+(the correctness of that change was never in question — only its cost). This release
+keeps that correctness and removes the added latency: a cheaper, time-bounded primary
+query and one fewer serial Orchestrator round trip per job. Measured on a real
+heavily-retried prod order against a live tenant: 37-50% faster end to end with the
+same `jobCount`/`queueItemsScanned`, and a `since`-bounded search that actually
+narrows the scan (13.4s -> 6.7s) instead of the bound being silently ignored.
+
+### Fixed
+
+- **`analyze_order_execution`'s `since` now actually bounds the primary queue-item
+  search.** v1.27.0 threaded `since` into the recent-scan *fallback* only; the
+  `contains(SpecificData, uid)` tier-1 query — the one every call actually takes —
+  ran an unbounded, unindexed substring scan regardless of `since`, confirmed live:
+  a non-matching order costs 2-9s per call even returning zero rows. `since` now
+  joins the tier-1 `$filter` as `CreationTime gt <since>` (an indexed predicate), and
+  a single-order call that matches nothing within the bound is retried once,
+  unbounded, so recall is unaffected for the common case (`find_stuck_orders`'s bulk
+  cross-check is unchanged — recall there was never the concern, latency was).
+
+### Changed
+
+- **`searchQueueItemsByOrderId`'s tier-1 query is now `$select`-projected** to the 8
+  fields `confirmQueueItemMatch` actually reads, instead of the full `QueueItemDto`
+  (member PHI + a JWT `token` in `SpecificContent`, still selected whole since a
+  nested select nulls it, plus ~20 unused queue/exception/org-unit fields dropped) for
+  every one of up to `top` (default 50) matched rows. Self-correcting if a tenant
+  doesn't honor it: a query that throws or scans rows but confirms none is
+  transparently re-issued with full rows (`notes` reports which happened), then falls
+  back to the unprojected recent-scan on a second failure, exactly as before.
+- **Job detail, robot logs (up to 500 rows — the call's largest payload), and video
+  now fetch in one wave per job** (`Promise.allSettled`, keyed by the queue item's
+  `ExecutorJobKey`) instead of three sequential `await`s — the logs/video legs no
+  longer wait on the detail response first. Hydration batches shrink from 10 to 5
+  concurrent jobs to hold total in-flight Orchestrator calls roughly steady (up to 3
+  calls/job now vs. 1 before).
+- **`analyze_order_execution`'s optional BE order-state enrichment (`enrichOrderState`)
+  now overlaps the UiPath analysis** instead of running strictly after it — the two
+  share no state, so a BE `login`+`verify` no longer adds its full round trip on top
+  of the Orchestrator work.
+
 ## [1.27.0] - 2026-08-24
 
 Correlate orders to their UiPath jobs via the queue item, not `OutputArguments`

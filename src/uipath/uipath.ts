@@ -698,13 +698,23 @@ export interface QueueItemSearchResult {
   searchError?: string; // set when tier 1 was rejected and the recent-scan fallback ran
 }
 
-// Find the queue item(s) an order flowed through, PHI-safe. Tier 1: server-side
-// contains(SpecificData, uid) — filter on the raw SpecificData JSON string (nested
-// SpecificContent/orderUid filtering isn't supported), ordered CreationTime desc so
-// a still-New (not-yet-picked-up) item isn't pushed past $top. Tier 2 on rejection:
-// a bounded recent-QueueItems scan confirmed client-side (mirrors acquireCandidates
-// / listRecentJobs). No $expand — the QueueItems endpoint nulls a nested $select and
-// 400s on an outer $select combined with $expand; the full item is read defensively.
+// Exactly the fields confirmQueueItemMatch reads. SpecificContent is selected WHOLE:
+// a nested $select (SpecificContent/orderUid) comes back null from this endpoint, and an
+// outer $select combined with an $expand 400s (see listQueueItems) — so no $expand here.
+const QUEUE_ITEM_SELECT =
+  "Id,Reference,Status,ExecutorJobKey,ProcessingExceptionType,RetryNumber,CreationTime,SpecificContent";
+
+// Find the queue item(s) an order flowed through, PHI-safe. Three tiers:
+// Tier 1 — server-side contains(SpecificData, uid) — filter on the raw SpecificData JSON
+// string (nested SpecificContent/orderUid filtering isn't supported) — narrowed by
+// `since` (indexed CreationTime bound) when given, projected down to
+// QUEUE_ITEM_SELECT since only a handful of fields are ever read from a match.
+// Ordered CreationTime desc so a still-New (not-yet-picked-up) item isn't pushed past $top.
+// Tier 1b — the guard that makes the $select safe: if the projected query throws, or scans
+// rows but confirms none (the tenant may silently null SpecificContent under $select rather
+// than 400ing), re-issue the identical filter with full rows. Tier 2 — only when tier 1b
+// itself throws: a bounded recent-QueueItems scan confirmed client-side (mirrors
+// acquireCandidates / listRecentJobs), no $select (last-resort path).
 export async function searchQueueItemsByOrderId(
   orderId: string,
   scope: FolderScope,
@@ -718,23 +728,55 @@ export async function searchQueueItemsByOrderId(
       .map((r) => confirmQueueItemMatch(r, needle))
       .filter((m): m is QueueItemMatch => m !== null);
   const escaped = needle.replace(/'/g, "''"); // OData single-quote escaping
-  try {
-    const raws = odataValues<unknown>(
+
+  const clauses = [`contains(SpecificData, '${escaped}')`];
+  if (since) clauses.push(`CreationTime gt ${new Date(since).toISOString()}`);
+  const $filter = clauses.join(" and ");
+
+  const containsQuery = async (select: boolean): Promise<unknown[]> =>
+    odataValues<unknown>(
       await uipathGet(
         "/odata/QueueItems",
         {
-          $filter: `contains(SpecificData, '${escaped}')`,
+          $filter,
           $orderby: "CreationTime desc",
           $top: String(top),
+          ...(select ? { $select: QUEUE_ITEM_SELECT } : {}),
         },
         scope.folderPath,
         scope.orgUnitId,
       ),
     );
-    return { matches: confirmAll(raws), scanned: raws.length, searchMode: "contains", notes: [] };
+
+  const notes: string[] = [];
+  try {
+    const raws = await containsQuery(true);
+    const matches = confirmAll(raws);
+    if (matches.length > 0 || raws.length === 0) {
+      return { matches, scanned: raws.length, searchMode: "contains", notes };
+    }
+    notes.push(
+      "queue-item $select returned rows with no readable SpecificContent; re-queried with full rows.",
+    );
   } catch (e) {
-    const searchError = e instanceof Error ? e.message : String(e);
-    const scanParams: Record<string, string> = { $orderby: "CreationTime desc", $top: String(top) };
+    const msg = e instanceof Error ? e.message : String(e);
+    notes.push(`queue-item $select rejected by Orchestrator; re-queried with full rows. (${msg})`);
+  }
+
+  try {
+    const fullRaws = await containsQuery(false);
+    return {
+      matches: confirmAll(fullRaws),
+      scanned: fullRaws.length,
+      searchMode: "contains",
+      notes,
+    };
+  } catch (e2) {
+    const searchError = e2 instanceof Error ? e2.message : String(e2);
+    const scanParams: Record<string, string> = {
+      $orderby: "CreationTime desc",
+      $top: String(top),
+    };
     if (since) scanParams["$filter"] = `CreationTime gt ${new Date(since).toISOString()}`;
     const raws = odataValues<unknown>(
       await uipathGet("/odata/QueueItems", scanParams, scope.folderPath, scope.orgUnitId),
@@ -744,7 +786,7 @@ export async function searchQueueItemsByOrderId(
       matches: confirmAll(raws),
       scanned: raws.length,
       searchMode: "recent-scan",
-      notes: [note],
+      notes: [...notes, note],
       searchError,
     };
   }
