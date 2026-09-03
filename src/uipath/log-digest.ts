@@ -1,11 +1,11 @@
 // Condensed, failure-focused view of a job's robot logs: consecutive-duplicate
 // collapsing (retry loops), stall detection (largest timestamp gaps), and a
-// structured fault extracted from the headline error. Pure — analyze_order_execution
-// attaches the digest instead of the raw (up to 500-line) log dump; the complete
-// logs stay one get_job_logs call away.
+// structured fault extracted from the headline error. Pure — get_job/
+// find_order_queue_items attach the digest instead of the raw (up to 500-line) log
+// dump; the complete logs stay one get_job_logs call away.
 
-import { isFailureLog } from "../copilot/output-analysis.js";
 import { normalizeError, topError } from "./faults.js";
+import { isFailureLog } from "./log-semantics.js";
 import type { JobLog, UiPathJob } from "./uipath.js";
 
 export interface CollapsedLog {

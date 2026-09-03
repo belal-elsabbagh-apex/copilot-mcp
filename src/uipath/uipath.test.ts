@@ -160,7 +160,7 @@ describe("confirmQueueItemMatch", () => {
     ...over,
   });
 
-  test("projects a real match to the PHI-safe shape (no SpecificContent surfaced)", () => {
+  test("projects a real match to the new shape (SpecificContent returned, token redacted)", () => {
     const m = confirmQueueItemMatch(raw({}), "ae03574b-1234");
     expect(m).toEqual({
       id: 42,
@@ -170,10 +170,14 @@ describe("confirmQueueItemMatch", () => {
       processingExceptionType: "BusinessException",
       retryNumber: 1,
       creationTime: "2026-07-01T00:00:00Z",
+      specificContent: { orderUid: "ae03574b-1234", MemberID: "m1", token: "[redacted]" },
+      queueDefinitionId: 0,
     });
-    // The projection carries no member PHI / JWT.
+    expect(m?.specificContent["MemberID"]).toBe("m1");
+    expect(m?.specificContent["orderUid"]).toBe("ae03574b-1234");
+    expect(m?.specificContent["token"]).toBe("[redacted]");
+    // The JWT itself never leaks, even though the rest of the payload does.
     expect(JSON.stringify(m)).not.toContain("jwt.secret");
-    expect(JSON.stringify(m)).not.toContain("MemberID");
   });
 
   test("rejects an incidental substring hit whose SpecificContent.orderUid differs", () => {

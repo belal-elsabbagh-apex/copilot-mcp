@@ -59,6 +59,29 @@ function ageHours(row: BeOrder): number | null {
   return null;
 }
 
+// The order's own BE creationDate is a hard floor for its queue item's CreationTime —
+// UiPath cannot queue an order before Copilot creates it. Narrowing the per-order search
+// to (creationDate - margin) is therefore a free, correctness-preserving tightening (it
+// can never cause a missed match, unlike ageHours()'s clinical dates, which can sit
+// arbitrarily far from when the order was actually queued) — it turns an otherwise
+// unbounded contains(SpecificData, uid) scan into one bounded to the relevant window,
+// without an extra Orchestrator round trip (creationDate is already in the page scan).
+// An explicit caller `since` is a floor too, so the tighter (later) of the two wins —
+// this never loosens a bound the caller deliberately set.
+const CREATION_TO_QUEUE_MARGIN_MS = 24 * 3_600_000; // clock skew / BE -> queue processing lag
+export function queueSearchSince(
+  callerSince: string | undefined,
+  orderCreationDate: string | undefined,
+): string | undefined {
+  const callerMs = callerSince ? Date.parse(callerSince) : Number.NaN;
+  const orderMs = orderCreationDate ? Date.parse(orderCreationDate) : Number.NaN;
+  const floors = [
+    Number.isFinite(callerMs) ? callerMs : undefined,
+    Number.isFinite(orderMs) ? orderMs - CREATION_TO_QUEUE_MARGIN_MS : undefined,
+  ].filter((v): v is number => v !== undefined);
+  return floors.length ? new Date(Math.max(...floors)).toISOString() : undefined;
+}
+
 // Summarize an order's queue item(s) into a coarse verdict. The queue item is the
 // source of truth for what happened to the order: its Status directly determines
 // faulted (Failed) / running (InProgress) / stuck-but-succeeded (Successful), and a
@@ -103,6 +126,7 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
 
   const onProgress = args.onProgress;
   const stuck: StuckOrder[] = [];
+  const creationDateByUid = new Map<string, string | undefined>(); // internal-only: not part of StuckOrder's public shape
   let scanned = 0;
   for (let page = 0; page < scanPages; page++) {
     const { rows } = await filterOrders(client, {
@@ -125,6 +149,7 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
         insurance: o.insurance?.name,
         ageHours: age,
       });
+      if (o.orderUid) creationDateByUid.set(o.orderUid, o.creationDate);
     }
     onProgress?.(
       page + 1,
@@ -142,7 +167,14 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
     await crossCheckUipath(
       stuck,
       async (orderUid) =>
-        (await searchQueueItemsByOrderId(orderUid, scope, top, args.since)).matches,
+        (
+          await searchQueueItemsByOrderId(
+            orderUid,
+            scope,
+            top,
+            queueSearchSince(args.since, creationDateByUid.get(orderUid)),
+          )
+        ).matches,
       (done, total, label) => onProgress?.(scanPages + done, scanPages + total, label),
     );
   }

@@ -3,11 +3,11 @@
 // (chrome background-proxy removed — direct fetch with the bearer from config.ts).
 
 import { type Env, getUipath } from "../config/config.js";
-import { isFailureLog } from "../copilot/output-analysis.js";
 import { folderIdFor } from "../mcp/reference.js";
 import { chunk, isRecord, type StepProgress, safeJsonParse } from "../shared/util.js";
 import { invalidateBearerToken, resolveBearerToken } from "./auth.js";
 import { isNotFound, UiPathApiError } from "./errors.js";
+import { isFailureLog } from "./log-semantics.js";
 
 export type { Env };
 
@@ -90,6 +90,32 @@ const odataValues = <T>(data: unknown): T[] =>
 
 type HttpMethod = "GET" | "POST" | "DELETE";
 
+// GET/odata/Jobs and GET/odata/QueueItems filtered queries are rate-limited by
+// Orchestrator at 100 req/min/tenant for direct API usage (this server's usage —
+// "non-automation" per UiPath's classification), 1000/min for the Orchestrator
+// System Activities. That's exactly fetchJobByKey / searchQueueItemsByOrderId /
+// listQueueItems — the calls analyze_order_execution and find_stuck_orders fan out
+// concurrently per job/order. A 429 carries a `Retry-After` (seconds) telling the
+// caller precisely when the window reopens
+// (https://docs.uipath.com/orchestrator/automation-cloud/latest/api-guide/rate-limits#exposed-headers) —
+// honor it instead of failing the whole analysis/sweep outright.
+const MAX_RATE_LIMIT_RETRIES = 5;
+const DEFAULT_RATE_LIMIT_RETRY_MS = 5_000; // used when Retry-After is missing/unparseable
+const MAX_RATE_LIMIT_RETRY_MS = 65_000; // clamp: one rate-limit window, never longer
+
+const sleep = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+};
+
+function rateLimitDelayMs(retryAfterHeader: string | null): number {
+  const seconds = retryAfterHeader ? Number(retryAfterHeader) : Number.NaN;
+  const ms =
+    Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : DEFAULT_RATE_LIMIT_RETRY_MS;
+  return Math.min(ms, MAX_RATE_LIMIT_RETRY_MS);
+}
+
 interface UipathRequestOpts {
   params?: Record<string, string>; // become the OData querystring
   body?: unknown; // JSON.stringify'd; adds Content-Type: application/json
@@ -104,12 +130,16 @@ interface UipathRequestOpts {
 // DELETE 204), or throws a UiPathApiError (method/url/status/body) on a non-2xx.
 // A 401 gets exactly one retry with a freshly-refetched token — recovers a
 // revoked/expired OAuth token instead of failing for the rest of the process (a
-// no-op retry, harmless, when only a static bearer/PAT is configured).
+// no-op retry, harmless, when only a static bearer/PAT is configured). A 429 gets up
+// to MAX_RATE_LIMIT_RETRIES retries, sleeping the server-told Retry-After each time
+// (see the rate-limit comment above) — attempt and rateLimitAttempt are independent
+// counters so a 401 retry never eats into the 429 budget or vice versa.
 async function uipathRequest(
   method: HttpMethod,
   path: string,
   opts: UipathRequestOpts = {},
   attempt = 0,
+  rateLimitAttempt = 0,
 ): Promise<unknown> {
   const cfg = getUipath();
   const qs = new URLSearchParams(opts.params ?? {}).toString();
@@ -132,7 +162,11 @@ async function uipathRequest(
   });
   if (res.status === 401 && attempt === 0) {
     invalidateBearerToken();
-    return uipathRequest(method, path, opts, attempt + 1);
+    return uipathRequest(method, path, opts, attempt + 1, rateLimitAttempt);
+  }
+  if (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+    await sleep(rateLimitDelayMs(res.headers.get("Retry-After")));
+    return uipathRequest(method, path, opts, attempt, rateLimitAttempt + 1);
   }
   const text = await res.text();
   if (res.status >= 400) {
@@ -650,14 +684,16 @@ export async function listQueueItems(
 
 // ---- Queue-item order correlation (the order → job correlation path) --------
 
-// A queue item projected to a PHI-SAFE shape. Every order flows through UiPath as a
+// A queue item projected for order↔job correlation. Every order flows through UiPath as a
 // queue item, and the item is the ONE place the orderUid reliably lives: a
 // queue-consumer job carries it in NEITHER its InputArguments NOR its (all-null,
 // when faulted) OutputArguments. The item links back to its job via ExecutorJobKey,
 // so this is the single correlation path — it reaches faulted/running consumer jobs
 // (which an OutputArguments scan structurally misses) as well as the successful ones.
-// SpecificContent carries member PHI + a JWT `token`, so it is NEVER surfaced: only
-// orderUid is read from it (to confirm), mirroring output-schema.ts's token stripping.
+// specificContent is returned DELIBERATELY, in full: the point is divergence analysis —
+// comparing what Copilot actually sent to UiPath (member/clinical fields included)
+// against the order record. The JWT `token` is the only redacted field (a live
+// credential, opaque, and useless for divergence) — its value becomes "[redacted]".
 export interface QueueItemMatch {
   id: number;
   reference: string;
@@ -666,17 +702,24 @@ export interface QueueItemMatch {
   processingExceptionType: string; // e.g. BusinessException; "" when none
   retryNumber: number;
   creationTime: string;
+  specificContent: Record<string, unknown>; // full payload; token redacted
+  queueDefinitionId: number; // which queue (submit vs sync) the item sits in
 }
 
 // Confirm a raw QueueItems DTO truly belongs to `orderId` (the
 // contains(SpecificData, uid) filter can match incidental substrings) and project
-// it to the PHI-safe QueueItemMatch. Returns null for a non-match. Pure —
+// it to QueueItemMatch. Returns null for a non-match. Pure —
 // unit-tested, no HTTP. Nested SpecificContent/orderUid filtering is NOT supported
 // by Orchestrator's OData, so the server filters the raw SpecificData JSON string
 // and this re-confirms against the parsed SpecificContent.orderUid client-side.
 export function confirmQueueItemMatch(raw: unknown, orderId: string): QueueItemMatch | null {
-  const orderUid = strField(recField(raw, "SpecificContent"), "orderUid");
+  const rawContent = recField(raw, "SpecificContent");
+  const orderUid = strField(rawContent, "orderUid");
   if (!orderUid || orderUid !== orderId.trim()) return null;
+  const specificContent: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawContent)) {
+    specificContent[k] = k === "token" ? "[redacted]" : v;
+  }
   return {
     id: numField(raw, "Id"),
     reference: strField(raw, "Reference"),
@@ -685,6 +728,8 @@ export function confirmQueueItemMatch(raw: unknown, orderId: string): QueueItemM
     processingExceptionType: strField(raw, "ProcessingExceptionType"),
     retryNumber: numField(raw, "RetryNumber"),
     creationTime: strField(raw, "CreationTime"),
+    specificContent,
+    queueDefinitionId: numField(raw, "QueueDefinitionId"),
   };
 }
 
@@ -702,7 +747,7 @@ export interface QueueItemSearchResult {
 // a nested $select (SpecificContent/orderUid) comes back null from this endpoint, and an
 // outer $select combined with an $expand 400s (see listQueueItems) — so no $expand here.
 const QUEUE_ITEM_SELECT =
-  "Id,Reference,Status,ExecutorJobKey,ProcessingExceptionType,RetryNumber,CreationTime,SpecificContent";
+  "Id,Reference,Status,ExecutorJobKey,ProcessingExceptionType,RetryNumber,CreationTime,SpecificContent,QueueDefinitionId";
 
 // Find the queue item(s) an order flowed through, PHI-safe. Three tiers:
 // Tier 1 — server-side contains(SpecificData, uid) — filter on the raw SpecificData JSON

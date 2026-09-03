@@ -4,7 +4,7 @@
 // Thin wiring layer — src/ is organized by domain (config/, copilot/, uipath/, mcp/, shared/);
 // tool logic lives in per-domain modules, e.g.:
 //   - config/config.ts     single-file config (copilot creds + uipath args) + validation
-//   - copilot/analyze.ts   analyze_order_execution orchestration
+//   - uipath/queue.ts      find_order_queue_items (order -> UiPath queue item(s) + job keys)
 //   - uipath/faults.ts     build_faulted_job_issue (faulted job -> GitHub issue payload)
 // Tools:
 //   - find_clone_candidates    list recent prod orders that are actually cloneable
@@ -12,7 +12,7 @@
 //   - create_preprod_order     mint a fresh pre-prod order from an explicit spec (stops at forReview, never submits)
 //   - submit_preprod_order     submit a pre-prod order sitting at forReview (explicit, separate write)
 //   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
-//   - analyze_order_execution  trace an order to its UiPath Orchestrator job(s) and diagnose the run (read-only)
+//   - find_order_queue_items   find the UiPath queue item(s) an order flowed through + their job keys (read-only)
 //   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
 //   - list_queues              list queue definitions in a folder (read-only; discovers dev-clone queue ids)
 //   - list_processes           list releases/processes in a folder (read-only; releaseKey + pin verification)
@@ -41,7 +41,6 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { configStatus, getFeedbackConfig, onConfigReload, resolveCreds } from "./config/config.js";
-import { analyzeOrderExecution } from "./copilot/analyze.js";
 import {
   assertPreProdClient,
   type BeOrder,
@@ -54,7 +53,6 @@ import {
   ORDER_MODE,
   submitOrder,
   toMDY,
-  verify,
 } from "./copilot/copilot-client.js";
 import { runDoctor } from "./copilot/doctor.js";
 import { type MintSpec, mintPreprodOrder } from "./copilot/mirror.js";
@@ -93,7 +91,7 @@ import { msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
-import { listQueue, pullQueueItem } from "./uipath/queue.js";
+import { findOrderQueueItems, listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import {
   fetchJobLogs,
@@ -156,7 +154,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.28.0";
+const VERSION = "1.29.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -540,11 +538,11 @@ server.registerTool(
   },
 );
 
-// ---- analyze_order_execution ---------------------------------------------
+// ---- find_order_queue_items ------------------------------------------------
 server.registerTool(
-  "analyze_order_execution",
+  "find_order_queue_items",
   {
-    title: "Analyze a Copilot order's UiPath Orchestrator execution",
+    title: "Find the UiPath queue item(s) a Copilot order flowed through",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -552,36 +550,27 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Given a Copilot orderUid, find the matching UiPath Orchestrator job(s) and diagnose the run: " +
-      "job State + verdict, computed durations and retry gaps, a structured fault (headline error, " +
-      "stable signature, exception type), failure-language heuristics, a condensed log digest " +
-      "(per-level counts, collapsed failure lines, stall gaps), a video link, and a deep link into " +
-      "Orchestrator. The digest is deliberately concise — benign lines are omitted and messages " +
-      "truncated. IF THE DIGEST IS NOT ENOUGH to explain the failure, call get_job_logs with the " +
-      "job's `key` for the complete raw logs (filters: minLevel/contains/onlyFailures/tail). " +
-      "READ-ONLY — never writes to UiPath or the BE. Correlates via the order's UiPath queue " +
-      "item(s): every order flows through a queue item carrying the orderUid + the ExecutorJobKey of " +
-      "the job that ran it, so this reaches faulted/still-running consumer jobs an output scan can't. " +
-      "A queue item still 'New' (not yet picked up by a robot) has no job and verdicts as " +
-      "QUEUED_NOT_PICKED_UP. Member PHI / the JWT token in the item are never surfaced; " +
-      "token/callbackContext are stripped from the returned job output. Jobs live in a per-env UiPath folder " +
-      "(env='prod' -> 'Authorization', env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) " +
-      "or an explicit folder. `since` narrows the queue-item search (automatically retried unbounded if nothing matches); " +
-      "if Orchestrator rejects the filter entirely it falls back to scanning the `top` most-recent " +
-      "queue items. Optionally enrich with the order's current BE " +
-      "status (same env). Per-job logDigest/video fetches are best-effort — one job's fetch " +
-      "failure never fails the whole call, it surfaces on just that job as logsError/videoError. " +
-      "Returns {orderUid, env, folder, matched, jobCount, queueItemsScanned, " +
-      "summary:{latestState,verdict,reasons}, queueItemSignals?, " +
-      "jobs:[{key, state, verdict, durationMs, gapSincePreviousJobMs, fault, logDigest, logsError?, " +
-      "videoError?, ...}]}.",
+      "Given a Copilot orderUid, find the UiPath Orchestrator queue item(s) it flowed through " +
+      "and their deduped ExecutorJobKeys — every order flows through a queue item carrying the " +
+      "orderUid + the ExecutorJobKey of the job that ran it, so this reaches faulted/still-running " +
+      "consumer jobs an OutputArguments scan can't. READ-ONLY. The item's full SpecificContent is " +
+      "returned deliberately, in full (member/clinical fields visible) — the point is divergence " +
+      "analysis: comparing what Copilot actually sent to UiPath against the order record from " +
+      "get_order. Only the JWT `token` is redacted (a live credential, opaque, useless for " +
+      "divergence). Feed `jobKeys` straight into get_job's jobKeys batch with " +
+      "includeLogDigest=true to diagnose every run and retry in one call. `count === 0` means the " +
+      "order never reached UiPath; `jobKeys: []` with items present means it is queued but not yet " +
+      "picked up by a robot. Jobs live in a per-env UiPath folder (env='prod' -> 'Authorization', " +
+      "env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) or an explicit folder. " +
+      "`since` narrows the queue-item search (automatically retried unbounded if nothing matches) " +
+      "— pass the order's creationDate from get_order. Returns {orderUid, env, folder, searchMode, " +
+      "scanned, count, jobKeys, items:[{id,reference,status,executorJobKey,processingExceptionType," +
+      "retryNumber,creationTime,specificContent,queueDefinitionId}], notes?, searchError?}.",
     inputSchema: {
-      orderUid: z.string().min(8).describe("Copilot orderUid to trace"),
+      orderUid: z.string().min(8).describe("Copilot orderUid to correlate"),
       env: z
         .enum(["prod", "pre_prod"])
-        .describe(
-          "Which UiPath folder/env the job ran in: prod='Authorization', pre_prod='Authorization Dev Clone' (required)",
-        ),
+        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
       folder: z
         .string()
         .optional()
@@ -590,92 +579,24 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "ISO date lower bound on the queue item's CreationTime. Narrows the primary queue-item search (retried without the bound if nothing matches) and the recent-scan fallback — recommended for env=prod",
+          "ISO lower bound on the queue item's CreationTime — pass the order's creationDate " +
+            "from get_order; retried without the bound if nothing matches",
         ),
-      top: z
-        .number()
-        .int()
-        .min(1)
-        .max(500)
-        .optional()
-        .default(50)
-        .describe("Max jobs to consider (also the fallback recent-scan window)"),
-      includeLogs: z
-        .boolean()
-        .optional()
-        .default(true)
-        .describe(
-          "Fetch robot logs (up to 500) per matched job and return them as a condensed " +
-            "failure-focused digest (level counts, collapsed failure lines, stall gaps) — " +
-            "use get_job_logs for the complete raw logs",
-        ),
-      includeVideo: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Fetch the job's video recording URL (extra round-trip; off by default)"),
-      enrichOrderState: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Also fetch the order's current BE status (same env; needs Copilot creds)"),
-      profile: z
-        .string()
-        .min(1)
-        .describe(
-          "Credential profile / account name from config (used for enrichOrderState) (required)",
-        ),
+      top: z.number().int().min(1).max(500).optional().default(50),
+      includeSpecificContent: z.boolean().optional().default(true),
     },
   },
-  async (
-    { orderUid, env, folder, since, top, includeLogs, includeVideo, enrichOrderState, profile },
-    extra,
-  ) => {
+  async ({ orderUid, env, folder, since, top, includeSpecificContent }, extra) => {
     try {
-      mcpLog(server, "debug", `analyzing order ${orderUid}`, { env });
-      // Real per-job progress (each job = up to 3 Orchestrator calls), with the optional
-      // order-state enrichment counted as one extra step so the total holds for the run.
-      const extraSteps = enrichOrderState ? 1 : 0;
-      let jobsDone = 0;
-      let jobTotal = 0;
-      // Started before the UiPath analysis, not after: BE login/verify shares no state
-      // with it, so the two used to run serially for no reason. The try/catch lives
-      // inside the IIFE so a BE failure can never surface as an unhandled rejection or
-      // fail the tool, exactly as before.
-      const enrichment = enrichOrderState
-        ? (async () => {
-            try {
-              const envCreds = resolveCreds(profile ?? null)[env];
-              const client = makeClient(envCreds.be, env);
-              await login(client, envCreds.email, envCreds.password);
-              return await verify(client, orderUid);
-            } catch (e) {
-              return { error: toMessage(e) };
-            }
-          })()
-        : null;
-      const out: Record<string, unknown> = {
-        ...(await analyzeOrderExecution(orderUid, {
-          env,
-          folder,
-          since,
-          top,
-          includeLogs,
-          includeVideo,
-          onProgress: (done, total, label) => {
-            jobsDone = done;
-            jobTotal = total;
-            reportProgress(extra, done, total + extraSteps, label);
-          },
-        })),
-      };
-      if (enrichment) {
-        out["currentOrderState"] = await enrichment;
-        reportProgress(extra, jobsDone + 1, jobTotal + 1, "enriched order state");
-      }
-      return ok(out);
+      return ok(
+        await withHeartbeat(
+          extra,
+          "Orchestrator",
+          findOrderQueueItems({ orderUid, env, folder, since, top, includeSpecificContent }),
+        ),
+      );
     } catch (e) {
-      return toolError("analyze_order_execution", e, VERSION);
+      return toolError("find_order_queue_items", e, VERSION);
     }
   },
 );
@@ -1016,7 +937,7 @@ server.registerTool(
         .min(1)
         .optional()
         .describe(
-          "The job's GUID Key (from analyze_order_execution / list_jobs). Provide this OR " +
+          "The job's GUID Key (from find_order_queue_items / list_jobs). Provide this OR " +
             "jobKeys, not both",
         ),
       jobKeys: z
@@ -1070,7 +991,7 @@ server.registerTool(
         .default(false)
         .describe(
           "Return full untruncated Message text (default: truncated to 400 chars, matching " +
-            "analyze_order_execution's log digest). Use when you need a complete stack trace.",
+            "get_job's log digest). Use when you need a complete stack trace.",
         ),
     },
   },
@@ -1356,7 +1277,7 @@ server.registerTool(
     description:
       "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job, and " +
       "the job-first diagnostic when you have a Key but no orderUid " +
-      "(list_jobs is an unkeyed scan; analyze_order_execution is order-correlated and heavy). " +
+      "(list_jobs is an unkeyed scan; find_order_queue_items is order-correlated). " +
       "Pass jobKeys (up to 25) instead of jobKey to diagnose several jobs — e.g. every job list_jobs " +
       "just returned — in ONE call instead of looping get_job per key. READ-ONLY. `output` is the " +
       "job's parsed OutputArguments with token/callbackContext stripped. With includeLogDigest=true " +
@@ -1709,7 +1630,15 @@ server.registerTool(
         .optional()
         .default(false)
         .describe("Correlate each stuck order to its UiPath job(s) for a verdict"),
-      since: z.string().optional().describe("ISO lower bound for the UiPath queue-item search"),
+      since: z
+        .string()
+        .optional()
+        .describe(
+          "Explicit ISO floor for the UiPath queue-item search. Each order's own creationDate " +
+            "already tightens its search to that date (queue items can't predate the order), so " +
+            "this is only needed to push the floor even later, or when crossCheckUipath is used " +
+            "without a BE-sourced creationDate",
+        ),
       top: z
         .number()
         .int()

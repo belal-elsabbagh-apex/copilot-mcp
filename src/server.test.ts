@@ -42,7 +42,7 @@ const EXPECTED = [
   "create_preprod_order",
   "submit_preprod_order",
   "build_queue_item",
-  "analyze_order_execution",
+  "find_order_queue_items",
   "pull_queue_item",
   "list_queue_items",
   "list_jobs",
@@ -147,9 +147,9 @@ describe("tool input schemas accept representative payloads", () => {
       valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" },
       invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
     },
-    analyze_order_execution: {
-      valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
-      invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
+    find_order_queue_items: {
+      valid: { orderUid: "abcdefgh", env: "prod" },
+      invalid: { orderUid: "abcdefgh" }, // env is required
     },
     diff_settings: { valid: { tags: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
     list_setting_sections: { valid: { tag: "orders" }, invalid: { tag: 123 } },

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { QueueItemMatch } from "../uipath/uipath.js";
-import { crossCheckUipath, type StuckOrder } from "./sweep.js";
+import { crossCheckUipath, queueSearchSince, type StuckOrder } from "./sweep.js";
 
 const stuckOrder = (orderUid: string | undefined): StuckOrder => ({ orderUid, ageHours: null });
 
@@ -12,6 +12,8 @@ const qItem = (over: Partial<QueueItemMatch>): QueueItemMatch => ({
   processingExceptionType: "",
   retryNumber: 0,
   creationTime: "2026-07-01T00:00:00Z",
+  specificContent: {},
+  queueDefinitionId: 0,
   ...over,
 });
 
@@ -103,5 +105,35 @@ describe("crossCheckUipath", () => {
       (done, total) => steps.push(`${done}/${total}`),
     );
     expect(steps).toEqual(["10/11", "11/11"]);
+  });
+});
+
+describe("queueSearchSince", () => {
+  test("no caller since, no order creationDate: unbounded", () => {
+    expect(queueSearchSince(undefined, undefined)).toBeUndefined();
+  });
+
+  test("no caller since: floors to the order's creationDate minus the processing margin", () => {
+    expect(queueSearchSince(undefined, "2026-08-20T12:00:00.000Z")).toBe(
+      "2026-08-19T12:00:00.000Z",
+    );
+  });
+
+  test("caller since later than the order's own floor: caller wins (tighter)", () => {
+    expect(queueSearchSince("2026-08-20T00:00:00.000Z", "2026-08-01T00:00:00.000Z")).toBe(
+      "2026-08-20T00:00:00.000Z",
+    );
+  });
+
+  test("order's own floor later than the caller since: order wins (tighter) — never loosened", () => {
+    expect(queueSearchSince("2026-01-01T00:00:00.000Z", "2026-08-20T12:00:00.000Z")).toBe(
+      "2026-08-19T12:00:00.000Z",
+    );
+  });
+
+  test("unparseable creationDate is ignored, falling back to the caller since", () => {
+    expect(queueSearchSince("2026-08-20T00:00:00.000Z", "not-a-date")).toBe(
+      "2026-08-20T00:00:00.000Z",
+    );
   });
 });

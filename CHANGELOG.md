@@ -4,6 +4,52 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.0] - 2026-09-03
+
+`analyze_order_execution` was a server-side orchestration that fetched job detail, logs,
+and video, then pre-computed a verdict, retry cadence, and heuristic commentary. That
+synthesis is better done by the calling model, which can already see the order record
+and reason about divergence — so this release replaces the tool with the one atomic
+capability nothing else exposed (order → queue item(s) + job keys) and moves the
+diagnosis logic into the `diagnose-order`/`triage-stuck-orders` prompts.
+
+### Added
+
+- **`find_order_queue_items`**: given an `orderUid` + `env`, returns the UiPath queue
+  item(s) it flowed through and their deduped `jobKeys` — feed those straight into
+  `get_job`'s `jobKeys` batch with `includeLogDigest=true`. `count === 0` means the order
+  never reached UiPath; `jobKeys: []` with items present means it is queued but not yet
+  picked up by a robot.
+- **`find_stuck_orders`'s UiPath cross-check now bounds its per-order queue-item search**
+  by the order's own BE `creationDate` (minus a 24h clock-skew/processing-lag margin,
+  `queueSearchSince`) in addition to any caller-supplied `since` — the tighter (later) of
+  the two wins, so an unbounded `contains(SpecificData, uid)` scan is now bounded to the
+  relevant window for every stuck order, at no extra Orchestrator round trip.
+- Test coverage for `uipathRequest`'s existing 429 rate-limit retry (honoring
+  `Retry-After`, then giving up after `MAX_RATE_LIMIT_RETRIES` consecutive 429s) — no
+  behavior change, the retry logic itself already shipped.
+
+### Changed
+
+- **BREAKING: queue-item matches now return the full `SpecificContent` payload**
+  (`QueueItemMatch.specificContent`), deliberately, for divergence analysis — comparing
+  what Copilot actually sent to UiPath against the order record. Only the JWT `token` is
+  redacted (`"[redacted]"`); member/clinical fields (`MemberID`, `callbackContext`, etc.)
+  are visible where they were previously stripped entirely. Also adds
+  `QueueItemMatch.queueDefinitionId` (which queue — submit vs sync — the item sits in).
+- **`diagnose-order` and `triage-stuck-orders` prompts now call `find_order_queue_items` +
+  `get_job` directly** instead of the removed `analyze_order_execution`, and state the
+  verdict/retry-cadence/divergence derivation rules inline for the model to apply.
+
+### Removed
+
+- **BREAKING: `analyze_order_execution` is gone.** Its correlation logic moved to
+  `find_order_queue_items`; verdict/analysis-comment synthesis is no longer computed
+  server-side — the calling prompt/model derives it from `get_job`'s `state`, `output`,
+  `fault`, and `logDigest`. `src/copilot/analyze.ts` and `src/copilot/output-analysis.ts`
+  are deleted; `isFailureLog` (still used by `get_job_logs`'s `onlyFailures` and
+  `get_job`'s `includeLogDigest`) moved to the new leaf module `src/uipath/log-semantics.ts`.
+
 ## [1.28.0] - 2026-09-03
 
 `analyze_order_execution` got materially slower in v1.27.0's queue-item correlation

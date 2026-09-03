@@ -216,3 +216,29 @@ describe("resolveBearerToken (exercised via uipathRequest/listRecentJobs)", () =
     expect(tokenCallsOf().length).toBe(2);
   });
 });
+
+describe("uipathRequest rate limiting (429)", () => {
+  test("retries after honoring the Retry-After header, then succeeds", async () => {
+    writeConfig({ bearer: "plain-bearer" });
+    responses.push(
+      new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }),
+      jobsPage([{ Id: 1 }]),
+    );
+    const jobs = await listRecentJobs(undefined, 1);
+    expect(jobs.length).toBe(1);
+    const jobCalls = calls.filter((c) => c.url.includes("/odata/Jobs"));
+    expect(jobCalls.length).toBe(2);
+    expect(jobCalls[1]?.headers["authorization"]).toBe("Bearer plain-bearer");
+  });
+
+  test("gives up after MAX_RATE_LIMIT_RETRIES consecutive 429s", async () => {
+    writeConfig({ bearer: "plain-bearer" });
+    for (let i = 0; i < 6; i++) {
+      responses.push(new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }));
+    }
+    const err = await listRecentJobs(undefined, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UiPathApiError);
+    expect((err as UiPathApiError).status).toBe(429);
+    expect(calls.length).toBe(6); // the initial attempt + exactly 5 retries, not an infinite loop
+  });
+});

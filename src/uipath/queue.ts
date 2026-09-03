@@ -22,8 +22,12 @@ import {
   getQueueItem,
   listQueueItems,
   type QueueItem,
+  type QueueItemMatch,
+  type QueueSearchMode,
+  resolveFolder,
   resolveOrgUnitId,
   scopeForEnv,
+  searchQueueItemsByOrderId,
 } from "./uipath.js";
 
 const URL_TXN_RE = /\/transactions\/(\d+)\/details/;
@@ -234,5 +238,68 @@ export async function listQueue(args: ListQueueArgs): Promise<ListQueueResult> {
       memberId: str(r.specificContent["MemberID"]),
       member: str(r.specificContent["MemberFullName"]),
     })),
+  };
+}
+
+// ---- find_order_queue_items -------------------------------------------------
+
+export interface FindOrderQueueItemsArgs {
+  orderUid: string;
+  env: Env;
+  folder?: string | undefined;
+  since?: string | undefined;
+  top?: number | undefined; // default 50
+  includeSpecificContent?: boolean | undefined; // default true
+}
+
+export interface FindOrderQueueItemsResult {
+  orderUid: string;
+  env: Env;
+  folder: string | undefined;
+  searchMode: QueueSearchMode;
+  scanned: number;
+  count: number;
+  jobKeys: string[]; // deduped ExecutorJobKeys, newest item first — feed straight into get_job's jobKeys
+  items: QueueItemMatch[];
+  notes?: string[];
+  searchError?: string;
+}
+
+// Resolve orderUid -> the UiPath queue item(s) it flowed through, plus their
+// deduped job keys. The only capability the deleted analyze_order_execution
+// orchestration exposed that no other tool does — everything past this (job
+// detail, logs, verdict/divergence synthesis) is left to get_job/get_job_logs
+// and the calling prompt/model.
+export async function findOrderQueueItems(
+  args: FindOrderQueueItemsArgs,
+): Promise<FindOrderQueueItemsResult> {
+  const { orderUid, env, folder, since, top = 50, includeSpecificContent = true } = args;
+  const folderPath = resolveFolder(env, folder) ?? "";
+  const scope: FolderScope = { orgUnitId: resolveOrgUnitId(env), folderPath };
+
+  let q = await searchQueueItemsByOrderId(orderUid, scope, top, since);
+  const notes = [...q.notes];
+  if (since && q.matches.length === 0) {
+    q = await searchQueueItemsByOrderId(orderUid, scope, top, undefined);
+    notes.push(...q.notes);
+    notes.push(`no queue item matched within since=${since}; retried without the time bound.`);
+  }
+
+  const jobKeys = [...new Set(q.matches.map((m) => m.executorJobKey).filter((k) => k))];
+  const items = includeSpecificContent
+    ? q.matches
+    : q.matches.map((m) => ({ ...m, specificContent: {} }));
+
+  return {
+    orderUid,
+    env,
+    folder: resolveFolder(env, folder),
+    searchMode: q.searchMode,
+    scanned: q.scanned,
+    count: items.length,
+    jobKeys,
+    items,
+    ...(notes.length > 0 ? { notes } : {}),
+    ...(q.searchError ? { searchError: q.searchError } : {}),
   };
 }

@@ -36,13 +36,26 @@ export function registerPrompts(server: McpServer): void {
       const envArg = env ? `, env="${env}"` : "";
       const envReminder = env
         ? ""
-        : " Both get_order and analyze_order_execution require an env (prod or pre_prod) — confirm with the user which env the order is in before calling them.";
+        : " Both get_order and find_order_queue_items require an env (prod or pre_prod) — confirm with the user which env the order is in before calling them.";
       return userText(
         `Diagnose Copilot order ${orderUid}${env ? ` (env: ${env})` : ""}. Work through it step by step:\n` +
-          `1. Call get_order with orderUid="${orderUid}"${envArg} to read its current normalized state.\n` +
-          `2. Call analyze_order_execution with orderUid="${orderUid}"${envArg} (includeLogs=true) to find the matching UiPath job and its verdict.\n` +
-          `3. If a job is found and you need more detail, call get_job_logs for that job.\n` +
-          `Then summarize: what state is the order in, did the automation run, and what failed or is pending.${envReminder}`,
+          `1. Call get_order with orderUid="${orderUid}"${envArg} to read its current normalized state; note its creationDate.\n` +
+          `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg} and since=<that creationDate> to find the ` +
+          `queue item(s) and their jobKeys. If count is 0, the order never reached UiPath — report and stop. If items ` +
+          `exist but jobKeys is empty, it is queued and not yet picked up by a robot — report the item statuses and stop.\n` +
+          `3. Call get_job with env${env ? `="${env}"` : ""} and jobKeys=<every key from step 2> and includeLogDigest=true — ` +
+          `ONE call covering the original run and every retry. Read state, output, fault, logDigest per job.\n` +
+          `4. Derive per-job verdict yourself: output.out_Result when present, else state — Successful -> success, ` +
+          `Faulted/Stopped -> failure, anything else -> still running or pending. The newest run is the latest ` +
+          `creationTime; retry cadence is each run's creationTime minus the previous (older) run's endTime.\n` +
+          `5. Compare the queue item's specificContent (from step 2) against the order from step 1 — facility, ` +
+          `speciality, DOS, member name/DOB/ID, insurance, CPT/ICD — and call out any divergence between what Copilot ` +
+          `sent to UiPath and what the order record says. The full payload is returned for exactly this; only the ` +
+          `token field is redacted.\n` +
+          `6. Only if the digest is not enough, call get_job_logs with the failing jobKey and onlyFailures=true ` +
+          `(add fullMessages=true for a full stack trace, includeVideo=true for the recording URL).\n` +
+          `7. Summarize: order state, whether the automation ran, what failed or is pending, and any payload divergence.` +
+          envReminder,
       );
     },
   );
@@ -165,7 +178,9 @@ export function registerPrompts(server: McpServer): void {
       return userText(
         `Triage stuck Copilot orders${p}.\n` +
           `1. Call find_stuck_orders${p} to list orders stuck in a non-terminal status.\n` +
-          `2. For each stuck order, call analyze_order_execution to see whether its UiPath job failed, is still running, or never started.\n` +
+          `2. For the stuck orders whose uipath.verdict warrants a closer look, call find_order_queue_items per order ` +
+          `to get each order's jobKeys, then diagnose them in ONE get_job call with jobKeys=[...] (up to 25 keys per ` +
+          `call) and includeLogDigest=true to see whether each job failed, is still running, or never started.\n` +
           `3. Group them by root cause and recommend a remediation per group (retry, re-clone, fix data, escalate).\n` +
           `Do not take any write action without the user's explicit go-ahead.`,
       );
