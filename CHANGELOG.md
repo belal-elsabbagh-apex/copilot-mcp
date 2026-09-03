@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.0] - 2026-09-03
+
+Live-payload verification of the queue item schema (`find_order_queue_items` /
+`QueueItemMatch`, shipped in 1.29.0) against real production UiPath queue items
+confirmed it's accurate as-is — `token` is the only redacted field, no other
+secret-shaped keys turned up. The check also surfaced that `build_queue_item`'s
+synthetic test payload was missing several fields every real bot-submitted payload
+carries.
+
+### Fixed
+
+- **`build_queue_item`** now sets `ClinicNPI`, the eleven `Linked*` fields,
+  `addManualFacility`, `ReferredToType`, `ReferredToOtherName`, and
+  `eligibilityOtherPatientName` on the built `SpecificContent` — previously omitted
+  entirely, so a test payload diverged from what the real automation submits.
+  `ClinicNPI` mirrors `ProviderNPI`; `ReferredToType` mirrors the order's
+  `referredFacility.type` (new field on `BeFacility`), defaulting to `"provider"`;
+  the rest use the constant values observed across every live sample checked.
+
 ## [1.29.0] - 2026-09-03
 
 `analyze_order_execution` was a server-side orchestration that fetched job detail, logs,

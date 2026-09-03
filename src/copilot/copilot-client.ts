@@ -29,6 +29,7 @@ export interface BeFacility {
   placeOfService?: string;
   isSpeciality?: boolean;
   external?: boolean;
+  type?: string; // e.g. "provider" — what ReferredToType mirrors on the queue payload
 }
 export interface BeSpeciality {
   specialityUid?: string;
