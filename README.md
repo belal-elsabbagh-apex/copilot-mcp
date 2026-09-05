@@ -190,6 +190,20 @@ Use `COPILOT_MCP_LOCAL_DIR` instead of `COPILOT_MCP_CONFIG` for the split legacy
 The package is also published to this repo's GitHub Packages registry (see below), but that
 path needs a `read:packages` token; the release-asset URL above is the zero-auth default.
 
+## Installing — as an MCP Bundle (`.mcpb`)
+
+Every release also attaches a `copilot-mcp.mcpb` — a self-contained
+[MCP Bundle](https://github.com/anthropics/mcpb) (`dist/server.js` + `manifest.json` +
+`copilot-mcp.config.example.json`) for one-click install in MCPB-supporting hosts (e.g. Claude
+for macOS/Windows). Download `copilot-mcp.mcpb` from the
+[latest release](https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest), open it
+with the host, and when prompted for the **Config file** option point it at your own
+`copilot-mcp.config.json` (see [`copilot-mcp.config.example.json`](./copilot-mcp.config.example.json)
+for the shape) — the host launches `node dist/server.js` with `COPILOT_MCP_CONFIG` set to that
+path. Rebuild it locally with `bun run mcpb:pack` (stages `manifest.json` + the built `dist/`
+into `.mcpb-stage/` and packs it via `@anthropic-ai/mcpb`); `bunx mcpb validate manifest.json` /
+`bunx mcpb info copilot-mcp.mcpb` are useful for checking it without a host.
+
 ## Publishing
 
 Publishing is tag-driven. Bump `version` in `package.json`, commit, then push a matching

@@ -1,0 +1,185 @@
+{
+  "manifest_version": "0.3",
+  "name": "copilot-mcp",
+  "display_name": "Copilot MCP",
+  "version": "1.31.0",
+  "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
+  "long_description": "Exposes EHR Copilot order operations and UiPath Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting UiPath queue items against a pre-prod dev clone, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath Orchestrator credentials \u2014 point the \"Config file\" option below at your copy of it.",
+  "author": {
+    "name": "Belal Elsabbagh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/belal-elsabbagh-apex/copilot-mcp.git"
+  },
+  "homepage": "https://github.com/belal-elsabbagh-apex/copilot-mcp",
+  "documentation": "https://github.com/belal-elsabbagh-apex/copilot-mcp#readme",
+  "support": "https://github.com/belal-elsabbagh-apex/copilot-mcp/issues",
+  "license": "UNLICENSED",
+  "keywords": [
+    "ehr",
+    "copilot",
+    "uipath",
+    "orchestrator",
+    "rpa",
+    "healthcare-ops"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/server.js"
+      ],
+      "env": {
+        "COPILOT_MCP_CONFIG": "${user_config.config_path}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=24.0.0"
+    }
+  },
+  "user_config": {
+    "config_path": {
+      "type": "file",
+      "title": "Config file",
+      "description": "Path to your copilot-mcp.config.json (Copilot BE creds per profile + UiPath Orchestrator creds). See copilot-mcp.config.example.json bundled alongside this manifest for the exact shape.",
+      "required": true
+    }
+  },
+  "tools": [
+    {
+      "name": "find_clone_candidates",
+      "description": "Find cloneable prod orders"
+    },
+    {
+      "name": "delete_preprod_order",
+      "description": "Delete pre-prod order(s)"
+    },
+    {
+      "name": "create_preprod_order",
+      "description": "Mint a pre-prod order from an explicit spec"
+    },
+    {
+      "name": "submit_preprod_order",
+      "description": "Submit a pre-prod order sitting at forReview"
+    },
+    {
+      "name": "build_queue_item",
+      "description": "Build UiPath AddQueueItem request from an order"
+    },
+    {
+      "name": "find_order_queue_items",
+      "description": "Find the UiPath queue item(s) a Copilot order flowed through"
+    },
+    {
+      "name": "pull_queue_item",
+      "description": "Pull a UiPath queue item as a test payload"
+    },
+    {
+      "name": "list_queue_items",
+      "description": "Browse a UiPath queue"
+    },
+    {
+      "name": "list_jobs",
+      "description": "List recent UiPath Orchestrator jobs"
+    },
+    {
+      "name": "get_job_logs",
+      "description": "Get a UiPath job's robot logs"
+    },
+    {
+      "name": "build_faulted_job_issue",
+      "description": "Build a GitHub issue payload for a faulted UiPath job"
+    },
+    {
+      "name": "find_stuck_orders",
+      "description": "Find stuck Copilot orders"
+    },
+    {
+      "name": "diff_settings",
+      "description": "Diff Copilot settings prod vs pre-prod"
+    },
+    {
+      "name": "list_setting_sections",
+      "description": "List the settings sections the settings tools can scope to"
+    },
+    {
+      "name": "get_settings",
+      "description": "Get one env's Copilot settings"
+    },
+    {
+      "name": "plan_settings_sync",
+      "description": "Plan an additive prod -> pre-prod settings sync"
+    },
+    {
+      "name": "apply_settings_sync",
+      "description": "Apply planned additive settings sync actions to pre-prod"
+    },
+    {
+      "name": "get_order",
+      "description": "Get a Copilot order's normalized detail"
+    },
+    {
+      "name": "search_orders",
+      "description": "Search Copilot orders by dimension"
+    },
+    {
+      "name": "get_order_category_stats",
+      "description": "Get Copilot order counts per category folder"
+    },
+    {
+      "name": "get_login_token",
+      "description": "Get a Copilot BE login token"
+    },
+    {
+      "name": "doctor",
+      "description": "Check the server's external API connections"
+    },
+    {
+      "name": "list_queues",
+      "description": "List UiPath queue definitions in a folder"
+    },
+    {
+      "name": "list_processes",
+      "description": "List UiPath releases (processes) in a folder"
+    },
+    {
+      "name": "list_triggers",
+      "description": "List UiPath triggers (queue + time) in a folder"
+    },
+    {
+      "name": "get_job",
+      "description": "Get a single UiPath job's state by Key"
+    },
+    {
+      "name": "add_queue_item",
+      "description": "Post a queue item to a dev-clone queue"
+    },
+    {
+      "name": "delete_queue_item",
+      "description": "Delete a New queue item from the dev clone"
+    },
+    {
+      "name": "start_job",
+      "description": "Start a UiPath job on the dev clone"
+    },
+    {
+      "name": "stop_job",
+      "description": "Stop or kill a running UiPath job on the dev clone"
+    },
+    {
+      "name": "build_mcp_issue",
+      "description": "Build a GitHub issue for feedback on this MCP server"
+    }
+  ],
+  "prompts_generated": true
+}

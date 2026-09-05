@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.0] - 2026-09-05
+
+### Added
+
+- **MCP Bundle (`.mcpb`) packaging** — a `manifest.json` at the repo root (MCPB spec
+  `0.3`) declares all 31 tools, the `node`/`dist/server.js` entry point, and a `config_path`
+  user-config field (`file` type) that maps to `COPILOT_MCP_CONFIG`, so MCPB-supporting hosts
+  (e.g. Claude for macOS/Windows) can install this server with a single file. `bun run
+  mcpb:pack` stages `manifest.json` + the built `dist/` + `copilot-mcp.config.example.json`
+  into `.mcpb-stage/` and packs it via the new `@anthropic-ai/mcpb` dev dependency; both CI
+  and the release workflow run it, and `release.yml` now attaches `copilot-mcp.mcpb` to every
+  GitHub Release alongside the existing tarballs.
+
 ## [1.30.0] - 2026-09-03
 
 Live-payload verification of the queue item schema (`find_order_queue_items` /

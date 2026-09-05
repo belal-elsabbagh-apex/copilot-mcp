@@ -1,6 +1,6 @@
 {
   "name": "@belal-elsabbagh-apex/copilot-mcp",
-  "version": "1.30.0",
+  "version": "1.31.0",
   "type": "module",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
   "author": "Belal Elsabbagh",
@@ -32,12 +32,14 @@
     "lint": "biome check src",
     "format": "biome format --write src",
     "inspect": "bunx @modelcontextprotocol/inspector bun run src/server.ts",
+    "mcpb:pack": "bun run build && rm -rf .mcpb-stage copilot-mcp.mcpb && mkdir -p .mcpb-stage/dist && cp manifest.json copilot-mcp.config.example.json .mcpb-stage/ && cp dist/server.js .mcpb-stage/dist/server.js && bunx mcpb pack .mcpb-stage copilot-mcp.mcpb && rm -rf .mcpb-stage",
     "prepare": "lefthook install || true; bun run build",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun run build"
   },
   "dependencies": {},
   "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@biomejs/biome": "^2.5.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/bun": "^1.4.0",

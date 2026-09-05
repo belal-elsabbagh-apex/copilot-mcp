@@ -49,3 +49,8 @@ jobs:
             | timeout 20 node dist/server.js)
           echo "$out" | head -c 400
           echo "$out" | grep -q '"serverInfo"'
+
+      - name: Validate and pack MCP Bundle
+        run: |
+          bun run mcpb:pack
+          bunx mcpb info copilot-mcp.mcpb
