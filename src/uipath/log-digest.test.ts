@@ -3,16 +3,18 @@ import {
   collapseLogs,
   digestLogs,
   extractFault,
+  extractTransactionOutcome,
   findLogStalls,
   MESSAGE_CAP,
   truncate,
 } from "./log-digest.js";
 import type { JobLog, UiPathJob } from "./uipath.js";
 
-const log = (Level: string, Message: string, TimeStamp: string): JobLog => ({
+const log = (Level: string, Message: string, TimeStamp: string, RawMessage?: string): JobLog => ({
   Level,
   Message,
   TimeStamp,
+  ...(RawMessage !== undefined ? { RawMessage } : {}),
 });
 
 describe("truncate", () => {
@@ -149,5 +151,65 @@ describe("digestLogs", () => {
     ]);
     expect(digest.droppedFailures).toBe(0);
     expect(digest.note).toContain("get_job_logs");
+  });
+
+  test("transactionOutcome is null when RawMessage was never fetched", () => {
+    const logs = [log("Info", "Transaction Ended", "2026-07-01T10:00:00Z")];
+    expect(digestLogs(logs).transactionOutcome).toBeNull();
+  });
+});
+
+describe("extractTransactionOutcome", () => {
+  test("reads the queue's own exception classification off the Transaction Ended row", () => {
+    const ended = JSON.stringify({
+      transactionState: "Ended",
+      transactionId: "d211b063-20eb-45a9-801a-5634cd13568a",
+      queueName: "CenCal auth sync queue",
+      processingExceptionType: "BusinessException",
+      processingExceptionReason: "",
+      transactionExecutionTime: 49.93,
+      queueItemPriority: "Normal",
+      queueItemReviewStatus: "None",
+    });
+    const logs = [
+      log("Info", "Transaction Started", "2026-07-01T10:00:00Z"),
+      log("Info", "Transaction Ended", "2026-07-01T10:00:05Z", ended),
+    ];
+    const outcome = extractTransactionOutcome(logs);
+    expect(outcome).toEqual({
+      transactionId: "d211b063-20eb-45a9-801a-5634cd13568a",
+      queueName: "CenCal auth sync queue",
+      processingExceptionType: "BusinessException",
+      processingExceptionReason: null,
+      transactionExecutionTimeSec: 49.93,
+      queueItemPriority: "Normal",
+      queueItemReviewStatus: "None",
+    });
+  });
+
+  test("null when no row ever reaches a Transaction Ended state", () => {
+    const logs = [
+      log(
+        "Info",
+        "Transaction Started",
+        "2026-07-01T10:00:00Z",
+        JSON.stringify({ transactionState: "Started" }),
+      ),
+      log("Error", "Job crashed before ending the transaction", "2026-07-01T10:00:01Z"),
+    ];
+    expect(extractTransactionOutcome(logs)).toBeNull();
+  });
+
+  test("takes the LAST Transaction Ended row when a job logs more than one", () => {
+    const first = JSON.stringify({
+      transactionState: "Ended",
+      processingExceptionType: "BusinessException",
+    });
+    const second = JSON.stringify({ transactionState: "Ended", processingExceptionType: "" });
+    const logs = [
+      log("Info", "Transaction Ended", "2026-07-01T10:00:00Z", first),
+      log("Info", "Transaction Ended", "2026-07-01T10:05:00Z", second),
+    ];
+    expect(extractTransactionOutcome(logs)?.processingExceptionType).toBeNull();
   });
 });

@@ -5,6 +5,7 @@
 // formatting here makes it consistent and lets the pure formatter be unit-tested.
 
 import type { Env } from "../config/config.js";
+import { extractTransactionOutcome } from "./log-digest.js";
 import {
   fetchJobByKey,
   fetchJobLogs,
@@ -92,6 +93,11 @@ export function formatFaultedJobIssue(
     .join("\n")
     .slice(0, 4000);
 
+  // Only populated when the caller fetched RawMessage (buildFaultedJobIssue always
+  // does); a formatFaultedJobIssue caller that didn't gets no queue-exception line,
+  // never a crash — extractTransactionOutcome degrades to null on plain JobLog[].
+  const queueException = extractTransactionOutcome(logs);
+
   const body = [
     `**UiPath job faulted** in \`${opts.env}\`.`,
     "",
@@ -101,6 +107,14 @@ export function formatFaultedJobIssue(
     `- **Created:** ${job.CreationTime ?? "(unknown)"}`,
     ...(job.EndTime ? [`- **Ended:** ${job.EndTime}`] : []),
     ...(deepLink ? [`- **Orchestrator:** ${deepLink}`] : []),
+    ...(queueException?.processingExceptionType
+      ? [
+          `- **Queue exception:** ${queueException.processingExceptionType}` +
+            (queueException.processingExceptionReason
+              ? ` — ${queueException.processingExceptionReason}`
+              : ""),
+        ]
+      : []),
     "",
     "**Error**",
     "```",
@@ -159,7 +173,7 @@ export async function buildFaultedJobIssue(
   let logs: JobLog[] = [];
   let logsError: string | undefined;
   try {
-    logs = await fetchJobLogs(jobKey, folder);
+    logs = await fetchJobLogs(jobKey, folder, { includeRawFields: true });
   } catch (e) {
     logsError = e instanceof Error ? e.message : String(e);
   }

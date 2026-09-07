@@ -93,6 +93,7 @@ import { buildFaultedJobIssue } from "./uipath/faults.js";
 import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
 import { findOrderQueueItems, listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
+import { parseRawMessage } from "./uipath/raw-message.js";
 import {
   fetchJobLogs,
   fetchJobLogsForKeys,
@@ -154,7 +155,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.31.0";
+const VERSION = "1.32.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -928,6 +929,16 @@ server.registerTool(
       "A jobKeys batch never fails as a whole on one job's error — that job's entry carries " +
       "error instead, the rest still return. videoUrl is always best-effort: a failure there " +
       "surfaces as videoError, never blocks the logs. " +
+      "includeRawFields=true parses each row's RawMessage (Orchestrator's structured JSON behind " +
+      "the free-text Message — benchmarked ~3x the response size on real jobs, off by default) " +
+      "into a `raw` object: transactionId, queueName, processingExceptionType/Reason, " +
+      "transactionExecutionTimeSec, " +
+      "totalExecutionTimeInSeconds, queueItemPriority, queueItemReviewStatus (a snapshot at log time, " +
+      "not live queue-item state), businessOperationId, activityInfo (Debugging-log only, rarely " +
+      "present), and custom (any process-specific field added via Studio's Add Log Fields activity, " +
+      "returned verbatim under its own name) — most fields are null on most rows; the transaction " +
+      "fields only populate on the Transaction Started/Ended rows and totalExecutionTime* only on " +
+      "the final execution-ended row. `raw` is null when a row's RawMessage is absent or unparseable. " +
       "Returns {jobKey,folder,logs[],returned,totalMatching?,truncated,videoUrl?,videoError?} " +
       "for a single jobKey, or {env,folder,count,jobs:[{jobKey,logs[],returned,totalMatching?," +
       "truncated,error?,videoUrl?,videoError?}]} for jobKeys.",
@@ -993,6 +1004,15 @@ server.registerTool(
           "Return full untruncated Message text (default: truncated to 400 chars, matching " +
             "get_job's log digest). Use when you need a complete stack trace.",
         ),
+      includeRawFields: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Parse each row's RawMessage into a `raw` object (transactionId, queueName, " +
+            "processingExceptionType/Reason, timing, custom Add-Log-Fields data, …) — see the " +
+            "tool description. Off by default: benchmarked ~3x the response size on real jobs.",
+        ),
     },
   },
   async (
@@ -1007,6 +1027,7 @@ server.registerTool(
       onlyFailures,
       tail,
       fullMessages,
+      includeRawFields,
     },
     extra,
   ) => {
@@ -1016,6 +1037,7 @@ server.registerTool(
       const resolved = resolveFolder(env, folder);
       const filter: JobLogFilter = {
         onlyFailures,
+        includeRawFields,
         ...(minLevel !== undefined ? { minLevel } : {}),
         ...(contains !== undefined ? { contains } : {}),
         ...(tail !== undefined ? { tail } : {}),
@@ -1031,7 +1053,14 @@ server.registerTool(
           const { logs, totalMatching } = result;
           const entry: Record<string, unknown> = {
             jobKey: key,
-            logs: fullMessages ? logs : logs.map((l) => ({ ...l, Message: truncate(l.Message) })),
+            // RawMessage (the raw JSON text) never leaks into the output — only the
+            // parsed `raw` object does, and only when includeRawFields was requested.
+            logs: logs.map((l) => ({
+              Level: l.Level,
+              Message: fullMessages ? l.Message : truncate(l.Message),
+              TimeStamp: l.TimeStamp,
+              ...(includeRawFields ? { raw: parseRawMessage(l) } : {}),
+            })),
             returned: logs.length,
             // truncated = the 500-row fetch window didn't cover every matching row
             // (a requested `tail` shorter than the total is not truncation).
@@ -1282,7 +1311,10 @@ server.registerTool(
       "just returned — in ONE call instead of looping get_job per key. READ-ONLY. `output` is the " +
       "job's parsed OutputArguments with token/callbackContext stripped. With includeLogDigest=true " +
       "it also returns a structured fault (headline error, stable signature, exception type) and a " +
-      "condensed failure-focused log digest — if the digest is not enough, call get_job_logs " +
+      "condensed failure-focused log digest, including transactionOutcome — the queue transaction's " +
+      "OWN processingExceptionType/Reason and timing, read from the robot's Transaction-Ended log " +
+      "line, more reliable for exception classification than the free-text-derived exceptionType, " +
+      "null when the job never reached one — if the digest is not enough, call get_job_logs " +
       "(also batchable via jobKeys) for the complete raw logs. A jobKeys batch never fails as a " +
       "whole on one key's error — that key's entry carries error instead, the rest still return; " +
       "a single jobKey fails the call normally, like any other error. includeLogDigest is always " +
@@ -1344,7 +1376,7 @@ server.registerTool(
             let logDigestError: string | undefined;
             if (includeLogDigest) {
               try {
-                logs = await fetchJobLogs(key, resolved);
+                logs = await fetchJobLogs(key, resolved, { includeRawFields: true });
               } catch (e) {
                 logDigestError = toMessage(e);
               }

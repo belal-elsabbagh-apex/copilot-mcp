@@ -1,11 +1,14 @@
 // Condensed, failure-focused view of a job's robot logs: consecutive-duplicate
-// collapsing (retry loops), stall detection (largest timestamp gaps), and a
-// structured fault extracted from the headline error. Pure — get_job/
+// collapsing (retry loops), stall detection (largest timestamp gaps), a
+// structured fault extracted from the headline error, and — when the caller
+// fetched RawMessage (JobLogFilter.includeRawFields) — the queue transaction's
+// own outcome fields (processingExceptionType/Reason, timing). Pure — get_job/
 // find_order_queue_items attach the digest instead of the raw (up to 500-line) log
 // dump; the complete logs stay one get_job_logs call away.
 
 import { normalizeError, topError } from "./faults.js";
 import { isFailureLog } from "./log-semantics.js";
+import { parseRawMessage } from "./raw-message.js";
 import type { JobLog, UiPathJob } from "./uipath.js";
 
 export interface CollapsedLog {
@@ -29,12 +32,29 @@ export interface JobFault {
   exceptionType: string | null; // e.g. System.NullReferenceException, parsed from the message
 }
 
+// The Transaction Ended row's structured fields (see raw-message.ts) — the
+// queue's OWN record of how this job's transaction concluded, independent of
+// (and more reliable for exception classification than) exceptionType's regex
+// guess over free text. null whenever RawMessage wasn't fetched, or the job never
+// reached a queue transaction end (faulted before starting one, or has no queue
+// item at all).
+export interface TransactionOutcome {
+  transactionId: string | null;
+  queueName: string | null;
+  processingExceptionType: string | null;
+  processingExceptionReason: string | null;
+  transactionExecutionTimeSec: number | null;
+  queueItemPriority: string | null;
+  queueItemReviewStatus: string | null; // as logged at the time — a snapshot, not live queue-item state
+}
+
 export interface JobLogDigest {
   fetched: number; // log rows fetched (capped at 500 upstream)
   byLevel: Record<string, number>;
   failures: CollapsedLog[]; // collapsed failure lines (error/fatal level or failure wording)
   droppedFailures: number; // collapsed failure entries cut by the cap
   stalls: LogStall[];
+  transactionOutcome: TransactionOutcome | null;
   note: string; // escalation pointer for the agent
 }
 
@@ -98,6 +118,27 @@ export function findLogStalls(logs: JobLog[]): LogStall[] {
 // A dotted .NET-style type ending in Exception/Error, e.g. System.NullReferenceException.
 const EXCEPTION_TYPE = /\b(?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Exception|Error)\b/;
 
+// The queue transaction's own outcome fields, read off the "Transaction Ended"
+// row (last one, if a job somehow logs more than one). Reverse-scans like
+// topError — the terminal transaction is what matters, not the first.
+export function extractTransactionOutcome(logs: JobLog[]): TransactionOutcome | null {
+  for (const log of [...logs].reverse()) {
+    const raw = parseRawMessage(log);
+    if (raw?.transactionState === "Ended") {
+      return {
+        transactionId: raw.transactionId,
+        queueName: raw.queueName,
+        processingExceptionType: raw.processingExceptionType,
+        processingExceptionReason: raw.processingExceptionReason,
+        transactionExecutionTimeSec: raw.transactionExecutionTimeSec,
+        queueItemPriority: raw.queueItemPriority,
+        queueItemReviewStatus: raw.queueItemReviewStatus,
+      };
+    }
+  }
+  return null;
+}
+
 export function extractFault(job: UiPathJob, logs: JobLog[]): JobFault {
   const message = topError(job, logs);
   return {
@@ -127,6 +168,7 @@ export function digestLogs(logs: JobLog[]): JobLogDigest {
     failures,
     droppedFailures: collapsed.length - failures.length,
     stalls: findLogStalls(logs),
+    transactionOutcome: extractTransactionOutcome(logs),
     note:
       "Failure-focused digest (messages truncated, benign lines omitted). " +
       "If this is not enough, call get_job_logs with this job's key for the complete raw logs " +

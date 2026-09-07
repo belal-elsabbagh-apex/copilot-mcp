@@ -58,6 +58,10 @@ export interface JobLog {
   Level: string;
   Message: string;
   TimeStamp: string;
+  // Only populated when JobLogFilter.includeRawFields is set — see raw-message.ts
+  // for what it contains and why it's opt-in (benchmarked ~4-6x each row's bytes,
+  // not a mere doubling — see get_job_logs' includeRawFields description).
+  RawMessage?: string;
 }
 
 // orchestratorUrl is like https://cloud.uipath.com/{org}/{tenant}/orchestrator_
@@ -291,6 +295,11 @@ export interface JobLogFilter {
   contains?: string; // server-side substring match on Message (case-sensitive)
   onlyFailures?: boolean; // semantic post-filter — see isFailureLog
   tail?: number; // keep only the last N logs after all other filters
+  // Also select RawMessage (see raw-message.ts) — the structured transaction/
+  // exception/custom-field data hiding behind the free-text Message. Off by
+  // default: benchmarked live at ~4-6x the byte size of every row fetched
+  // (RobotLogs response, real jobs, 2026-09-07) — a bigger cost than a mere doubling.
+  includeRawFields?: boolean;
 }
 
 const LOG_LEVELS_AT_LEAST: Record<"warn" | "error", string[]> = {
@@ -321,7 +330,9 @@ export function jobLogQueryParams(
     $filter: clauses.join(" and "),
     $orderby: `TimeStamp ${newestFirst ? "desc" : "asc"}`,
     $top: String(top),
-    $select: "Level,Message,TimeStamp",
+    $select: filter.includeRawFields
+      ? "Level,Message,TimeStamp,RawMessage"
+      : "Level,Message,TimeStamp",
     $count: "true",
   };
 }
@@ -362,8 +373,12 @@ export async function fetchFilteredJobLogs(
   };
 }
 
-export async function fetchJobLogs(jobKey: string, folder?: string): Promise<JobLog[]> {
-  return (await fetchFilteredJobLogs(jobKey, folder)).logs;
+export async function fetchJobLogs(
+  jobKey: string,
+  folder?: string,
+  filter: JobLogFilter = {},
+): Promise<JobLog[]> {
+  return (await fetchFilteredJobLogs(jobKey, folder, filter)).logs;
 }
 
 // Fetch logs for several jobs in one MCP round-trip, same `filter` applied to

@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.32.0] - 2026-09-07
+
+### Added
+
+- **RobotLogs `RawMessage` support** — `get_job_logs` gained an opt-in `includeRawFields`
+  parameter (benchmarked live at ~3x the response size on real jobs, so off by default) that
+  parses each row's `RawMessage` — the structured JSON UiPath's robot logger emits per log
+  event, of which `Message` (the only field read until now) is just one key — into a `raw`
+  object: `transactionId`, `queueName`, `processingExceptionType`/`Reason`,
+  `transactionExecutionTimeSec`, `totalExecutionTimeInSeconds`, `queueItemPriority`,
+  `queueItemReviewStatus`, `businessOperationId`, `activityInfo` (Debugging-log only, rarely
+  present), and `custom` (any process-specific field added via Studio's Add Log Fields
+  activity, returned verbatim). `get_job`'s `includeLogDigest` now always fetches `RawMessage`
+  and adds a `transactionOutcome` field to the digest — the queue transaction's own exception
+  classification, more reliable than the free-text-derived `exceptionType` — at negligible
+  client-facing cost (benchmarked +~260 bytes flat regardless of job size, since the larger
+  raw fetch never leaves the server). `build_faulted_job_issue`'s GitHub issue body now
+  includes a "Queue exception" line when the job's Transaction Ended row recorded one. New
+  `src/uipath/raw-message.ts` module does the parsing, ground-truthed against this org's real
+  jobs: confirmed `RawMessage.transactionStatus` is unreliable (every job logs the unresolved
+  .NET binding literally, never the actual status) and is deliberately never surfaced;
+  `processingExceptionType` is the reliable field instead.
+
 ## [1.31.0] - 2026-09-05
 
 ### Added

@@ -25,6 +25,11 @@ describe("jobLogQueryParams", () => {
     expect(p["$select"]).toBe("Level,Message,TimeStamp");
   });
 
+  test("includeRawFields adds RawMessage to the $select", () => {
+    const p = jobLogQueryParams(KEY, { includeRawFields: true });
+    expect(p["$select"]).toBe("Level,Message,TimeStamp,RawMessage");
+  });
+
   test("minLevel warn adds a Warn/Error/Fatal or-chain server-side", () => {
     const p = jobLogQueryParams(KEY, { minLevel: "warn" });
     expect(p["$filter"]).toBe(

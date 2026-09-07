@@ -97,6 +97,33 @@ describe("formatFaultedJobIssue", () => {
     expect(issue.faultSignature).toBe("job ended in state faulted");
     expect(issue.body).toContain("(no logs)");
   });
+
+  test("adds a queue-exception line when a Transaction Ended row's RawMessage carries one", () => {
+    const rawEnded = JSON.stringify({
+      transactionState: "Ended",
+      processingExceptionType: "BusinessException",
+      processingExceptionReason: "missing required field",
+    });
+    const logs = [
+      errLog("Throw: Notification sync request failed with status: 422"),
+      {
+        Level: "Info",
+        Message: "Transaction Ended",
+        TimeStamp: "2026-06-30T10:00:31Z",
+        RawMessage: rawEnded,
+      },
+    ];
+    const issue = formatFaultedJobIssue(job, logs, { env: "prod", jobKey: job.Key ?? "" });
+    expect(issue.body).toContain("**Queue exception:** BusinessException — missing required field");
+  });
+
+  test("omits the queue-exception line when RawMessage was never fetched", () => {
+    const issue = formatFaultedJobIssue(job, [errLog("boom")], {
+      env: "prod",
+      jobKey: job.Key ?? "",
+    });
+    expect(issue.body).not.toContain("**Queue exception:**");
+  });
 });
 
 // ---- buildFaultedJobIssue (HTTP wiring) --------------------------------------
