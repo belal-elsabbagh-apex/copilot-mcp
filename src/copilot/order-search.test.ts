@@ -176,6 +176,7 @@ const envCreds = (name: string) => ({
 
 const FIXTURE = {
   copilot: {
+    sessionCache: false,
     prod: envCreds("prod"),
     pre_prod: envCreds("preprod"),
     profiles: { ossm: { prod: envCreds("prod"), pre_prod: envCreds("preprod") } },

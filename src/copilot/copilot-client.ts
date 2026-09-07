@@ -5,7 +5,7 @@
 // (mirror.ts) and the UiPath queue-item builder (queue-item.ts) both import from here.
 
 import type { Env } from "../config/config.js";
-import { envelopeRows, isRecord, prop, safeJsonParse, stringProp } from "../shared/util.js";
+import { envelopeRows, isRecord, prop, safeJsonParse } from "../shared/util.js";
 
 // orderMode sent on every /orders/filter call (orders + pcp notes).
 export const ORDER_MODE = '["orders_only_mode","pcp_notes_mode"]';
@@ -109,6 +109,7 @@ export interface HttpResponse {
   status: number;
   data: unknown;
   text: string;
+  headers?: Headers;
 }
 export interface ReqBody {
   json?: unknown;
@@ -134,8 +135,11 @@ export function assertPreProdClient(c: HttpClient, what: string): void {
 // Minimal cookie-jar fetch client (mirrors the BE's set-cookie session flow).
 // Pass `env` to tag the client with its tenant — required for clients handed
 // to a write engine (see assertPreProdClient).
-export function makeClient(base: string, env?: Env): HttpClient {
-  const jar = new Map<string, string>();
+export function makeClient(
+  base: string,
+  env?: Env,
+  jar: Map<string, string> = new Map(),
+): HttpClient {
   async function req(
     method: string,
     path: string,
@@ -163,7 +167,7 @@ export function makeClient(base: string, env?: Env): HttpClient {
       if (i > 0) jar.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
     }
     const text = await res.text();
-    return { status: res.status, data: safeJsonParse(text), text };
+    return { status: res.status, data: safeJsonParse(text), text, headers: res.headers };
   }
   return env ? { base, env, req } : { base, req };
 }
@@ -183,22 +187,6 @@ export async function reqWithRefresh(
     r = await c.req(method, path, body);
   }
   return r;
-}
-
-export async function login(c: HttpClient, email: string, password: string): Promise<void> {
-  const r = await c.req("POST", "/api/v1/copilot/physician/login", { json: { email, password } });
-  if (r.status >= 400) throw new Error(`login failed ${r.status}: ${r.text.slice(0, 300)}`);
-}
-
-// Log in and return the BE session JWT (the `token` field of the login response).
-// Used as SpecificContent.token for UiPath callbacks; the cookie jar is also primed
-// as a side effect. Throws if login fails or the response carries no token.
-export async function loginToken(c: HttpClient, email: string, password: string): Promise<string> {
-  const r = await c.req("POST", "/api/v1/copilot/physician/login", { json: { email, password } });
-  if (r.status >= 400) throw new Error(`login failed ${r.status}: ${r.text.slice(0, 300)}`);
-  const token = stringProp(r.data, "token");
-  if (!token) throw new Error("login succeeded but returned no token");
-  return token;
 }
 
 // The full documented /orders/filter request-body contract (see the

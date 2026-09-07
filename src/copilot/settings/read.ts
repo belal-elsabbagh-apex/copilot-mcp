@@ -1,8 +1,8 @@
 // Read-only orchestration: diff_settings (cross-env) and get_settings (single-env).
 
-import { resolveCreds } from "../../config/config.js";
 import { prop, type StepProgress } from "../../shared/util.js";
-import { type HttpClient, login, makeClient } from "../copilot-client.js";
+import type { HttpClient } from "../copilot-client.js";
+import { connect } from "../session.js";
 import { selectSections } from "./catalog.js";
 import { diffList, diffObjects, normalizeSectionValue, stripNoise } from "./diff-engine.js";
 import { toMessage } from "./internal.js";
@@ -66,12 +66,9 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
   // Select first so an unknown tag/section fails fast (no needless login).
   const chosen = selectSections(opts.sections, opts.tags, opts.emr);
 
-  const creds = resolveCreds(opts.profile ?? null);
-  const prod = makeClient(creds.prod.be, "prod");
-  const pre = makeClient(creds.pre_prod.be, "pre_prod");
-  await Promise.all([
-    login(prod, creds.prod.email, creds.prod.password),
-    login(pre, creds.pre_prod.email, creds.pre_prod.password),
+  const [{ client: prod }, { client: pre }] = await Promise.all([
+    connect("prod", opts.profile),
+    connect("pre_prod", opts.profile),
   ]);
 
   // Every section's prod/pre-prod fetch is independent of every other section's —
@@ -106,8 +103,8 @@ export async function diffSettings(opts: DiffSettingsOpts): Promise<DiffSettings
 
   return {
     account: opts.profile ?? "(default)",
-    prodBase: creds.prod.be,
-    preProdBase: creds.pre_prod.be,
+    prodBase: prod.base,
+    preProdBase: pre.base,
     sectionsCompared: chosen.length,
     sectionsWithDiffs: withDiffs,
     sections: opts.includeUnchanged ? results : results.filter((s) => !s.equal),
@@ -121,9 +118,7 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
   // Select first so an unknown tag/section fails fast (no needless login).
   const chosen = selectSections(opts.sections, opts.tags, opts.emr);
 
-  const creds = resolveCreds(opts.profile ?? null)[opts.env];
-  const client = makeClient(creds.be, opts.env);
-  await login(client, creds.email, creds.password);
+  const { client } = await connect(opts.env, opts.profile);
 
   // Same independence as diffSettings — fetch every section concurrently.
   const done = sectionCounter(chosen.length, opts.onProgress);
@@ -150,7 +145,7 @@ export async function getSettings(opts: GetSettingsOpts): Promise<GetSettingsRes
   return {
     account: opts.profile ?? "(default)",
     env: opts.env,
-    base: creds.be,
+    base: client.base,
     sectionsFetched: chosen.length,
     sections,
   };

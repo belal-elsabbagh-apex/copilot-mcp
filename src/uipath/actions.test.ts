@@ -102,7 +102,7 @@ const UIPATH = {
 };
 
 const FIXTURE = {
-  copilot: { prod: envCreds("prod"), pre_prod: envCreds("preprod") },
+  copilot: { sessionCache: false, prod: envCreds("prod"), pre_prod: envCreds("preprod") },
   uipath: UIPATH,
 };
 

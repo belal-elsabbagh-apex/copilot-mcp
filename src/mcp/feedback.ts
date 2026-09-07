@@ -29,7 +29,7 @@ export class ExpectedError extends Error {}
 const HTTP_RESPONSE = /(?:->|failed)\s*\d{3}\b|\b\d{3}:\s/;
 //  - a known validation / user-input / config guard fired.
 const USER_PHRASE =
-  /unknown profile|not found|is required|provide either|no config found|config from .* is invalid|not in profile|missing the|is missing|expected 'prod'/i;
+  /unknown profile|not found|is required|provide either|no config found|config from .* is invalid|not in profile|missing the|is missing|expected 'prod'|clinicUid|clinic-less/i;
 
 /**
  * Decide whether a failure warrants suggesting a GitHub issue.

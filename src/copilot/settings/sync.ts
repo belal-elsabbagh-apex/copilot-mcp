@@ -11,9 +11,10 @@
 // syncable domain means writing its SectionSyncer and attaching it to the relevant section(s);
 // this file needs no changes.
 
-import { resolveCreds } from "../../config/config.js";
+import { resolveAuth } from "../../config/config.js";
 import type { StepProgress } from "../../shared/util.js";
-import { assertPreProdClient, type HttpClient, login, makeClient } from "../copilot-client.js";
+import { assertPreProdClient, type HttpClient } from "../copilot-client.js";
+import { connect } from "../session.js";
 import { selectSections } from "./catalog.js";
 import {
   assertApplyFilter,
@@ -66,11 +67,10 @@ async function buildSyncPlan(opts: {
     .filter((s) => !s.sync)
     .map((s) => ({ key: s.key, reason: "no write mapping yet — additive sync not implemented" }));
 
-  const creds = resolveCreds(opts.profile ?? null);
   const ctx: SyncPlanContext = {
     account: opts.profile ?? "(default)",
-    prodBase: creds.prod.be,
-    preProdBase: creds.pre_prod.be,
+    prodBase: resolveAuth(opts.profile ?? null, "prod").be,
+    preProdBase: resolveAuth(opts.profile ?? null, "pre_prod").be,
     actions: [],
     skipped: [],
     skippedSections,
@@ -79,11 +79,9 @@ async function buildSyncPlan(opts: {
   };
   if (!syncers.size) return ctx; // nothing syncable selected — report skipped only
 
-  const prod = makeClient(creds.prod.be, "prod");
-  const pre = makeClient(creds.pre_prod.be, "pre_prod");
-  await Promise.all([
-    login(prod, creds.prod.email, creds.prod.password),
-    login(pre, creds.pre_prod.email, creds.pre_prod.password),
+  const [{ client: prod }, { client: pre }] = await Promise.all([
+    connect("prod", opts.profile),
+    connect("pre_prod", opts.profile),
   ]);
 
   // Every syncer remaps payer references prod->pre, so build the payer maps once and share them.

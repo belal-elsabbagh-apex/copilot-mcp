@@ -17,7 +17,7 @@ const envCreds = (name: string) => ({
 });
 
 const FIXTURE = {
-  copilot: { prod: envCreds("prod"), pre_prod: envCreds("preprod") },
+  copilot: { sessionCache: false, prod: envCreds("prod"), pre_prod: envCreds("preprod") },
   uipath: { orchestratorUrl: "https://cloud.uipath.com/org/tenant/orchestrator_", bearer: "t" },
 };
 

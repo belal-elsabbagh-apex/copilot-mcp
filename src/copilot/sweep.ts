@@ -3,10 +3,11 @@
 // item(s). Read-only. Reuses the order-filter scan (same shape as
 // find_clone_candidates) and the queue-item correlation in uipath.ts.
 
-import { type Env, resolveCreds } from "../config/config.js";
+import type { Env } from "../config/config.js";
 import { chunk, type StepProgress } from "../shared/util.js";
 import { type QueueItemMatch, scopeForEnv, searchQueueItemsByOrderId } from "../uipath/uipath.js";
-import { type BeOrder, filterOrders, login, makeClient, ORDER_MODE } from "./copilot-client.js";
+import { type BeOrder, filterOrders, ORDER_MODE } from "./copilot-client.js";
+import { connect } from "./session.js";
 
 // Statuses considered "stuck" by default: submitted-but-not-finished, or never
 // completed. Terminal/healthy statuses (e.g. forReview, completed) are excluded.
@@ -120,9 +121,7 @@ export async function findStuckOrders(args: FindStuckArgs): Promise<FindStuckRes
   const statuses = (args.statuses ?? DEFAULT_STUCK_STATUSES).map((s) => s.toLowerCase());
   const olderThanHours = args.olderThanHours ?? 0;
 
-  const creds = resolveCreds(args.profile ?? null)[env];
-  const client = makeClient(creds.be, env);
-  await login(client, creds.email, creds.password);
+  const { client } = await connect(env, args.profile);
 
   const onProgress = args.onProgress;
   const stuck: StuckOrder[] = [];

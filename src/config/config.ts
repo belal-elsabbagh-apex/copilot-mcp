@@ -23,7 +23,7 @@ import { z } from "zod";
 
 // ---- Schemas -------------------------------------------------------------
 
-const EnvCredsSchema = z
+const DirectCredsSchema = z
   .object({
     be: z.string().min(1, "be (batch BE base URL) is required"),
     email: z.string().min(1, "email is required"),
@@ -32,11 +32,42 @@ const EnvCredsSchema = z
   })
   .passthrough();
 
+// Support-account credentials for one env (prod today). Shared by every profile whose
+// env entry carries a clinicUid.
+const SupportCredsSchema = DirectCredsSchema;
+
+// One env of one profile: EITHER a clinic pointer (support-account auth — credentials come
+// from copilot.support[env]) OR a full per-account login (the pre-existing shape). `be`/`fe`
+// stay allowed alongside clinicUid so a profile can override the support account's base URL.
+const ProfileEnvSchema = z
+  .object({
+    clinicUid: z.string().uuid("clinicUid must be the clinic UUID from list_clinics").optional(),
+    be: z.string().min(1).optional(),
+    email: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    fe: z.string().optional(),
+  })
+  .passthrough()
+  .refine(
+    (e) => Boolean(e.clinicUid) || Boolean(e.be && e.email && e.password),
+    "needs either clinicUid (support-account auth) or be+email+password (direct login)",
+  );
+
 const CopilotSchema = z
   .object({
-    prod: EnvCredsSchema.optional(),
-    pre_prod: EnvCredsSchema.optional(),
-    profiles: z.record(z.object({ prod: EnvCredsSchema, pre_prod: EnvCredsSchema })).optional(),
+    // Support account per env; only required for envs whose profiles use clinicUid.
+    support: z
+      .object({ prod: SupportCredsSchema.optional(), pre_prod: SupportCredsSchema.optional() })
+      .optional(),
+    prod: DirectCredsSchema.optional(),
+    pre_prod: DirectCredsSchema.optional(),
+    profiles: z
+      .record(
+        z.object({ prod: ProfileEnvSchema.optional(), pre_prod: ProfileEnvSchema.optional() }),
+      )
+      .optional(),
+    // Persist sessions to disk (default true). false = in-memory only.
+    sessionCache: z.boolean().optional(),
   })
   .passthrough();
 
@@ -105,14 +136,10 @@ const ConfigSchema = z.object({
 });
 
 export type Env = "prod" | "pre_prod";
-export type EnvCreds = z.infer<typeof EnvCredsSchema>;
+export type EnvCreds = z.infer<typeof DirectCredsSchema>;
 export type UipathConfig = z.infer<typeof UipathSchema>;
 export type CopilotConfig = z.infer<typeof CopilotSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
-export interface ResolvedCreds {
-  prod: EnvCreds;
-  pre_prod: EnvCreds;
-}
 
 // ---- Loading -------------------------------------------------------------
 
@@ -314,20 +341,63 @@ export function getFeedbackConfig(): { enabled: boolean; repositoryUrl?: string 
   };
 }
 
-// Resolve a credential pair: a named profile (copilot.profiles[name]) or the
-// top-level prod/pre_prod pair. Throws a clear error if the requested set is absent.
-export function resolveCreds(profile?: string | null): ResolvedCreds {
-  const { copilot } = loadConfig();
-  if (profile) {
-    const p = copilot.profiles?.[profile];
-    if (!p)
-      throw new Error(
-        `unknown profile '${profile}' (available: ${Object.keys(copilot.profiles ?? {}).join(", ") || "none"})`,
-      );
-    return p;
+export type EnvAuth =
+  | { mode: "support"; be: string; email: string; password: string; clinicUid: string }
+  | { mode: "direct"; be: string; email: string; password: string };
+
+// The support account for one env. Absent = this env has not adopted support accounts.
+export function resolveSupport(env: Env): EnvCreds {
+  const support = loadConfig().copilot.support?.[env];
+  if (!support) {
+    throw new Error(
+      `copilot.support.${env} is required in the config for support-account (clinicUid) auth — add {be, email, password}`,
+    );
   }
-  if (!(copilot.prod && copilot.pre_prod)) {
-    throw new Error("copilot.prod and copilot.pre_prod are required when no profile is given");
-  }
-  return { prod: copilot.prod, pre_prod: copilot.pre_prod };
+  return support;
 }
+
+// How to authenticate one profile in one env. A clinicUid on the env entry selects
+// support-account auth (credentials from copilot.support[env]); otherwise the entry's own
+// be/email/password are used, exactly as before support accounts existed. A profile carrying
+// both wins with clinicUid — that is how an account is migrated env by env without deleting
+// its old credentials.
+export function resolveAuth(profile: string | null | undefined, env: Env): EnvAuth {
+  const { copilot } = loadConfig();
+  if (!profile) {
+    if (!(copilot.prod && copilot.pre_prod)) {
+      throw new Error("copilot.prod and copilot.pre_prod are required when no profile is given");
+    }
+    const t = copilot[env] as EnvCreds;
+    return { mode: "direct", be: t.be, email: t.email, password: t.password };
+  }
+  const entry = copilot.profiles?.[profile];
+  if (!entry) {
+    throw new Error(
+      `unknown profile '${profile}' (available: ${Object.keys(copilot.profiles ?? {}).join(", ") || "none"})`,
+    );
+  }
+  const e = entry[env];
+  if (!e) {
+    throw new Error(
+      `profile '${profile}' has no ${env} auth — add clinicUid (support account) or be/email/password (direct login)`,
+    );
+  }
+  if (e.clinicUid) {
+    const support = resolveSupport(env);
+    return {
+      mode: "support",
+      be: e.be ?? support.be,
+      email: support.email,
+      password: support.password,
+      clinicUid: e.clinicUid,
+    };
+  }
+  return {
+    mode: "direct",
+    be: e.be as string,
+    email: e.email as string,
+    password: e.password as string,
+  };
+}
+
+export const sessionCacheEnabled = (): boolean => loadConfig().copilot.sessionCache !== false;

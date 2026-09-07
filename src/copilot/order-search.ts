@@ -5,16 +5,15 @@
 // find_clone_candidates bulk-tool convention (no `patient` field), not get_order's
 // full-detail-with-patient shape — this tool can return many rows per call.
 
-import { type Env, resolveCreds } from "../config/config.js";
+import type { Env } from "../config/config.js";
 import {
   type BeOrder,
   categoryStats,
   filterOrders,
-  login,
-  makeClient,
   ORDER_MODE,
   type OrderFilterBody,
 } from "./copilot-client.js";
+import { connect } from "./session.js";
 
 // Every array-valued filter is sent to the BE as a JSON-encoded STRING, never a
 // bare array (the single biggest /orders/filter gotcha). Omitting a dimension means
@@ -197,9 +196,7 @@ export interface SearchOrdersResult {
 }
 
 export async function searchOrders(args: SearchOrdersArgs): Promise<SearchOrdersResult> {
-  const creds = resolveCreds(args.profile ?? null)[args.env];
-  const client = makeClient(creds.be, args.env);
-  await login(client, creds.email, creds.password);
+  const { client } = await connect(args.env, args.profile);
   const body = buildFilterBody(args);
   const { rows, total } = await filterOrders(client, body);
   return {
@@ -216,8 +213,6 @@ export async function searchOrders(args: SearchOrdersArgs): Promise<SearchOrders
 export async function getOrderCategoryStats(
   args: CategoryStatsArgs,
 ): Promise<Record<string, unknown>> {
-  const creds = resolveCreds(args.profile ?? null)[args.env];
-  const client = makeClient(creds.be, args.env);
-  await login(client, creds.email, creds.password);
+  const { client } = await connect(args.env, args.profile);
   return categoryStats(client, buildFilterDimensions(args));
 }

@@ -553,18 +553,21 @@ export const CONFIG_GUIDE = {
     "1. Ask the user for the values marked <ASK-USER> below — credentials and tokens cannot be guessed and must never be invented.",
     "2. Write the JSON file (template below) somewhere private and gitignored, e.g. ~/.config/copilot-mcp/config.json or copilot-mcp.config.json next to the server.",
     "3. If not using the default copilot-mcp.config.json location, set COPILOT_MCP_CONFIG to the file's absolute path in the MCP host's server config (the `env` block of this server's entry).",
-    "4. Call the doctor tool (profile=<one of copilot.profiles>) to verify: it logs into the Copilot BE for both envs and probes both UiPath folders.",
+    "4. For any env using support accounts, call the list_clinics tool (env=prod|pre_prod) to get the clinicUid of each clinic and fill copilot.profiles.<name>.<env>.clinicUid; then call the doctor tool (profile=<one of copilot.profiles>) to verify auth + clinic scope + UiPath.",
   ],
   template: {
     copilot: {
+      support: {
+        prod: {
+          be: "https://prod-be-batch.ehrcopilotbe.com",
+          email: "<ASK-USER: prod support-account email>",
+          password: "<ASK-USER: prod support-account password>",
+          fe: "https://copilot.apexmedical.ai",
+        },
+      },
       profiles: {
         "<account-name>": {
-          prod: {
-            be: "https://prod-be-batch.ehrcopilotbe.com",
-            email: "<ASK-USER: prod physician login email>",
-            password: "<ASK-USER: prod password>",
-            fe: "https://copilot.apexmedical.ai",
-          },
+          prod: { clinicUid: "<from the list_clinics tool>" },
           pre_prod: {
             be: "https://pre-prod-be-batch.ehrcopilotbe.com",
             email: "<ASK-USER: pre-prod physician login email>",
@@ -589,7 +592,11 @@ export const CONFIG_GUIDE = {
   },
   fields: {
     "copilot.profiles":
-      "Named credential sets ('profiles') — every Copilot tool takes a required `profile` arg that must match a key here. Each profile needs BOTH prod and pre_prod creds.",
+      "Named credential sets ('profiles') — every Copilot tool takes a required `profile` arg that must match a key here. Each env of a profile is EITHER a clinicUid pointer (support-account auth: credentials come from copilot.support[env]) OR a full be/email/password login (the per-account shape). clinicUid wins if both are present, which is how one env is migrated without deleting the old credentials.",
+    "copilot.support":
+      "Support-account credentials per env ({be, email, password, fe?}). Required only for envs whose profiles use clinicUid — today that is prod; pre-prod still uses per-account logins.",
+    "copilot.sessionCache":
+      "Optional (default true): persist authenticated sessions to ~/.cache/copilot-mcp/sessions.json so a restart doesn't spend a login against the support account's 10-logins-per-15-minutes budget. false = in-memory only.",
     "copilot.prod / copilot.pre_prod":
       "Optional top-level fallback creds used only when a caller could pass no profile; profiles are the normal path.",
     "uipath.orchestratorUrl":
@@ -614,5 +621,6 @@ export const CONFIG_GUIDE = {
     "NEVER invent credentials, tokens, or emails — every <ASK-USER> value must come from the user.",
     "The config holds secrets: keep it out of version control and never echo passwords/bearer back in chat or logs.",
     "Prod creds grant READ access paths only in practice here: this server's write tools are hard-wired to pre-prod / the dev clone and refuse prod at both the schema and domain layer.",
+    "Sessions are cached at ~/.cache/copilot-mcp/sessions.json (mode 0600; COPILOT_MCP_CACHE overrides the path, copilot.sessionCache:false disables persistence). That file holds live JWTs — never commit it and never echo its contents.",
   ],
 } as const;

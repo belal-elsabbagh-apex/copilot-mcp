@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.33.0] - 2026-09-07
+
+### Added
+
+- **Support-account auth for the Copilot BE, with session caching.** Prod has moved to a
+  single support account that logs in once and then `POST /support/switch-clinic`es into
+  each clinic's scope — the old one-login-per-account model 403'd every prod
+  `/orders/filter` call with `E4003 insufficient_authority`. `src/copilot/session.ts` is
+  now the single chokepoint (`connect(env, profile)`) for both auth modes: **support**
+  (an env entry carrying `clinicUid` — credentials come from the new `copilot.support.<env>`
+  config block) and **direct** (the pre-existing per-account `be`/`email`/`password` login,
+  unchanged behavior). An existing config with no `clinicUid` anywhere keeps working
+  untouched; opting an env into support-account auth is a config-only change.
+- **New `list_clinics` tool** — lists every clinic the configured support account can
+  switch into (`clinicUid`, name, last-active, owner email, and the config profile already
+  mapped to it, if any). Takes only `env` (no `profile` — it's what produces the
+  profile → clinicUid mapping), the one documented carve-out from the "every Copilot tool
+  needs env + profile" rule.
+- **Session caching** — authenticated sessions (cookies + JWT) are cached in memory and,
+  by default, on disk at `~/.cache/copilot-mcp/sessions.json` (mode `0600`;
+  `COPILOT_MCP_CACHE` overrides the path, `copilot.sessionCache: false` disables disk
+  persistence). Keyed by env/BE/email/scope, single-flighted so concurrent tool calls
+  never double-login, and TTL-aware from the JWT's own expiry claim — this is what keeps
+  the support account's 10-logins-per-15-minutes budget from being burned by every server
+  restart.
+- `doctor` now runs three probes per env instead of two: auth, a clinic-scope fingerprint
+  (`GET /orders/locations`, which differs per clinic and is the cheap proof a support
+  session really landed on the intended tenant), and the existing UiPath folder check.
+- `get_login_token` now reports `mode`, `clinicUid`, and `activeClinicId` alongside the
+  token, and reuses a cached session instead of always logging in.
+
+### Fixed
+
+- The on-disk session cache path now honors `$XDG_CACHE_HOME` only when it is an absolute
+  path, per the XDG Base Directory spec — a relative or empty value falls back to
+  `~/.cache` instead of producing a path resolved against the current working directory.
+
 ## [1.32.0] - 2026-09-07
 
 ### Added

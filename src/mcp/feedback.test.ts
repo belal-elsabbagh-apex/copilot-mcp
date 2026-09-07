@@ -32,6 +32,16 @@ describe("classify", () => {
     ["missing config", new Error("No config found. Set COPILOT_MCP_CONFIG ...")],
     ["invalid config", new Error("Config from x is invalid:\n  - copilot.prod: be is required")],
     ["bad env", new Error("env 'x' not in profile (expected 'prod' or 'pre_prod')")],
+    [
+      "missing env auth",
+      new Error(
+        "profile 'x' has no pre_prod auth — add clinicUid (support account) or be/email/password (direct login)",
+      ),
+    ],
+    [
+      "clinic-less switch result",
+      new Error("switch-clinic returned a clinic-less token for abc — refusing to use it"),
+    ],
   ])("treats %s as expected", (_label, e) => {
     expect(classify(e)).toBe("expected");
   });
@@ -133,6 +143,7 @@ describe("toolError honors config", () => {
 
   const FIXTURE = {
     copilot: {
+      sessionCache: false,
       prod: { be: "https://p.example.com", email: "p@example.com", password: "pw" },
       pre_prod: { be: "https://pp.example.com", email: "pp@example.com", password: "pw" },
     },

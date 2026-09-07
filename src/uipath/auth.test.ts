@@ -17,7 +17,7 @@ const ORCHESTRATOR_URL = "https://cloud.uipath.com/myorg/mytenant/orchestrator_"
 const TOKEN_URL = "https://cloud.uipath.com/myorg/identity_/connect/token";
 
 const fixture = (uipath: Record<string, unknown>) => ({
-  copilot: { prod: envCreds("prod"), pre_prod: envCreds("preprod") },
+  copilot: { sessionCache: false, prod: envCreds("prod"), pre_prod: envCreds("preprod") },
   uipath: { orchestratorUrl: ORCHESTRATOR_URL, ...uipath },
 });
 

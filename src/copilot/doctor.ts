@@ -1,13 +1,14 @@
 // doctor: probe the MCP server's connections to its external APIs and report what is
-// reachable. Read-only — it logs into the Copilot BE (prod + pre-prod) and makes one
-// cheap authenticated UiPath Orchestrator call per env. Intended for setup/onboarding
-// debugging ("are my creds + token + folders right?").
+// reachable. Read-only — it authenticates against the Copilot BE (prod + pre-prod),
+// fingerprints the clinic scope that session actually has, and makes one cheap
+// authenticated UiPath Orchestrator call per env. Intended for setup/onboarding
+// debugging ("are my creds + clinic + token + folders right?").
 
 import type { Env } from "../config/config.js";
-import { getUipath, resolveCreds } from "../config/config.js";
-import type { StepProgress } from "../shared/util.js";
+import { getUipath, resolveAuth } from "../config/config.js";
+import { prop, type StepProgress } from "../shared/util.js";
 import { listRecentJobs, resolveFolder } from "../uipath/uipath.js";
-import { login, makeClient } from "./copilot-client.js";
+import { connect } from "./session.js";
 
 export interface DoctorCheck {
   name: string;
@@ -39,30 +40,27 @@ async function probe(
 
 const ENVS: readonly Env[] = ["prod", "pre_prod"];
 
-// Probe Copilot BE (login) for both envs and UiPath Orchestrator (list 1 job) for both
-// folders. Each check is independent; one failure never aborts the others.
+// Six independent probes: per env, an auth probe, a clinic-scope fingerprint, and an
+// Orchestrator round-trip. Each check is independent; one failure never aborts the
+// others, and config resolution happens inside the probes so one misconfigured env
+// fails one check instead of the whole report.
 export async function runDoctor(opts: {
   profile?: string | null;
   onProgress?: StepProgress;
 }): Promise<DoctorReport> {
   const account = opts.profile ?? "(default)";
-
-  // Config must resolve before anything else; surface that as the single failing check.
-  let creds: ReturnType<typeof resolveCreds>;
-  try {
-    creds = resolveCreds(opts.profile ?? null);
-  } catch (e) {
-    return {
-      account,
-      ok: false,
-      checks: [{ name: "config", target: "config", ok: false, detail: toMessage(e) }],
-    };
-  }
   const uipath = getUipath();
+  // Probe target = the env's BE base when the config resolves; the env name otherwise,
+  // so a misconfigured env still surfaces as one failed check rather than a throw here.
+  const beOf = (env: Env): string => {
+    try {
+      return resolveAuth(opts.profile ?? null, env).be;
+    } catch {
+      return env;
+    }
+  };
 
-  // Four independent probes, each a login or an Orchestrator round-trip — report them
-  // as they settle (ok or not) rather than sitting silent until the slowest returns.
-  const TOTAL_CHECKS = ENVS.length * 2;
+  const TOTAL_CHECKS = ENVS.length * 3;
   let settled = 0;
   const track = (c: DoctorCheck): DoctorCheck => {
     settled++;
@@ -72,10 +70,31 @@ export async function runDoctor(opts: {
 
   const checks = await Promise.all([
     ...ENVS.map((env) =>
-      probe(`copilot ${env} login`, creds[env].be, async () => {
-        const client = makeClient(creds[env].be, env);
-        await login(client, creds[env].email, creds[env].password);
-        return "login OK";
+      probe(`copilot ${env} auth`, beOf(env), async () => {
+        const s = await connect(env, opts.profile ?? null);
+        return s.mode === "support"
+          ? `support-account login OK (switched to activeClinicId=${s.activeClinicId})`
+          : "direct login OK";
+      }).then(track),
+    ),
+    // The documented PHI-free clinic fingerprint (/orders/locations differs per clinic)
+    // — the only cheap proof the session acts as the intended clinic. `connect` is
+    // cached, so this costs no extra login.
+    ...ENVS.map((env) =>
+      probe(`copilot ${env} clinic scope`, beOf(env), async () => {
+        const s = await connect(env, opts.profile ?? null);
+        const r = await s.client.req("GET", "/api/v1/orders/locations");
+        if (r.status >= 400) {
+          throw new Error(`GET /orders/locations failed ${r.status}: ${r.text.slice(0, 200)}`);
+        }
+        const locations = prop(r.data, "locations");
+        const n = Array.isArray(locations) ? locations.length : 0;
+        const scope = s.mode === "support" ? ` (activeClinicId=${s.activeClinicId})` : "";
+        const empty =
+          n === 0 && s.mode === "support"
+            ? " — 0 locations; a clinic-less token also returns 0, but activeClinicId is set, so this clinic really has none"
+            : "";
+        return `${n} locations visible${scope}${empty}`;
       }).then(track),
     ),
     ...ENVS.map((env) =>

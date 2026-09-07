@@ -7,15 +7,11 @@
 
 import { randomUUID } from "node:crypto";
 import type { Env, UipathConfig } from "../config/config.js";
-import { getUipath, resolveCreds } from "../config/config.js";
-import {
-  type BeOrder,
-  fetchOrder,
-  makeClient,
-  toMDY as toMDYStrict,
-} from "../copilot/copilot-client.js";
+import { getUipath } from "../config/config.js";
+import { type BeOrder, fetchOrder, toMDY as toMDYStrict } from "../copilot/copilot-client.js";
+import { clinicOwnerEmail, connect } from "../copilot/session.js";
 import { ACCOUNT_AUTOMATION_IDS } from "../mcp/reference.js";
-import { prop, stringProp } from "../shared/util.js";
+import { prop } from "../shared/util.js";
 import { guardQueueItemSafety } from "./safety.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error) — the
@@ -93,17 +89,13 @@ export async function buildQueueItem(
   const uipath = getUipath();
   requireQueueFields(uipath);
 
-  const creds = resolveCreds(profile);
-  const envCfg = creds[env];
-  if (!envCfg) throw new Error(`env '${env}' not in profile (expected 'prod' or 'pre_prod')`);
-  const client = makeClient(envCfg.be, env);
-  // login captures the BE JWT (used as SpecificContent.token) and sets the cookie jar
-  const lr = await client.req("POST", "/api/v1/copilot/physician/login", {
-    json: { email: envCfg.email, password: envCfg.password },
-  });
-  if (lr.status >= 400) throw new Error(`login failed ${lr.status}: ${lr.text.slice(0, 200)}`);
-  const token = stringProp(lr.data, "token");
+  const session = await connect(env, profile);
+  const { client, token } = session;
   const physicianId = decodeJwtId(token);
+  const providerMail =
+    session.mode === "support"
+      ? ((await clinicOwnerEmail(env, session.clinicUid as string)) ?? "")
+      : session.email;
 
   const o = await fetchOrder(client, orderUid);
   const notes: string[] = [];
@@ -135,6 +127,10 @@ export async function buildQueueItem(
       `WARNING: no automationId was supplied and none is known for account '${profile ?? "(none)"}' ` +
         "— SpecificContent.automationId is a placeholder random UUID, not the account's real " +
         "UiPath automation id. Pass the correct value via the automationId argument before submitting.",
+    );
+  if (session.mode === "support")
+    notes.push(
+      `physicianId ${physicianId} is the support account's user id — under support-account auth the JWT 'id' claim is the support user in both pre- and post-switch tokens; callbackContext carries it as-is.`,
     );
 
   const s = (v: unknown): string => (v == null ? "" : String(v));
@@ -177,7 +173,7 @@ export async function buildQueueItem(
     ProviderID: "",
     ProviderLastName:
       splitName(fromName).last && fromName.includes(",") ? splitName(fromName).last : "",
-    ProviderMail: envCfg.email ?? "",
+    ProviderMail: providerMail,
     ProviderNPI: s(from["NPI"]),
     ProviderPhone: s(from["phoneNumber"]),
     ProviderZipCode: "",
@@ -202,7 +198,7 @@ export async function buildQueueItem(
     placeOfService: o.placeOfService || fac.placeOfService || "",
     queueUrl: uipath.queueUrl,
     retryCount: 0,
-    serverURL: uipath.serverUrlByEnv?.[env] ?? envCfg.be,
+    serverURL: uipath.serverUrlByEnv?.[env] ?? client.base,
     token: token ?? "",
   };
   // Single enforcement point for the IsApproved=false rule (the literal above documents it).

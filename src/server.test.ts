@@ -58,6 +58,7 @@ const EXPECTED = [
   "search_orders",
   "get_order_category_stats",
   "get_login_token",
+  "list_clinics",
   "doctor",
   "list_queues",
   "list_processes",
@@ -181,6 +182,10 @@ describe("tool input schemas accept representative payloads", () => {
     get_login_token: {
       valid: { env: "prod", profile: "ossm" },
       invalid: { profile: "ossm" }, // env is required
+    },
+    list_clinics: {
+      valid: { env: "prod" },
+      invalid: {}, // env is required
     },
     doctor: { valid: { profile: "ossm" }, invalid: {} }, // profile is required
     build_faulted_job_issue: {

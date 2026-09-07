@@ -40,15 +40,12 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { configStatus, getFeedbackConfig, onConfigReload, resolveCreds } from "./config/config.js";
+import { configStatus, getFeedbackConfig, loadConfig, onConfigReload } from "./config/config.js";
 import {
   assertPreProdClient,
   type BeOrder,
   fetchOrder,
   filterOrders,
-  login,
-  loginToken,
-  makeClient,
   normalizeOrder,
   ORDER_MODE,
   submitOrder,
@@ -59,6 +56,7 @@ import { type MintSpec, mintPreprodOrder } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
 import { getOrderCategoryStats, searchOrders } from "./copilot/order-search.js";
 import { normalizeOutput } from "./copilot/output-schema.js";
+import { connect, listClinics } from "./copilot/session.js";
 import {
   applySettingsSync,
   diffSettings,
@@ -155,7 +153,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.32.0";
+const VERSION = "1.33.0";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -247,9 +245,7 @@ server.registerTool(
   },
   async ({ profile, limit, scanPages }, extra) => {
     try {
-      const creds = resolveCreds(profile ?? null);
-      const prod = makeClient(creds.prod.be, "prod");
-      await login(prod, creds.prod.email, creds.prod.password);
+      const { client: prod } = await connect("prod", profile);
       const candidates: Record<string, unknown>[] = [];
       let scanned = 0;
       for (let page = 0; page < scanPages && candidates.length < limit; page++) {
@@ -299,10 +295,8 @@ server.registerTool(
   },
   async ({ uids, profile }) => {
     try {
-      const creds = resolveCreds(profile ?? null);
-      const pre = makeClient(creds.pre_prod.be, "pre_prod");
+      const { client: pre } = await connect("pre_prod", profile);
       assertPreProdClient(pre, "delete_preprod_order");
-      await login(pre, creds.pre_prod.email, creds.pre_prod.password);
       const results = [];
       for (const uid of uids) {
         const r = await pre.req("DELETE", `/api/v1/orders/${uid}`);
@@ -394,9 +388,7 @@ server.registerTool(
   },
   async (a, extra) => {
     try {
-      const creds = resolveCreds(a.profile);
-      const pre = makeClient(creds.pre_prod.be, "pre_prod");
-      await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+      const { client: pre } = await connect("pre_prod", a.profile);
       // Ported by mintPreprodOrder alongside its own console.log calls — surfaces
       // its ~15-step sequence (up to 6 /process retries at 5s apart) to the client
       // instead of leaving a multi-retry mint with no visible feedback at all.
@@ -469,9 +461,7 @@ server.registerTool(
   },
   async ({ profile, orderUid }) => {
     try {
-      const creds = resolveCreds(profile);
-      const pre = makeClient(creds.pre_prod.be, "pre_prod");
-      await login(pre, creds.pre_prod.email, creds.pre_prod.password);
+      const { client: pre } = await connect("pre_prod", profile);
       const result = await submitOrder(pre, orderUid);
       mcpLog(server, "warning", `submitted pre-prod order ${orderUid}`, {
         profile,
@@ -2052,9 +2042,7 @@ server.registerTool(
   },
   async ({ orderUid, env, profile }) => {
     try {
-      const creds = resolveCreds(profile ?? null)[env];
-      const client = makeClient(creds.be, env);
-      await login(client, creds.email, creds.password);
+      const { client } = await connect(env, profile);
       const order = await fetchOrder(client, orderUid);
       const detail = normalizeOrder(order);
       const documents = await orderDocuments(client, order, orderUid, profile);
@@ -2220,9 +2208,11 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Log into the EHR Copilot BE for a profile + env and return the session JWT " +
-      "(the same token used as SpecificContent.token for UiPath callbacks). READ-ONLY — " +
-      "authenticates only, never reads or writes order data. Returns {env, profile, token}.",
+      "Return the Copilot BE session JWT for a profile + env. In support-account envs " +
+      "that is the post-switch-clinic, clinic-scoped token with the activeClinicId it is " +
+      "pinned to; otherwise it is the direct login token. A cached session is reused rather " +
+      "than re-logging in. READ-ONLY — authenticates only, never reads or writes order data. " +
+      "Returns {env, profile, mode, clinicUid, activeClinicId, token}.",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to log into (required)"),
       profile: z
@@ -2233,16 +2223,62 @@ server.registerTool(
   },
   async ({ env, profile }, extra) => {
     try {
-      const creds = resolveCreds(profile ?? null)[env];
-      const client = makeClient(creds.be, env);
-      const token = await withHeartbeat(
-        extra,
-        `${env} login`,
-        loginToken(client, creds.email, creds.password),
-      );
-      return ok({ env, profile, token });
+      const s = await withHeartbeat(extra, `${env} connect`, connect(env, profile));
+      return ok({
+        env,
+        profile,
+        mode: s.mode,
+        clinicUid: s.clinicUid,
+        activeClinicId: s.activeClinicId,
+        token: s.token,
+      });
     } catch (e) {
       return toolError("get_login_token", e, VERSION);
+    }
+  },
+);
+
+// ---- list_clinics --------------------------------------------------------
+// The documented carve-out from the "every Copilot operation requires env + profile"
+// invariant: this is the discovery tool that PRODUCES the profile -> clinicUid mapping,
+// so requiring a profile would be circular.
+server.registerTool(
+  "list_clinics",
+  {
+    title: "List the clinics the support account can switch into",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "List the clinics the support account can switch into, with the config profile each one " +
+      "is already mapped to (profile:null = unmapped). Use it to fill " +
+      "copilot.profiles.<name>.<env>.clinicUid. Requires copilot.support.<env> (support-account " +
+      "auth — today prod only); takes no profile, because it is what produces the profile -> " +
+      "clinicUid mapping. READ-ONLY. Returns {env, clinics}.",
+    inputSchema: {
+      env: z.enum(["prod", "pre_prod"]).describe("Which env to list clinics for (required)"),
+    },
+  },
+  async ({ env }, extra) => {
+    try {
+      const clinics = await withHeartbeat(extra, `${env} list clinics`, listClinics(env));
+      const profiles = loadConfig().copilot.profiles ?? {};
+      const profileByUid: Record<string, string> = {};
+      for (const [name, entry] of Object.entries(profiles)) {
+        const uid = entry[env]?.clinicUid;
+        if (uid) profileByUid[uid] = name;
+      }
+      return ok({
+        env,
+        clinics: clinics
+          .map((c) => ({ ...c, profile: profileByUid[c.clinicUid] ?? null }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      });
+    } catch (e) {
+      return toolError("list_clinics", e, VERSION);
     }
   },
 );
