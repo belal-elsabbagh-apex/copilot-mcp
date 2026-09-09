@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "copilot-mcp",
   "display_name": "Copilot MCP",
-  "version": "1.33.0",
+  "version": "1.33.1",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
   "long_description": "Exposes EHR Copilot order operations and UiPath Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting UiPath queue items against a pre-prod dev clone, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath Orchestrator credentials \u2014 point the \"Config file\" option below at your copy of it.",
   "author": {

@@ -30,8 +30,8 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 
 - `src/server.ts` — entry point + tool/resource wiring (stays at the root).
 - `src/config/` — `config.ts` (validated config loading).
-- `src/copilot/` — Copilot BE domain: `copilot-client.ts`, `mirror.ts`, `sweep.ts`, `analyze.ts`,
-  `output-analysis.ts`, `output-schema.ts`, `settings/`, `doctor.ts`.
+- `src/copilot/` — Copilot BE domain: `copilot-client.ts`, `session.ts`, `mirror.ts`, `sweep.ts`,
+  `analyze.ts`, `output-analysis.ts`, `output-schema.ts`, `settings/`, `doctor.ts`.
 - `src/uipath/` — UiPath Orchestrator domain: `uipath.ts`, `queue.ts`, `queue-item.ts`, `faults.ts`.
 - `src/mcp/` — MCP-protocol concerns: `prompts.ts`, `notify.ts`, `feedback.ts`, `reference.ts`.
 - `src/shared/` — cross-cutting helpers: `util.ts`.
@@ -46,8 +46,19 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **Two external systems**: Copilot BE via `copilot/copilot-client.ts` (`makeClient`/`login`/`req`),
   and UiPath Orchestrator via `uipath/uipath.ts`. Each Copilot tenant exists per-env (`prod` / `pre_prod`).
 - **`config/config.ts`** loads one validated config (single-file `COPILOT_MCP_CONFIG`, or split legacy
-  files via `COPILOT_MCP_LOCAL_DIR`). `resolveCreds(profile)` returns `{ prod, pre_prod }` creds.
+  files via `COPILOT_MCP_LOCAL_DIR`). `resolveAuth(profile, env)` returns an `EnvAuth` tagged
+  `mode: "support"` (a `clinicUid` pointer — creds come from `resolveSupport(env)`, i.e.
+  `copilot.support.<env>`) or `mode: "direct"` (the profile entry's own `be`/`email`/`password`).
   Profiles are dynamic — read them with `listProfiles()`; never hardcode profile names.
+- **`copilot/session.ts`** is the single auth chokepoint for the Copilot BE — nothing else may POST
+  `physician/login` or `support/switch-clinic`. `connect(env, profile)` resolves the profile's
+  `EnvAuth` via `config.ts` and either logs in directly or logs in the support account then
+  switch-clinics, returning a `Session` (token, mode, clinicUid, activeClinicId). Sessions are
+  cached by `(env, be, email, scope)` in memory and, by default, on disk (`~/.cache/copilot-mcp/sessions.json`,
+  mode `0600`, overridable via `COPILOT_MCP_CACHE`; `copilot.sessionCache: false` disables disk),
+  single-flighted so concurrent tool calls never double-login, and TTL-aware from the JWT's own
+  expiry claim. `listClinics(env)` (backs the `list_clinics` tool) is the only other caller of the
+  support-account login path.
 - **`copilot/settings/`** (diff_settings / get_settings / plan_settings_sync / apply_settings_sync):
   one file per catalog section under `sections/` implementing the `SettingsSection` interface
   (`types.ts`), assembled into `SETTINGS_CATALOG` by `catalog.ts`. The hard part is cross-env
@@ -72,14 +83,28 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
 - **Every Copilot operation requires an `env` (`prod` | `pre_prod`) and a `profile`
   (`ossm`, `kafri`, …) plus its other args.** These are **required** tool/prompt parameters — never
   add a default env or default profile, and never silently assume one. `profile` is validated
-  against the config at call time by `resolveCreds`. UiPath-only tools (`list_jobs`, `get_job_logs`,
-  `get_job`, `list_queues`, `list_processes`, `list_triggers`, `build_faulted_job_issue`,
-  `add_queue_item`, `delete_queue_item`, `start_job`, `stop_job`) take `env` but **no `profile`** — UiPath
-  authenticates globally (not per-profile creds), via `uipath.oauth` (client-credentials, tried
-  first when configured) and/or the static `uipath.bearer` PAT (the fallback if `oauth` is absent or
-  its token request fails — `uipath/auth.ts`'s `resolveBearerToken`, the single chokepoint
-  `uipathRequest` calls). At least one of `bearer`/`oauth` is required by the config schema. Still
-  never default `env`.
+  against the config at call time by `resolveAuth`/`resolveSupport`. The one carve-out is
+  `list_clinics` — it takes `env` but no `profile`, because it's the discovery tool that produces
+  the profile → clinicUid mapping (requiring a profile would be circular). UiPath-only tools
+  (`list_jobs`, `get_job_logs`, `get_job`, `list_queues`, `list_processes`, `list_triggers`,
+  `build_faulted_job_issue`, `add_queue_item`, `delete_queue_item`, `start_job`, `stop_job`) also
+  take `env` but **no `profile`** — UiPath authenticates globally (not per-profile creds), via
+  `uipath.oauth` (client-credentials, tried first when configured) and/or the static
+  `uipath.bearer` PAT (the fallback if `oauth` is absent or its token request fails —
+  `uipath/auth.ts`'s `resolveBearerToken`, the single chokepoint `uipathRequest` calls). At least
+  one of `bearer`/`oauth` is required by the config schema. Still never default `env`.
+- **Copilot BE auth is one chokepoint, two modes, and a shared session cache.**
+  `copilot/session.ts`'s `connect(env, profile)` is the ONLY place allowed to POST
+  `physician/login` or `support/switch-clinic` — do not add a second call site. A profile's env
+  entry is either `mode: "support"` (a `clinicUid` pointer; creds come from
+  `copilot.support.<env>`, shared across every profile using that mode) or `mode: "direct"` (its
+  own `be`/`email`/`password`, unchanged pre-existing behavior); `clinicUid` wins if an entry
+  somehow carries both. Sessions are cached by `(env, be, email, scope)`, single-flighted so
+  concurrent tool calls never double-login, and TTL-aware from the JWT's own expiry claim — this
+  is what keeps a support account's login-rate budget from being burned by every restart. Disk
+  persistence (`~/.cache/copilot-mcp/sessions.json`, mode `0600`) is on by default
+  (`copilot.sessionCache: false` disables it; `COPILOT_MCP_CACHE` overrides the path) and never
+  holds the account email (cache keys are hashed).
 - **stdout is the JSON-RPC channel.** A stray `console.log` to stdout corrupts the protocol.
   `console.*` is redirected to stderr in server.ts; use `mcpLog()` for client-visible logs and
   stderr (`LOG_LEVEL=debug` / `COPILOT_MCP_DEBUG=1`) for local diagnostics.

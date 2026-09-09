@@ -153,7 +153,7 @@ const cloneCandidate = (o: BeOrder): Record<string, unknown> | null => {
 // Single source of truth for the server version: advertised to clients and embedded
 // in the prefilled GitHub-issue URL on unexpected failures (see feedback.ts). Keep in
 // sync with package.json on release.
-const VERSION = "1.33.0";
+const VERSION = "1.33.1";
 
 // Initialize-time guidance for the connected agent. Instructions are static per
 // session, so probe the config once at startup: an unconfigured server announces
@@ -2356,9 +2356,12 @@ server.registerTool(
     },
     description:
       "Probe the MCP server's connections to its external APIs and report what is reachable: " +
-      "logs into the Copilot BE for PROD and PRE-PROD, and makes one cheap authenticated UiPath " +
-      "Orchestrator call per env/folder. READ-ONLY. Use it to debug setup (creds, UiPath token, " +
-      "folder access). Returns {account, ok, checks:[{name, target, ok, detail}]}.",
+      "for PROD and PRE-PROD, an auth check (Copilot BE login, reusing a cached session), a " +
+      "clinic-scope fingerprint (GET /orders/locations, the cheap proof a support-account " +
+      "session landed on the intended clinic and not just that login succeeded), and one cheap " +
+      "authenticated UiPath Orchestrator call per env/folder. READ-ONLY. Use it to debug setup " +
+      "(creds, clinic scope, UiPath token, folder access). Returns {account, ok, " +
+      "checks:[{name, target, ok, detail}]}.",
     inputSchema: {
       profile: z
         .string()

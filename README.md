@@ -6,10 +6,12 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 
 ## Tools
 
-28 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
+32 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
 (`env`, `profile`) — see each tool's own schema for the rest. Every Copilot tool requires an
 explicit `profile`; most also require an explicit `env` (`prod` | `pre_prod`) — neither is ever
-defaulted. UiPath-only tools take `env` but no `profile` (UiPath auths globally, not per-account).
+defaulted. The one exception is `list_clinics`, which takes `env` but no `profile`: it's the
+discovery tool that produces the profile → clinicUid mapping, so requiring a profile would be
+circular. UiPath-only tools also take `env` but no `profile` (UiPath auths globally, not per-account).
 
 ### Copilot orders
 
@@ -27,7 +29,8 @@ All read tools here are READ-ONLY. Writes (`delete_preprod_order`, `create_prepr
 | `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
 | `find_stuck_orders` | `env`, `profile` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheckUipath` correlates each to its UiPath job(s) for a coarse verdict. |
 | `build_queue_item` | `env`, `profile` | Fetch an order and BUILD the UiPath AddQueueItem request payload from it — never POSTs. `IsApproved` is always `false`. Pair with `add_queue_item` to actually post it. |
-| `get_login_token` | `env`, `profile` | Log into the Copilot BE and return the session JWT (the same token UiPath callbacks use as `SpecificContent.token`). Authenticates only — reads/writes no order data. |
+| `get_login_token` | `env`, `profile` | Log into the Copilot BE (reusing a cached session) and return the session JWT (the same token UiPath callbacks use as `SpecificContent.token`), plus `mode` (`support`/`direct`), `clinicUid`, and `activeClinicId`. Authenticates only — reads/writes no order data. |
+| `list_clinics` | `env` (no `profile` — see note above) | List the clinics the configured **support account** can switch into (`clinicUid`, name, last-active, owner email), each annotated with the config profile already mapped to it (`null` if unmapped). Use it to fill `copilot.profiles.<name>.<env>.clinicUid`. Requires `copilot.support.<env>`. |
 
 ### UiPath Orchestrator — reads
 
@@ -74,7 +77,7 @@ only settings tool that writes, and it's additive-only against pre-prod (never o
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `doctor` | `profile` | Probe the server's external connections — Copilot BE login (both envs) + one cheap UiPath Orchestrator call per env/folder — and report what's reachable, plus which UiPath auth mode (`oauth`/`bearer`) is active. |
+| `doctor` | `profile` | Probe the server's external connections — three checks per env (prod + pre-prod): Copilot BE auth (reusing a cached session; reports `mode` and, for support-account envs, the `activeClinicId` it switched to), a clinic-scope fingerprint (`GET /orders/locations`, which differs per clinic — the cheap proof a support session really landed on the intended clinic, not just that login succeeded), and one cheap UiPath Orchestrator call per env/folder. Reports what's reachable per check, plus which UiPath auth mode (`oauth`/`bearer`) is active. |
 | `build_mcp_issue` | — | Compose a GitHub issue about **this MCP server** from a bug report or general feedback — no tool failure required. Posts nothing and holds no GitHub credentials; returns `title`/`body`/`labels` (+ a prefilled `url`) for the host's GitHub tooling to file. |
 
 ## Prompts
@@ -117,10 +120,36 @@ args. Two ways to provide it:
 2. **Split legacy files:** set `COPILOT_MCP_LOCAL_DIR` to a directory containing
    `order-copy-credentials.json` + `uipath-config.json`.
 
+Each `copilot.profiles.<name>` entry has a `prod`/`pre_prod` env pair, and each env is
+**either**:
+
+- a **support-account pointer**, `{ "clinicUid": "..." }` — the credentials that actually log
+  in come from `copilot.support.<env>` (shared across every profile using this mode for that
+  env); use the `list_clinics` tool to look up each clinic's `clinicUid`, or
+- a **direct login**, `{ "be", "email", "password", "fe"? }` — the original per-account shape,
+  unchanged.
+
+`clinicUid` wins if a profile entry somehow carries both, which is how an account is migrated
+to the support-account model one env at a time without deleting its old credentials. Today
+prod ships as support-account (`copilot.support.prod` required) and pre-prod stays on direct
+login, but nothing hard-codes that split — it's whatever each profile's env entries say.
+
+Authenticated sessions (cookies + JWT) are cached in memory and, by default, on disk at
+`~/.cache/copilot-mcp/sessions.json` (mode `0600`; `$XDG_CACHE_HOME` is honored when set to an
+absolute path; `COPILOT_MCP_CACHE` overrides the path outright) so a server restart doesn't
+burn a login. Set `"copilot.sessionCache": false` to disable disk persistence (memory-only for
+the process lifetime). This is what keeps the support account's 10-logins-per-15-minutes budget
+from being exhausted by routine restarts — never commit or echo that cache file, it holds live
+tokens.
+
 The `uipath.queueUrl / addQueueItemPath / serverUrlByEnv` fields are only
 required by `build_queue_item`. Editing the config file while the server is running
 takes effect on the next tool call — no restart needed — and the server sends an MCP
 logging notification when it reloads.
+
+See the `copilot://reference/config-guide` MCP resource for a full field-by-field walkthrough
+(load order, an annotated JSON template, and the `doctor`/`list_clinics` verification steps) —
+it's what an agent reads to set this server up from scratch.
 
 When a tool fails for a reason that looks like a bug in this server (an unexpected
 exception — not a bad profile, missing/invalid config, not-found, auth, or any HTTP error

@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.33.1] - 2026-09-09
+
+### Fixed
+
+- Docs and the `doctor` tool description had not caught up to v1.33.0's support-account auth
+  and session caching. `README.md`'s Configuration section, tool table, and tool count;
+  `CLAUDE.md`'s architecture/invariants (the `resolveCreds` helper it described no longer
+  exists — `config.ts` now exposes `resolveAuth`/`resolveSupport`; `session.ts` was missing
+  from the module list); and `.claude/rules/env-profile-required.md` (same stale
+  `resolveCreds` reference, missing the `list_clinics` env-without-profile carve-out) are all
+  brought current. The `doctor` tool's own MCP-visible description undercounted its checks —
+  it now names all three probes per env (auth, the `/orders/locations` clinic-scope
+  fingerprint, UiPath folder reachability), not just two.
+- `copilot-mcp.config.example.json` now consistently uses `clinicUid` (support-account auth)
+  for every shipped profile's `prod` entry instead of mixing it with a leftover direct-login
+  example, matching the support-account model that's actually required for prod.
+
 ## [1.33.0] - 2026-09-07
 
 ### Added
