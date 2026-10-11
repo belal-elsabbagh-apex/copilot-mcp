@@ -10,6 +10,7 @@
 import { type Env, getUipath } from "../config/config.js";
 import { guardQueueItemSafety, type QueueSafetyLimits } from "../orchestrator/safety.js";
 import { isRecord } from "../shared/util.js";
+import { UIPATH_TERMINAL_STATES } from "./map.js";
 import {
   fetchJobByKey,
   getQueueItem,
@@ -210,11 +211,8 @@ export interface StopJobResult {
   stopped: true;
 }
 
-// A job already in one of these states has nothing left to stop.
-const TERMINAL_JOB_STATES = new Set(["Successful", "Faulted", "Stopped"]);
-
 export function assertStoppable(job: UiPathJob): void {
-  if (job.State && TERMINAL_JOB_STATES.has(job.State)) {
+  if (job.State && UIPATH_TERMINAL_STATES.has(job.State)) {
     throw new Error(
       `refusing to stop job '${job.Key}': state is already '${job.State}' (terminal)`,
     );

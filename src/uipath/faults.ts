@@ -46,7 +46,7 @@ export function topError(job: UiPathJob, logs: JobLog[]): string {
 }
 
 // A dotted .NET-style type ending in Exception/Error, e.g. System.NullReferenceException.
-const EXCEPTION_TYPE = /\b(?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Exception|Error)\b/;
+export const EXCEPTION_TYPE = /\b(?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Exception|Error)\b/;
 
 export interface JobFault {
   message: string; // headline error (first Error-level log, else last line, else state)
