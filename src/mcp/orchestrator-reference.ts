@@ -38,7 +38,7 @@ export const ORCHESTRATOR_REFERENCE = {
     apexJobStatuses: [...APEX_TERMINAL_STATUSES],
   },
   notes: [
-    "One transaction maps to MANY jobs on Apex: a retry is a NEW job on the SAME queue item (retryOfJobId, attempt on each job; the parent ends cancelled), so a queue item's jobs[] is newest-first and a verdict must use the latest attempt. UiPath retries are new queue items, so its jobs[] holds at most one.",
+    "One transaction maps to MANY jobs on Apex: a retry is a NEW job on the SAME queue item (retryOfJobId, attempt on each job; the superseded parent usually ends failed, sometimes cancelled), so a queue item's jobs[] is newest-first and a verdict must use the latest attempt. UiPath retries are new queue items, so its jobs[] holds at most one.",
     "Apex logs exist only after the run and only per the Process's artifact_policy: the live log is dashboard-only SSE, so get_job / get_job_logs on a running job report logsUnavailable.reason='running', and a finished job whose policy skipped the artifact (on_failure for a success, never) reports 'artifact-policy'. Use get_job_artifacts for the files themselves (job.log, trace.zip, screenshots, recording).",
     "Never-started jobs: a job that ended failed with started_at null (typically error_class missing_credential, reaped before any worker claimed it) has no logs and no artifacts — logsUnavailable.reason='never-started', details.neverStarted=true, and find_stuck_orders reports verdict 'job-never-started'. Fix the credential binding; re-running does not help.",
   ],
