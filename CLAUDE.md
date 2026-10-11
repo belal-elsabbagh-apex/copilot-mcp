@@ -166,8 +166,8 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   `apex/client.ts`. `apexRequest` is the only entry point to Apex's data and write routes: it always
   sends `X-Folder-Id` (omitting it silently reads the user's default folder), sends only verified
   query params (unknown ones are silently ignored by the server), and refuses any request other than
-  GET unless `env === "pre_prod"` — before any network call. The only other requests, both in
-  `client.ts`, are the login POST and `apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths,
+  GET unless `env === "pre_prod"` — before any network call. The only other requests, all in
+  `client.ts`, are the login POST, the `GET /folders` listing that resolves folder ids, and `apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths,
   no folder header). Writes are never auto-retried (a retry could double-post).
 - **Apex writes are test-folder-only and guarded.** Mirrors the UiPath invariant: schema
   `z.literal("pre_prod")`, domain assert, the chokepoint gate, `guardQueueItemSafety`, and fetch-first

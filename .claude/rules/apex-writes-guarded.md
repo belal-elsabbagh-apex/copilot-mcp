@@ -6,8 +6,8 @@ files: src/apex/client.ts, src/apex/actions.ts, src/orchestrator/safety.ts
 All Apex HTTP lives in `src/apex/client.ts`. `apexRequest` is the ONLY entry point to Apex's data and
 write routes: it ALWAYS sends `X-Folder-Id` (omitting it silently reads the user's default folder),
 sends only verified query params, and refuses any method other than GET unless `env === "pre_prod"`
-— before any network call. The only other requests, both in `client.ts`, are the login POST and
-`apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths, no folder header). Writes are never
+— before any network call. The only other requests, all in `client.ts`, are the login POST, the
+`GET /folders` listing that resolves folder ids, and `apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths, no folder header). Writes are never
 auto-retried.
 
 `src/apex/actions.ts` is the ONLY module that mutates Apex (`add_queue_item`, `delete_queue_item`,

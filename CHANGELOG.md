@@ -29,7 +29,7 @@ deleting `src/uipath/` and one enum value — no further tool renames.
 
 ### Changed
 
-- **BREAKING — argument renames:** `jobKey`/`jobKeys` → `jobId`/`jobIds` (`get_job`, `get_job_logs`);
+- **BREAKING — argument renames:** `jobKey`/`jobKeys` → `jobId`/`jobIds` (`get_job`, `get_job_logs`, `build_faulted_job_issue`);
   `releaseKey` → `processId` and `inputArguments` → `input` (`start_job`); `queueName` / `queueDefId`
   (`list_queue_items`) and `queueName` (`add_queue_item`) → `queue`; `queueDefinitionId` (`list_triggers`) →
   `queueId`; `txnId` → `itemId` (`delete_queue_item`, `pull_queue_item`; Apex also takes `queueId`);

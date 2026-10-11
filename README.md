@@ -201,7 +201,7 @@ backend-neutral. Skills/prompts that call the old names must be updated.
 | v1.x | v2.0.0 |
 |------|--------|
 | (no such arg) | `orchestrator: "uipath" \| "apex"` — **required** on every job/queue-level tool; optional on `find_order_queue_items` / `find_stuck_orders` (omitted = every registered backend) |
-| `jobKey` / `jobKeys` (`get_job`, `get_job_logs`) | `jobId` / `jobIds` |
+| `jobKey` / `jobKeys` (`get_job`, `get_job_logs`, `build_faulted_job_issue`) | `jobId` / `jobIds` |
 | `releaseKey` (`start_job`) | `processId` (UiPath release Key \| Apex workflow uuid, from `list_processes`) |
 | `inputArguments` (`start_job`) | `input` |
 | `queueName` (`list_queue_items`, `add_queue_item`) / `queueDefId` (`list_queue_items`) | `queue` — a portal key/alias or queue id (`list_queue_items`); the exact queue name or id (`add_queue_item`) |
