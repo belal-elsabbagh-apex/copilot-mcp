@@ -155,6 +155,10 @@ const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
     valid: { orderUid: "abcdefgh", env: "prod" }, // orchestrator omitted = every orchestrator
     invalid: { orderUid: "abcdefgh" }, // env is required
   },
+  find_stuck_orders: {
+    valid: { env: "prod", profile: "ossm", crossCheck: true }, // orchestrator omitted = every orchestrator
+    invalid: { env: "prod", profile: "ossm", orchestrator: "nope" }, // unknown orchestrator
+  },
   pull_queue_item: {
     valid: { orchestrator: "uipath", env: "pre_prod", itemId: "123" },
     invalid: { orchestrator: "uipath", url: "not a url" },

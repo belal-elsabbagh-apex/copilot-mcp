@@ -181,10 +181,15 @@ export function registerPrompts(server: McpServer): void {
       const p = ` (profile="${profile}")`;
       return userText(
         `Triage stuck Copilot orders${p}.\n` +
-          `1. Call find_stuck_orders${p} to list orders stuck in a non-terminal status.\n` +
-          `2. For the stuck orders whose uipath.verdict warrants a closer look, call find_order_queue_items per order ` +
-          `(orchestrator="uipath") to get each order's jobIds.uipath, then diagnose them in ONE get_job call with orchestrator="uipath" and jobIds=[...] (up to 25 ids per ` +
-          `call) and includeLogDigest=true to see whether each job failed, is still running, or never started.\n` +
+          `1. Call find_stuck_orders${p} with crossCheck=true to list orders stuck in a non-terminal status; each ` +
+          `carries orchestrator.{backend,verdict} (omit the orchestrator argument to check every orchestrator).\n` +
+          `2. For the stuck orders whose orchestrator.verdict warrants a closer look (job-faulted, job-never-started, ` +
+          `job-running, job-found, job-successful-order-stuck), call find_order_queue_items per order to get each ` +
+          `order's jobIds per orchestrator, then diagnose them in ONE get_job call per orchestrator with ` +
+          `orchestrator=<that orchestrator>, jobIds=[...] (up to 25 ids per call) and includeLogDigest=true to see ` +
+          `whether each job failed, is still running, or never started. job-never-started means the latest attempt ` +
+          `was reaped before a worker ran it (e.g. a missing credential) — a platform/config fix, not an order-data ` +
+          `fix. An "error: …" verdict means the lookup failed, not that the order is fine — retry it.\n` +
           `3. Group them by root cause and recommend a remediation per group (retry, re-clone, fix data, escalate).\n` +
           `Do not take any write action without the user's explicit go-ahead.`,
       );

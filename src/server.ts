@@ -28,7 +28,7 @@
 //   - delete_queue_item        delete a queue item from the pre-prod folder (pre_prod-only)
 //   - start_job                start job(s) for a pre-prod process (pre_prod-only)
 //   - stop_job                 stop or kill a pre-prod job (pre_prod-only; fetch-first)
-//   - find_stuck_orders        scan recent orders for non-terminal ('stuck') statuses, optionally cross-checked against UiPath (read-only)
+//   - find_stuck_orders        scan recent orders for non-terminal ('stuck') statuses, optionally cross-checked against every orchestrator (read-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/tags the settings tools can scope to (read-only, no network)
 //   - get_settings             fetch one env's settings sections (read-only)
@@ -1563,11 +1563,17 @@ server.registerTool(
     },
     description:
       "Scan recent orders in an env and flag the ones sitting in a non-terminal ('stuck') status " +
-      "(default inProgress/incomplete/pending). Optionally correlate each to its UiPath queue item(s) for a " +
-      "coarse verdict (no-job / job-faulted / job-running / queued-not-picked-up / " +
-      "job-successful-order-stuck), determined from the queue item's Status (PHI-safe — member data / " +
-      "tokens are never surfaced). READ-ONLY. Returns {env, scanned, statuses, found, " +
-      "stuck:[{orderUid,status,ageHours,uipath?:{verdict,queueItemCount,queueItemStatus?,processingExceptionType?}}]}.",
+      "(default inProgress/incomplete/pending). Optionally (`crossCheck`) correlate each to its queue " +
+      "item(s) on the orchestrator(s) — omit `orchestrator` to check every orchestrator, since where " +
+      "the item actually sits is the truth — for a coarse verdict: no-job / job-never-started / " +
+      "job-faulted / job-running / queued-not-picked-up / job-successful-order-stuck / job-found " +
+      "(or 'error: …' when the lookup failed, which is NOT 'no-job'). Verdicts come from the newest " +
+      "queue item's status and latest attempt (PHI-safe — member data / tokens are never surfaced). " +
+      "job-never-started = the latest attempt was reaped before any worker ran it (e.g. a missing " +
+      "credential on Apex): a platform/config problem, not order data. READ-ONLY. Returns {env, " +
+      "scanned, statuses, found, stuck:[{orderUid,status,ageHours,orchestrator?:{backend," +
+      "verdict,queueItemCount,queueItemStatus?,exceptionType?}}]} where `backend` is the " +
+      "orchestrator holding the newest queue item (null when none / lookup failed).",
     inputSchema: {
       env: z.enum(["prod", "pre_prod"]).describe("Which env to scan (required)"),
       profile: z
@@ -1593,18 +1599,23 @@ server.registerTool(
         .describe(
           "Only flag orders at least this many hours old (needs a parseable date on the row)",
         ),
-      crossCheckUipath: z
+      crossCheck: z
         .boolean()
         .optional()
         .default(false)
-        .describe("Correlate each stuck order to its UiPath job(s) for a verdict"),
+        .describe("Correlate each stuck order to its queue item(s)/job(s) for a verdict"),
+      orchestrator: orchestratorArg
+        .optional()
+        .describe(
+          "With crossCheck: check only this orchestrator (uipath | apex); omit to check every orchestrator",
+        ),
       since: z
         .string()
         .optional()
         .describe(
-          "Explicit ISO floor for the UiPath queue-item search. Each order's own creationDate " +
+          "Explicit ISO floor for the queue-item search. Each order's own creationDate " +
             "already tightens its search to that date (queue items can't predate the order), so " +
-            "this is only needed to push the floor even later, or when crossCheckUipath is used " +
+            "this is only needed to push the floor even later, or when crossCheck is used " +
             "without a BE-sourced creationDate",
         ),
       top: z
@@ -1614,11 +1625,11 @@ server.registerTool(
         .max(500)
         .optional()
         .default(50)
-        .describe("Max jobs to consider per order in the cross-check"),
+        .describe("Max queue items to consider per order, per orchestrator, in the cross-check"),
     },
   },
   async (
-    { env, profile, scanPages, statuses, olderThanHours, crossCheckUipath, since, top },
+    { env, profile, scanPages, statuses, olderThanHours, crossCheck, orchestrator, since, top },
     extra,
   ) => {
     try {
@@ -1629,7 +1640,8 @@ server.registerTool(
           scanPages,
           statuses,
           olderThanHours,
-          crossCheckUipath,
+          crossCheck,
+          orchestrator,
           since,
           top,
           onProgress: stepProgress(extra),
