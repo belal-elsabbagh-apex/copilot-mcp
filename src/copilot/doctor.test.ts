@@ -27,6 +27,7 @@ describe("apexProbes: configured from the file", () => {
       `folder 'Authorization Test' -> ${FOLDER_IDS["Authorization Test"]}`,
     );
     expect(apex.callsTo("POST", "/auth/login").length).toBe(1); // checks share one session
+    expect(byName(checks, "apex login")?.detail).not.toContain("tester");
   });
 
   test("a rejected login fails the login check (and the folder checks that need it), never throws", async () => {

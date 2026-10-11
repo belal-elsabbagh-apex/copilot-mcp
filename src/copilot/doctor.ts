@@ -78,7 +78,7 @@ export function apexProbes(): (() => Promise<DoctorCheck>)[] {
     () =>
       probe("apex login", cfg.apiUrl, async () => {
         await apexLogin();
-        return `login OK as '${cfg.username}'`;
+        return "login OK";
       }),
     ...ENVS.map(
       (env) => () =>
