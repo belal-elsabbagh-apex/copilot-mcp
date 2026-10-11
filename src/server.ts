@@ -83,6 +83,7 @@ import {
   stepProgress,
   withHeartbeat,
 } from "./mcp/notify.js";
+import { ORCHESTRATOR_REFERENCE } from "./mcp/orchestrator-reference.js";
 import { registerPrompts } from "./mcp/prompts.js";
 import {
   ACCOUNT_AUTOMATION_IDS,
@@ -93,7 +94,6 @@ import {
   QUEUE_ITEM_SCHEMA,
   RESULT_CONTRACT,
   SAFETY_RULES,
-  UIPATH_FOLDERS,
 } from "./mcp/reference.js";
 import { findOrderAcross, selectBackends } from "./orchestrator/find-order.js";
 import { jobEntriesEnvelope, resolveJobIds } from "./orchestrator/job-batch.js";
@@ -152,12 +152,17 @@ const VERSION = "1.33.1";
 // retried on each call, so setup completes without a restart.
 function buildInstructions(): string {
   const base =
-    "EHR Copilot order operations + UiPath Orchestrator execution analysis. " +
-    "Every Copilot tool requires an explicit env (prod | pre_prod) and a profile from the config — never assume either.\n\n" +
+    "EHR Copilot order operations + orchestrator (UiPath and Apex) execution analysis. " +
+    "Every Copilot tool requires an explicit env (prod | pre_prod) and a profile from the config — never assume either. " +
+    "Every job- or queue-level orchestrator tool also requires an explicit `orchestrator` (uipath | apex); only " +
+    "find_order_queue_items and find_stuck_orders may omit it (omitted = every configured backend), and " +
+    "get_job_artifacts is Apex-only. An order can run on either orchestrator and which one is decided outside this " +
+    "server, so look where the item actually sits. Job ids are GUIDs on both — pass them with the right `orchestrator`.\n\n" +
     "PROD IS READ-ONLY BY DESIGN. This server cannot mutate prod: every write path — order minting/deletes, " +
-    "settings sync, queue-item posts/deletes, job starts — targets pre-prod / the UiPath dev-clone folder only, " +
-    "enforced at the tool schema AND asserted again in the domain layer. Posted queue items additionally pass a " +
-    "safety guard (IsApproved forced false, callback URLs pinned to pre-prod). Reading prod is normal and safe; " +
+    "settings sync, queue-item posts/deletes, job starts/stops — targets pre-prod only (the UiPath dev-clone folder, " +
+    "the Apex 'Authorization Test' folder), enforced at the tool schema AND asserted again in the domain layer " +
+    "(Apex also at its HTTP chokepoint). Posted queue items additionally pass a safety guard (IsApproved forced " +
+    "false, callback URLs pinned to pre-prod). Reading prod is normal and safe; " +
     "never work around a pre-prod-only refusal — it is the design, not a bug.\n\n" +
     "FEEDBACK: when a tool fails for a reason that looks like a bug in this server (not bad input, config, or an " +
     "upstream HTTP error), the error payload includes a `reportIssue` block with a prefilled GitHub new-issue URL " +
@@ -165,7 +170,7 @@ function buildInstructions(): string {
     "to the user or open the issue directly so the bug gets reported; expected/user-actionable failures carry no such block. " +
     "The user can also ask to file a bug or general feedback about this server at any time — no failure required: " +
     "use build_mcp_issue (or the send-mcp-feedback prompt) to compose the issue, then post it via the host's GitHub tooling or hand over the prefilled URL.\n\n" +
-    "Stable facts (portals, folders, schemas, safety rules, config guide) are resources under copilot://.";
+    "Stable facts (portals, orchestrator folders/labels, schemas, safety rules, config guide) are resources under copilot://.";
   const cfg = configStatus();
   if (cfg.ok) return base;
   return (
@@ -665,11 +670,11 @@ jsonResource(
   ACCOUNT_AUTOMATION_IDS,
 );
 jsonResource(
-  "uipath-folders",
-  "copilot://reference/uipath-folders",
-  "UiPath folders by env",
-  "Per-env UiPath folder name, OrganizationUnitId, FolderKey, and whether it fires real BE calls.",
-  UIPATH_FOLDERS,
+  "orchestrators",
+  "copilot://reference/orchestrators",
+  "Orchestrators (UiPath + Apex) by env",
+  "Per orchestrator and env: folder name + ids (UiPath: OrganizationUnitId/FolderKey/real-BE-calls; Apex: resolved at runtime), the write rule, job-state / queue-item-status label maps, terminal sets, and notes on many-jobs-per-transaction, Apex log availability, and never-started jobs.",
+  ORCHESTRATOR_REFERENCE,
 );
 jsonResource(
   "queue-item-schema",
