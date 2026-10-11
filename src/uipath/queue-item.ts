@@ -79,6 +79,27 @@ export interface QueueItemResult {
   meta: Record<string, unknown>;
 }
 
+export type QueueUipath = Pick<
+  UipathConfig,
+  "orchestratorUrl" | "queueUrl" | "addQueueItemPath" | "folderPath"
+> & { serverUrl: string | undefined }; // serverUrl = uipath.serverUrlByEnv[env]
+
+// Everything buildQueueItem reads from the outside world, so assembleQueueItem stays pure.
+export interface AssembleInput {
+  order: BeOrder;
+  orderUid: string;
+  profile: string | null;
+  env: Env;
+  automationId: string | undefined; // already resolved: explicit > account table
+  token: string | undefined;
+  physicianId: string | number | null;
+  supportMode: boolean;
+  providerMail: string;
+  beBase: string; // the BE the order was read from (serverURL fallback)
+  uipath: QueueUipath;
+  nowSec: number;
+}
+
 export async function buildQueueItem(
   orderUid: string,
   opts: { profile?: string | null; env: Env; automationId?: string | null }, // env is required — never defaulted (repo invariant)
@@ -91,13 +112,29 @@ export async function buildQueueItem(
 
   const session = await connect(env, profile);
   const { client, token } = session;
-  const physicianId = decodeJwtId(token);
   const providerMail =
     session.mode === "support"
       ? ((await clinicOwnerEmail(env, session.clinicUid as string)) ?? "")
       : session.email;
 
-  const o = await fetchOrder(client, orderUid);
+  return assembleQueueItem({
+    order: await fetchOrder(client, orderUid),
+    orderUid,
+    profile,
+    env,
+    automationId,
+    token,
+    physicianId: decodeJwtId(token),
+    supportMode: session.mode === "support",
+    providerMail,
+    beBase: client.base,
+    uipath: { ...uipath, serverUrl: uipath.serverUrlByEnv?.[env] },
+    nowSec: Math.floor(Date.now() / 1000),
+  });
+}
+
+export function assembleQueueItem(input: AssembleInput): QueueItemResult {
+  const { order: o, orderUid, profile, env, automationId, token, physicianId, uipath } = input;
   const notes: string[] = [];
 
   const form: NonNullable<BeOrder["referralFormJSON"]> = o.referralFormJSON ?? {};
@@ -128,7 +165,7 @@ export async function buildQueueItem(
         "— SpecificContent.automationId is a placeholder random UUID, not the account's real " +
         "UiPath automation id. Pass the correct value via the automationId argument before submitting.",
     );
-  if (session.mode === "support")
+  if (input.supportMode)
     notes.push(
       `physicianId ${physicianId} is the support account's user id — under support-account auth the JWT 'id' claim is the support user in both pre- and post-switch tokens; callbackContext carries it as-is.`,
     );
@@ -173,7 +210,7 @@ export async function buildQueueItem(
     ProviderID: "",
     ProviderLastName:
       splitName(fromName).last && fromName.includes(",") ? splitName(fromName).last : "",
-    ProviderMail: providerMail,
+    ProviderMail: input.providerMail,
     ProviderNPI: s(from["NPI"]),
     ProviderPhone: s(from["phoneNumber"]),
     ProviderZipCode: "",
@@ -198,7 +235,7 @@ export async function buildQueueItem(
     placeOfService: o.placeOfService || fac.placeOfService || "",
     queueUrl: uipath.queueUrl,
     retryCount: 0,
-    serverURL: uipath.serverUrlByEnv?.[env] ?? client.base,
+    serverURL: uipath.serverUrl ?? input.beBase,
     token: token ?? "",
   };
   // Single enforcement point for the IsApproved=false rule (the literal above documents it).
@@ -208,7 +245,7 @@ export async function buildQueueItem(
     itemData: {
       Name: `${insuranceName} auth submit queue`,
       Priority: "Normal",
-      Reference: `${orderUid}-${Math.floor(Date.now() / 1000)}`,
+      Reference: `${orderUid}-${input.nowSec}`,
       SpecificContent: specific,
     },
   };
