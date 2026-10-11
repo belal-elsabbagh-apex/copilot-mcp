@@ -1073,7 +1073,7 @@ server.registerTool(
       "{orchestrator,env,repo,title,body,labels,faultSignature,searchQuery,recurrenceComment," +
       "found,logsError?}. The logs fetch is best-effort: a failure surfaces as logsError (issue " +
       "still built from the job alone) instead of failing the whole call. The caller (the " +
-      "report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search " +
+      "report-faulted-jobs prompt) hands this to the host's GitHub MCP server: search " +
       "with `searchQuery`, then add `recurrenceComment` to the matching open issue, or " +
       "create_issue with title/body/labels. `faultSignature` is the normalized error (stable " +
       "across reruns) used to dedupe.",

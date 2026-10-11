@@ -5,6 +5,8 @@
 import type { Env } from "../config/config.js";
 import { resolvePortal } from "../mcp/reference.js";
 import type {
+  FaultedJobIssueResult,
+  FaultIssueArgs,
   FindOrderArgs,
   FindOrderResult,
   GetJobLogsArgs,
@@ -27,7 +29,14 @@ import type {
 import { digestLogs } from "../orchestrator/log-digest.js";
 import { memberFilename, toPortalRef } from "../orchestrator/portal.js";
 import { guardQueueItemSafety } from "../orchestrator/safety.js";
-import type { ProcessCore, QueueCore, QueueItemCore, TriggerCore } from "../orchestrator/types.js";
+import type {
+  JobAttempt,
+  JobLog,
+  ProcessCore,
+  QueueCore,
+  QueueItemCore,
+  TriggerCore,
+} from "../orchestrator/types.js";
 import { ExpectedError } from "../shared/expected-error.js";
 import { chunk, type StepProgress } from "../shared/util.js";
 import {
@@ -49,6 +58,7 @@ import {
   listWorkflows,
 } from "./api.js";
 import { apexDashboardLink, resolveFolderId } from "./client.js";
+import { formatApexFaultIssue } from "./faults.js";
 import { type ParsedJobLog, parseJobLog } from "./job-log.js";
 import {
   type ApexLogDigest,
@@ -409,4 +419,66 @@ export async function apexListTriggers(args: ListTriggersArgs): Promise<TriggerC
   );
   const timeTriggers = queueId ? [] : (await listSchedules(env, folder)).map(toApexScheduleTrigger);
   return [...queueTriggers, ...timeTriggers].slice(0, top);
+}
+
+// ---- build_faulted_job_issue ---------------------------------------------
+
+const MAX_ATTEMPTS = 50;
+
+// The attempts of one queue item, newest first: a retry is a NEW job on the same item, and
+// /jobs?reference= is the only verified item filter. Two items can share a reference, so
+// keep only this item's jobs.
+async function jobAttempts(
+  env: Env,
+  folder: string | undefined,
+  detail: ApexJobDetail,
+): Promise<JobAttempt[]> {
+  if (!detail.queue_item_reference) return [toApexJobAttempt(detail)];
+  const rows = await listJobs(
+    env,
+    folder,
+    { reference: detail.queue_item_reference },
+    MAX_ATTEMPTS,
+  );
+  return rows.filter((r) => r.queue_item_id === detail.queue_item_id).map(toApexJobAttempt);
+}
+
+// Logs are a best-effort attachment: a failed fetch must not discard a valid job lookup
+// (same convention as UiPath's buildFaultedJobIssue). A missing job.log is not a failure:
+// never-started reaps and artifact_policy leave none.
+async function bestEffortLogRows(
+  env: Env,
+  folder: string | undefined,
+  jobId: string,
+): Promise<{ rows: JobLog[]; error?: string }> {
+  try {
+    return { rows: (await readJobLog(env, folder, jobId))?.rows ?? [] };
+  } catch (e) {
+    return { rows: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function apexBuildFaultedJobIssue(
+  args: FaultIssueArgs,
+): Promise<FaultedJobIssueResult> {
+  const { env, jobId, folder } = args;
+  const detail = await getJob(env, folder, jobId);
+  const job = toApexJobCore(detail, apexDashboardLink(`/jobs/${detail.id}`));
+  const { fault } = job;
+  if (!fault?.message || !fault.signature) {
+    throw new ExpectedError(
+      `job ${jobId} is ${job.state}, not a fault — build_faulted_job_issue needs a failed, ` +
+        "timed-out, lost or stopped job",
+    );
+  }
+  const [attempts, logs] = await Promise.all([
+    jobAttempts(env, folder, detail),
+    bestEffortLogRows(env, folder, jobId),
+  ]);
+  const issue = formatApexFaultIssue(
+    { ...job, fault: { ...fault, message: fault.message, signature: fault.signature } },
+    logs.rows,
+    { env, attempts, repo: args.repo, labels: args.labels },
+  );
+  return { ...issue, found: true, ...(logs.error ? { logsError: logs.error } : {}) };
 }

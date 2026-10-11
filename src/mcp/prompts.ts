@@ -7,6 +7,7 @@ import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listProfiles } from "../config/config.js";
+import { ENABLED_ORCHESTRATORS } from "../orchestrator/registry.js";
 
 // Profiles are read live from the config so autocompletion reflects whatever the
 // running server is configured with, not a hardcoded list.
@@ -225,15 +226,19 @@ export function registerPrompts(server: McpServer): void {
     },
   );
 
-  // ---- report-faulted-uipath-jobs ----------------------------------------
+  // ---- report-faulted-jobs ------------------------------------------------
   server.registerPrompt(
-    "report-faulted-uipath-jobs",
+    "report-faulted-jobs",
     {
-      title: "Report faulted UiPath jobs as GitHub issues",
+      title: "Report faulted orchestrator jobs as GitHub issues",
       description:
-        "Find faulted UiPath jobs (prod by default) and file each as a GitHub issue on the RPA repo, " +
+        "Find faulted jobs on one orchestrator (uipath or apex; prod by default) and file each as a GitHub issue on the RPA repo, " +
         "commenting on an existing issue when the same fault is already filed. Requires a connected GitHub MCP server.",
       argsSchema: {
+        orchestrator: completable(
+          z.string().min(1).describe("Orchestrator to scan (uipath | apex) (required)"),
+          () => [...ENABLED_ORCHESTRATORS],
+        ),
         env: completable(
           z.string().optional().describe("Env to scan (prod | pre_prod); defaults to prod"),
           () => ENVS,
@@ -241,7 +246,7 @@ export function registerPrompts(server: McpServer): void {
         since: z
           .string()
           .optional()
-          .describe("ISO lower bound on job CreationTime (e.g. last 24h)"),
+          .describe("ISO lower bound on job creation time (e.g. last 24h)"),
         top: z.string().optional().describe("Max recent jobs to scan (default 50)"),
         repo: z
           .string()
@@ -249,27 +254,31 @@ export function registerPrompts(server: McpServer): void {
           .describe("Target repo owner/name (default Apex-Medical-AI-Inc/RPAPlaywright)"),
       },
     },
-    ({ env, since, top, repo }) => {
+    ({ orchestrator, env, since, top, repo }) => {
       const e = env || "prod";
       const repoRef = repo || "Apex-Medical-AI-Inc/RPAPlaywright";
       const listArgs = [
+        `orchestrator="${orchestrator}"`,
         `env="${e}"`,
-        'orchestrator="uipath"',
         since ? `since="${since}"` : "",
         top ? `top=${top}` : "",
       ]
         .filter(Boolean)
         .join(", ");
       return userText(
-        `File GitHub issues for faulted UiPath jobs in ${e} on ${repoRef}.\n` +
+        `File GitHub issues for faulted ${orchestrator} jobs in ${e} on ${repoRef}.\n` +
           `This requires a connected GitHub MCP server with write access to ${repoRef}; if none is available, stop and say so.\n` +
-          `1. Call list_jobs with ${listArgs}, then keep only jobs whose state is "Faulted" or "Stopped". If none, report that and stop.\n` +
-          `2. For each faulted job, call build_faulted_job_issue with env="${e}", orchestrator="uipath" and that job's id as jobId${repo ? `, repo="${repo}"` : ""} to get the issue payload (it does NOT post to GitHub).\n` +
+          `1. Call list_jobs with ${listArgs}, then keep only faulted jobs: state "Faulted" on either orchestrator, plus ` +
+          `"Stopped" on uipath and "Timed Out" / "Lost" on apex. On apex a "Stopped" job is a cancellation or a retry ` +
+          `parent superseded by a later attempt, not a fault — skip it; and when a Faulted job has a later attempt (another ` +
+          `job whose retryOfJobId is its id), file only the final attempt, and only if it also faulted. If none remain, ` +
+          `report that and stop.\n` +
+          `2. For each faulted job, call build_faulted_job_issue with orchestrator="${orchestrator}", env="${e}" and that job's id as jobId${repo ? `, repo="${repo}"` : ""} to get the issue payload (it does NOT post to GitHub).\n` +
           `3. Using the GitHub MCP server, run the payload's searchQuery to find an existing OPEN issue for this fault (matched by faultSignature):\n` +
           `   - If one exists, add the payload's recurrenceComment to that issue's discussion (do NOT open a duplicate).\n` +
           `   - Otherwise create a new issue with the payload's title, body, and labels.\n` +
           `4. Report a per-job summary: faulted job id -> created issue (#/url) or commented on existing issue (#/url).\n` +
-          `Only write to GitHub — never take any UiPath write action.`,
+          `Only write to GitHub — never take any orchestrator write action.`,
       );
     },
   );

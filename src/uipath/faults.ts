@@ -1,6 +1,6 @@
 // build_faulted_job_issue: turn a faulted UiPath job into a ready-to-post GitHub
 // issue payload — WITHOUT touching GitHub. This server holds no GitHub credentials;
-// the `report-faulted-uipath-jobs` prompt hands the payload to the host's GitHub MCP
+// the `report-faulted-jobs` prompt hands the payload to the host's GitHub MCP
 // server, which creates the issue (or comments on a matching one). Keeping the
 // formatting here makes it consistent and lets the pure formatter be unit-tested.
 
