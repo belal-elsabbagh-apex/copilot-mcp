@@ -64,6 +64,7 @@ const EXPECTED = [
   "list_processes",
   "list_triggers",
   "get_job",
+  "get_job_artifacts",
   "add_queue_item",
   "delete_queue_item",
   "start_job",
@@ -227,6 +228,19 @@ const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
   get_job: {
     valid: { env: "pre_prod", orchestrator: "uipath", jobId: JOB_ID },
     invalid: { env: "pre_prod", jobId: JOB_ID }, // orchestrator is required
+  },
+  get_job_artifacts: {
+    valid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: ["job.log", "trace.zip"],
+    },
+    // `download` is "all" or a non-empty filename list — any other string is rejected
+    invalid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: "everything",
+    },
   },
   add_queue_item: {
     valid: {

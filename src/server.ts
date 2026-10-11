@@ -23,6 +23,7 @@
 //   - list_processes           list processes in a folder (read-only; processId + pin verification)
 //   - list_triggers            list triggers in a folder (read-only; verify queue trigger -> process wiring)
 //   - get_job                  fetch one job's state/output by id, or several via jobIds (read-only)
+//   - get_job_artifacts        list or download an Apex job's artifacts (read-only; files land under ~/.cache/copilot-mcp/artifacts)
 //   - add_queue_item           POST one item to a pre-prod queue (pre_prod-only; test-safety guarded)
 //   - delete_queue_item        delete a queue item from the pre-prod folder (pre_prod-only)
 //   - start_job                start job(s) for a pre-prod process (pre_prod-only)
@@ -49,6 +50,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { downloadJobArtifacts, listJobArtifacts } from "./apex/artifacts.js";
 import { configStatus, getFeedbackConfig, loadConfig, onConfigReload } from "./config/config.js";
 import {
   assertPreProdClient,
@@ -1275,6 +1277,61 @@ server.registerTool(
       return ok(jobEntriesEnvelope(orchestrator, env, result.folder, batch, result.entries));
     } catch (e) {
       return toolError("get_job", e, VERSION);
+    }
+  },
+);
+
+// ---- get_job_artifacts -----------------------------------------------------
+server.registerTool(
+  "get_job_artifacts",
+  {
+    title: "List or download an Apex job's artifacts",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    description:
+      "List an Apex job's artifacts ({filename, type, sizeBytes}: job.log, bot.log, debug.json, " +
+      "result.json, screenshots, trace.zip, recording.mp4), or download chosen ones with `download` " +
+      '(artifact filenames, or "all") to ~/.cache/copilot-mcp/artifacts/<jobId>/ and get back the ' +
+      "local paths + sizes. Apex-only (UiPath has no artifacts) — no `orchestrator` argument. " +
+      "READ-ONLY on Apex; only local files are written. PHI WARNING: screenshots, trace.zip, " +
+      "recordings and logs can contain member data — they are written OUTSIDE any repo with " +
+      "owner-only permissions; never commit, attach or paste them. An unknown filename fails with " +
+      "the list of available names. For parsed, filterable logs use get_job_logs instead; use this " +
+      "for trace.zip, screenshots, recordings and raw files. Returns {env,folder,artifacts[]} " +
+      "when listing, {env,dir,files:[{filename,path,sizeBytes}]} when downloading.",
+    inputSchema: {
+      env: envArg,
+      jobId: z.string().min(8).describe("The Apex job id (from get_job / find_order_queue_items)"),
+      folder: z
+        .string()
+        .optional()
+        .describe("Explicit folder name override for the listing (wins over env)"),
+      download: z
+        .union([z.literal("all"), z.array(z.string().min(1)).min(1).max(50)])
+        .optional()
+        .describe(
+          'Artifact filenames to download (e.g. ["trace.zip"]) or "all". Omit to only list.',
+        ),
+    },
+  },
+  async ({ env, jobId, folder, download }, extra) => {
+    try {
+      if (!download) {
+        const listing = await withHeartbeat(extra, "Apex", listJobArtifacts(env, jobId, folder));
+        return ok({ env, ...listing });
+      }
+      const downloaded = await withHeartbeat(
+        extra,
+        "Apex",
+        downloadJobArtifacts(env, jobId, download, undefined, folder),
+      );
+      return ok({ env, ...downloaded });
+    } catch (e) {
+      return toolError("get_job_artifacts", e, VERSION);
     }
   },
 );
