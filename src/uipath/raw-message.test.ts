@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseRawMessage } from "./raw-message.js";
-import type { JobLog } from "./uipath.js";
+import type { UiPathLogRow } from "./uipath.js";
 
-const log = (RawMessage?: string): JobLog => ({
+const log = (RawMessage?: string): UiPathLogRow => ({
   Level: "Info",
   Message: "Transaction Ended",
   TimeStamp: "2026-09-06T15:46:18.36Z",

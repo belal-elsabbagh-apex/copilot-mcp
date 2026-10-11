@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ExpectedError } from "../mcp/feedback.js";
+import { ExpectedError } from "../shared/expected-error.js";
 import { isNotFound, UiPathApiError } from "./errors.js";
 
 describe("UiPathApiError", () => {

@@ -15,7 +15,8 @@ import {
   resolvePortal,
   resolvePortalByDefId,
 } from "../mcp/reference.js";
-import { guardQueueItemSafety } from "./safety.js";
+import { guardQueueItemSafety } from "../orchestrator/safety.js";
+import type { PortalRef } from "../orchestrator/types.js";
 import {
   type FolderScope,
   getQueueDefinitionName,
@@ -57,15 +58,6 @@ export function parseQueueItemUrl(url: string): ParsedQueueUrl {
     folderId,
     queueId: queueMatch ? Number(queueMatch[1]) : 0,
   };
-}
-
-// A portal reference exposed on a pull result. matched=false carries empty sentinels.
-export interface PortalRef {
-  matched: boolean;
-  key: string;
-  portalDir: string;
-  buildArtifact: string;
-  family: string;
 }
 
 // Build a PHI-light filename slug from a queue item's member name.

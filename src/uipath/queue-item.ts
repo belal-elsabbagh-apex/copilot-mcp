@@ -11,8 +11,8 @@ import { getUipath } from "../config/config.js";
 import { type BeOrder, fetchOrder, toMDY as toMDYStrict } from "../copilot/copilot-client.js";
 import { clinicOwnerEmail, connect } from "../copilot/session.js";
 import { ACCOUNT_AUTOMATION_IDS } from "../mcp/reference.js";
+import { guardQueueItemSafety } from "../orchestrator/safety.js";
 import { prop } from "../shared/util.js";
-import { guardQueueItemSafety } from "./safety.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error) — the
 // date-parsing rules themselves live once, in copilot-client.ts's toMDY.

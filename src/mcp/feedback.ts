@@ -14,14 +14,10 @@
 // which is exactly what toolError() does.
 
 import { getFeedbackConfig } from "../config/config.js";
+import { ExpectedError } from "../shared/expected-error.js";
 
 // Default repo for issues; overridable via config (feedback.repositoryUrl).
 export const REPO_URL = "https://github.com/belal-elsabbagh-apex/copilot-mcp";
-
-// Base marker for "known, user-actionable failure — not a bug". Throwing a subclass
-// of this (or being one, like NotImplementedError) classifies as `expected` by identity,
-// independent of message wording.
-export class ExpectedError extends Error {}
 
 // Message shapes that mean "expected" even on a plain Error (the codebase throws those):
 //  - an upstream system returned a structured HTTP response (4xx OR 5xx): reaching the

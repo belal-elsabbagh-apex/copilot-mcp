@@ -85,10 +85,10 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
+import { digestLogs, truncate } from "./orchestrator/log-digest.js";
 import { msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./uipath/actions.js";
-import { buildFaultedJobIssue } from "./uipath/faults.js";
-import { digestLogs, extractFault, truncate } from "./uipath/log-digest.js";
+import { buildFaultedJobIssue, extractFault, extractTransactionOutcome } from "./uipath/faults.js";
 import { findOrderQueueItems, listQueue, pullQueueItem } from "./uipath/queue.js";
 import { buildQueueItem } from "./uipath/queue-item.js";
 import { parseRawMessage } from "./uipath/raw-message.js";
@@ -97,7 +97,6 @@ import {
   fetchJobLogsForKeys,
   fetchJobsForKeys,
   fetchJobVideoUrl,
-  type JobLog,
   type JobLogFilter,
   type JobLogResult,
   type JobLookup,
@@ -109,6 +108,7 @@ import {
   resolveFolder,
   scopeForEnv,
   type UiPathJob,
+  type UiPathLogRow,
 } from "./uipath/uipath.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
@@ -1250,7 +1250,7 @@ interface JobKeyResult {
 // get_job's single-jobKey and batched jobKeys paths so they stay in sync.
 function shapeJobDetail(
   job: UiPathJob,
-  logs: JobLog[],
+  logs: UiPathLogRow[],
   includeLogDigest: boolean,
 ): Record<string, unknown> {
   let output: unknown = null;
@@ -1276,7 +1276,7 @@ function shapeJobDetail(
     ...(includeLogDigest
       ? {
           fault: job.State === "Successful" ? null : extractFault(job, logs),
-          logDigest: digestLogs(logs),
+          logDigest: { ...digestLogs(logs), transactionOutcome: extractTransactionOutcome(logs) },
         }
       : {}),
   };
@@ -1362,7 +1362,7 @@ server.registerTool(
             if (lookup.error && !jobKeys) throw lookup.error;
             if (lookup.error) return { key, found: false, error: toMessage(lookup.error) };
             if (!lookup.job) return { key, found: false };
-            let logs: JobLog[] = [];
+            let logs: UiPathLogRow[] = [];
             let logDigestError: string | undefined;
             if (includeLogDigest) {
               try {

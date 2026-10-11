@@ -4,14 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetConfigCache } from "../config/config.js";
 import { NotImplementedError } from "../copilot/settings/index.js";
-import {
-  classify,
-  ExpectedError,
-  formatMcpIssue,
-  issueUrl,
-  REPO_URL,
-  toolError,
-} from "./feedback.js";
+import { ExpectedError } from "../shared/expected-error.js";
+import { classify, formatMcpIssue, issueUrl, REPO_URL, toolError } from "./feedback.js";
 
 // Parse the JSON body that toolError() emits and pull out the reportIssue block (if any).
 function decode(res: { content: { text: string }[] }): {

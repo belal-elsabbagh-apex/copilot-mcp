@@ -4,7 +4,7 @@
 // — e.g. treating a 404 as "no such record" while letting a 401/500/etc. propagate —
 // instead of regexing the message string.
 
-import { ExpectedError } from "../mcp/feedback.js";
+import { ExpectedError } from "../shared/expected-error.js";
 
 // Extends ExpectedError, not Error: reaching UiPath and getting a structured HTTP
 // status back is upstream state, not a bug in this server, so classify()

@@ -8,8 +8,8 @@
 // delete a stale New item, and start a job for a release.
 
 import { type Env, getUipath } from "../config/config.js";
+import { guardQueueItemSafety, type QueueSafetyLimits } from "../orchestrator/safety.js";
 import { isRecord } from "../shared/util.js";
-import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
 import {
   fetchJobByKey,
   getQueueItem,

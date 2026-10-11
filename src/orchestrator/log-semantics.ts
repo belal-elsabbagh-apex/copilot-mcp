@@ -1,9 +1,9 @@
 // Semantic classification of a job's robot logs: level severity and free-text
 // failure-language detection. A leaf module (type-only import) so it can be
-// imported at runtime by both uipath.ts (refineJobLogs) and log-digest.ts
+// imported at runtime by both uipath/uipath.ts (refineJobLogs) and log-digest.ts
 // (digestLogs) without creating a cycle.
 
-import type { JobLog } from "./uipath.js";
+import type { JobLog } from "./types.js";
 
 const ERROR_LEVELS = new Set(["error", "fatal", "critical"]);
 const levelOf = (log: JobLog): string => (log.Level || "").toLowerCase();
