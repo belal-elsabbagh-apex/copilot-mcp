@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "copilot-mcp",
   "display_name": "Copilot MCP",
-  "version": "1.33.1",
-  "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath Orchestrator execution analysis",
-  "long_description": "Exposes EHR Copilot order operations and UiPath Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting UiPath queue items against a pre-prod dev clone, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath Orchestrator credentials \u2014 point the \"Config file\" option below at your copy of it.",
+  "version": "2.0.0",
+  "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath + Apex Orchestrator execution analysis",
+  "long_description": "Exposes EHR Copilot order operations and UiPath + Apex Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting queue items against the pre-prod UiPath dev clone or Apex Authorization Test folder, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath and/or Apex Orchestrator credentials \u2014 point the \"Config file\" option below at your copy of it.",
   "author": {
     "name": "Belal Elsabbagh"
   },
@@ -20,6 +20,7 @@
     "ehr",
     "copilot",
     "uipath",
+    "apex",
     "orchestrator",
     "rpa",
     "healthcare-ops"
@@ -51,7 +52,7 @@
     "config_path": {
       "type": "file",
       "title": "Config file",
-      "description": "Path to your copilot-mcp.config.json (Copilot BE creds per profile + UiPath Orchestrator creds). See copilot-mcp.config.example.json bundled alongside this manifest for the exact shape.",
+      "description": "Path to your copilot-mcp.config.json (Copilot BE creds per profile + UiPath and/or Apex Orchestrator creds; Apex must be in this file — MCPB installs pass no other environment). See copilot-mcp.config.example.json bundled alongside this manifest for the exact shape.",
       "required": true
     }
   },
@@ -74,31 +75,31 @@
     },
     {
       "name": "build_queue_item",
-      "description": "Build UiPath AddQueueItem request from an order"
+      "description": "Build a queue-item payload (UiPath or Apex) from an order"
     },
     {
       "name": "find_order_queue_items",
-      "description": "Find the UiPath queue item(s) a Copilot order flowed through"
+      "description": "Find the queue item(s) and job(s) a Copilot order flowed through (UiPath and/or Apex)"
     },
     {
       "name": "pull_queue_item",
-      "description": "Pull a UiPath queue item as a test payload"
+      "description": "Pull a UiPath or Apex queue item as a test payload"
     },
     {
       "name": "list_queue_items",
-      "description": "Browse a UiPath queue"
+      "description": "Browse a UiPath or Apex queue"
     },
     {
       "name": "list_jobs",
-      "description": "List recent UiPath Orchestrator jobs"
+      "description": "List recent orchestrator jobs (UiPath or Apex)"
     },
     {
       "name": "get_job_logs",
-      "description": "Get a UiPath job's robot logs"
+      "description": "Get a job's robot logs (UiPath or Apex)"
     },
     {
       "name": "build_faulted_job_issue",
-      "description": "Build a GitHub issue payload for a faulted UiPath job"
+      "description": "Build a GitHub issue payload for a faulted job (UiPath or Apex)"
     },
     {
       "name": "find_stuck_orders",
@@ -146,35 +147,39 @@
     },
     {
       "name": "list_queues",
-      "description": "List UiPath queue definitions in a folder"
+      "description": "List queues in an orchestrator folder (UiPath or Apex)"
     },
     {
       "name": "list_processes",
-      "description": "List UiPath releases (processes) in a folder"
+      "description": "List processes in an orchestrator folder (UiPath releases or Apex workflows)"
     },
     {
       "name": "list_triggers",
-      "description": "List UiPath triggers (queue + time) in a folder"
+      "description": "List triggers (queue + time) in an orchestrator folder"
     },
     {
       "name": "get_job",
-      "description": "Get a single UiPath job's state by Key"
+      "description": "Get job(s) by id (UiPath or Apex)"
+    },
+    {
+      "name": "get_job_artifacts",
+      "description": "List and download an Apex job's artifacts (job.log, trace.zip, recording)"
     },
     {
       "name": "add_queue_item",
-      "description": "Post a queue item to a dev-clone queue"
+      "description": "Post a queue item to a pre-prod queue (UiPath dev clone or Apex Authorization Test)"
     },
     {
       "name": "delete_queue_item",
-      "description": "Delete a New queue item from the dev clone"
+      "description": "Delete a New queue item from a pre-prod queue (UiPath dev clone or Apex Authorization Test)"
     },
     {
       "name": "start_job",
-      "description": "Start a UiPath job on the dev clone"
+      "description": "Start a job in the pre-prod folder (UiPath dev clone or Apex Authorization Test)"
     },
     {
       "name": "stop_job",
-      "description": "Stop or kill a running UiPath job on the dev clone"
+      "description": "Stop or kill a running job in the pre-prod folder (UiPath dev clone or Apex Authorization Test)"
     },
     {
       "name": "build_mcp_issue",
