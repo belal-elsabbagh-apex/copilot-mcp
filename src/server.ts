@@ -98,8 +98,8 @@ import {
 import { findOrderAcross, selectBackends } from "./orchestrator/find-order.js";
 import { jobEntriesEnvelope, resolveJobIds } from "./orchestrator/job-batch.js";
 import { buildQueueItemContent } from "./orchestrator/queue-item.js";
-import { backendFor, ENABLED_ORCHESTRATORS } from "./orchestrator/registry.js";
-import { QUEUE_ITEM_STATUSES } from "./orchestrator/types.js";
+import { backendFor } from "./orchestrator/registry.js";
+import { ORCHESTRATORS, QUEUE_ITEM_STATUSES } from "./orchestrator/types.js";
 import { stringProp } from "./shared/util.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
@@ -468,8 +468,8 @@ server.registerTool(
 // Every orchestrator tool takes an explicit env and orchestrator (never defaulted) and
 // replies { orchestrator, env, ...result } so agents read one vocabulary across backends.
 const orchestratorArg = z
-  .enum(ENABLED_ORCHESTRATORS)
-  .describe(`Which orchestrator: ${ENABLED_ORCHESTRATORS.join(" | ")} (required)`);
+  .enum(ORCHESTRATORS)
+  .describe(`Which orchestrator: ${ORCHESTRATORS.join(" | ")} (required)`);
 const envArg = z
   .enum(["prod", "pre_prod"])
   .describe(
@@ -479,8 +479,8 @@ const envArg = z
 const writeEnvArg = z
   .literal("pre_prod")
   .describe(
-    "Orchestrator writes are pre_prod-only (UiPath dev clone 'Authorization Dev Clone', Apex " +
-      "'Authorization Test'); 'prod' is rejected by the schema (required)",
+    "Writes are pre_prod-only (UiPath: the 'Authorization Dev Clone' folder; Apex: the " +
+      "'Authorization Test' folder); 'prod' is rejected by the schema (required)",
   );
 
 // ---- build_queue_item ----------------------------------------------------
@@ -1359,14 +1359,18 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "POST one item to a queue in the PRE-PROD folder (pre_prod ONLY — the schema rejects prod). " +
-      "Every payload passes the test-safety guard first: IsApproved is forced false; a non-empty " +
-      "serverURL/queueUrl must match the config's pre-prod values; <TO-FILL> placeholders are " +
-      "rejected. To post a build_queue_item result, pass payload.itemData.Name as queue, " +
-      "payload.itemData.Reference as reference and payload.itemData.SpecificContent as " +
-      "specificContent. priority applies to UiPath only (Apex uses the queue's default). When " +
-      "enqueueing many items, pace ~1/s. Returns {orchestrator, env, queueId, queueName, " +
-      "reference, itemId, status, forced}.",
+      "POST one item to a queue in the pre-prod test folder (pre_prod ONLY — the schema rejects " +
+      "prod; UiPath: 'Authorization Dev Clone', Apex: 'Authorization Test'). Every payload passes " +
+      "the test-safety guard first: IsApproved is forced false; a non-empty serverURL/queueUrl " +
+      "must match the config's pre-prod values (the chosen orchestrator's section); <TO-FILL> " +
+      "placeholders are rejected. `queue`: UiPath = the exact queue Name; Apex = the queue name " +
+      "(exact, case-insensitive) or uuid, resolved in the Authorization Test folder (see " +
+      "list_queues). Apex derives match_value from specificContent.automationId (required) and " +
+      "uses the queue's default priority (`priority` is ignored). To post a build_queue_item " +
+      "result: UiPath — payload.itemData.Name as queue, .Reference as reference, .SpecificContent " +
+      "as specificContent; Apex — meta.queueName as queue, payload.body.reference as reference, " +
+      "payload.body.specific_content as specificContent. When enqueueing many items, pace ~1/s. " +
+      "Returns {orchestrator, env, queueId, queueName, reference, itemId, status, forced}.",
     inputSchema: {
       env: writeEnvArg,
       orchestrator: orchestratorArg,
@@ -1374,7 +1378,8 @@ server.registerTool(
         .string()
         .min(1)
         .describe(
-          "Queue in the pre-prod folder: UiPath exact queue Name; Apex queue name or id (see list_queues)",
+          "UiPath: exact queue Name in the dev-clone folder. Apex: queue name or uuid in the " +
+            "Authorization Test folder (see list_queues)",
         ),
       reference: z
         .string()
@@ -1421,11 +1426,12 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Delete one queue item from the PRE-PROD folder (pre_prod ONLY — the schema rejects prod). " +
-      "UiPath is fetch-first: it refuses unless the item's current Status is 'New', so " +
-      "InProgress/Successful/Failed history is never destroyed. Use to clear stale test items " +
-      "before re-enqueueing after a re-mint. Returns {orchestrator, env, itemId, deleted, " +
-      "previousStatus, reference}.",
+      "Delete one queue item from the pre-prod test folder (pre_prod ONLY — the schema rejects " +
+      "prod). Fetch-first: refuses unless the item's current status is New (Apex 'new'), so " +
+      "InProgress/Successful/Failed history is never destroyed. `queueId` is REQUIRED for Apex " +
+      "(from list_queue_items / find_order_queue_items) and ignored by UiPath. Use to clear stale " +
+      "test items before re-enqueueing after a re-mint. Returns " +
+      "{orchestrator, env, itemId, deleted, previousStatus, reference}.",
     inputSchema: {
       env: writeEnvArg,
       orchestrator: orchestratorArg,
@@ -1437,7 +1443,7 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Queue id (required by Apex; ignored by UiPath)"),
+        .describe("Queue uuid the item sits in — REQUIRED for Apex, ignored by UiPath"),
     },
   },
   async ({ env, orchestrator, itemId, queueId }) => {
@@ -1458,7 +1464,7 @@ server.registerTool(
 server.registerTool(
   "start_job",
   {
-    title: "Start a job on the pre-prod folder",
+    title: "Start a job in the pre-prod test folder",
     annotations: {
       readOnlyHint: false,
       destructiveHint: false, // starts a run; existing state untouched
@@ -1466,12 +1472,15 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Start job(s) for a process in the PRE-PROD folder (pre_prod ONLY — the schema rejects " +
-      "prod). Get the processId from list_processes. PIN RACE (UiPath): a job resolves its " +
-      "package version at START, not creation — if others are publishing, verify the process's " +
-      "version via list_processes right before starting (repinning is manual in the orchestrator " +
-      "UI; this MCP never repins). Poll the result with get_job. Returns {orchestrator, env, " +
-      "jobs:[{id,state,processName,link}]}.",
+      "Start job(s) for a Process in the pre-prod test folder (pre_prod ONLY — the schema " +
+      "rejects prod). Get processId from list_processes. UiPath: PIN RACE — a job resolves its " +
+      "package version at START, so verify the release's version via list_processes right " +
+      "before starting (repinning is manual; this MCP never repins). Apex: matchValue is " +
+      "REQUIRED (the credential match value the job runs under — for auth-submit portals the " +
+      "account's automationId); the job runs the Process's current_version at dispatch; the " +
+      "jobsCount POSTs are sequential and never retried, and a mid-loop failure names the jobs " +
+      "already started. A started job performs a real (dry-run) portal login. Poll with get_job. " +
+      "Returns {orchestrator, env, jobs:[{id,state,processName,link}]}.",
     inputSchema: {
       env: writeEnvArg,
       orchestrator: orchestratorArg,
@@ -1486,7 +1495,10 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Apex only: the match value the job is dispatched under (required by Apex)"),
+        .describe(
+          "Apex: REQUIRED credential match value (the account's automationId for auth-submit " +
+            "portals). UiPath: ignored",
+        ),
     },
   },
   async ({ env, orchestrator, processId, input, jobsCount, matchValue }) => {
@@ -1514,7 +1526,7 @@ server.registerTool(
 server.registerTool(
   "stop_job",
   {
-    title: "Stop or kill a running job on the pre-prod folder",
+    title: "Stop or kill a running job in the pre-prod folder",
     annotations: {
       readOnlyHint: false,
       destructiveHint: true, // aborts a run in progress
@@ -1522,12 +1534,13 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Stop (SoftStop, graceful) or Kill (immediate) a job in the PRE-PROD folder (pre_prod " +
-      "ONLY — the schema rejects prod). Takes the job's id (from start_job / list_jobs / " +
-      "get_job); the id is resolved inside the pre-prod folder first, so a prod job's id " +
-      "resolves to nothing here. Fetch-first: refuses if the job is already in a terminal state. " +
-      "Use to abort a hung or misbehaving pre-prod run. Returns {orchestrator, env, jobId, " +
-      "strategy, stopped}.",
+      "Stop (SoftStop, graceful) or Kill (immediate) a job in the pre-prod test folder " +
+      "(pre_prod ONLY — the schema rejects prod). Takes the job id from start_job / list_jobs / " +
+      "get_job; it is resolved scoped to the pre-prod folder, so a prod job's id resolves to " +
+      "nothing. Fetch-first: refuses a job already in a terminal state (UiPath Successful/" +
+      "Faulted/Stopped; Apex completed/failed/cancelled/lost/timed_out). Apex Kill uses " +
+      "force_cancel, which needs the 'jobs:force_cancel' permission (a 403 is reported as such). " +
+      "Returns {orchestrator, env, jobId, strategy, stopped}.",
     inputSchema: {
       env: writeEnvArg,
       orchestrator: orchestratorArg,

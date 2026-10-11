@@ -7,7 +7,7 @@
 
 import { ExpectedError } from "../shared/expected-error.js";
 import type { FindOrderArgs, FindOrderResult, OrchestratorBackend } from "./backend.js";
-import { backendFor, type EnabledOrchestrator, searchableBackends } from "./registry.js";
+import { backendFor, searchableBackends } from "./registry.js";
 import type { Orchestrator, QueueItemCore } from "./types.js";
 
 export interface FindOrderAcrossResult {
@@ -22,7 +22,7 @@ export interface FindOrderAcrossResult {
 
 // `folder` names one orchestrator's folder, so it only makes sense next to that orchestrator.
 export function selectBackends(
-  orchestrator?: EnabledOrchestrator,
+  orchestrator?: Orchestrator,
   folder?: string,
 ): OrchestratorBackend[] {
   if (folder && !orchestrator) {

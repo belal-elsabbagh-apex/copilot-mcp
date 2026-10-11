@@ -10,7 +10,6 @@ import {
   findOrderAcross,
   selectBackends,
 } from "../orchestrator/find-order.js";
-import type { EnabledOrchestrator } from "../orchestrator/registry.js";
 import type { Orchestrator, QueueItemCore } from "../orchestrator/types.js";
 import { chunk, type StepProgress } from "../shared/util.js";
 import { type BeOrder, filterOrders, ORDER_MODE } from "./copilot-client.js";
@@ -45,7 +44,7 @@ export interface FindStuckArgs {
   statuses?: string[] | undefined;
   olderThanHours?: number | undefined;
   crossCheck?: boolean | undefined;
-  orchestrator?: EnabledOrchestrator | undefined; // omitted = every orchestrator
+  orchestrator?: Orchestrator | undefined; // omitted = every orchestrator
   since?: string | undefined;
   top?: number | undefined;
   onProgress?: StepProgress | undefined;

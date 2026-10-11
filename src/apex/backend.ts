@@ -22,6 +22,7 @@ import type {
   ListQueueItemsResult,
   ListQueuesArgs,
   ListTriggersArgs,
+  OrchestratorBackend,
   PullQueueItemArgs,
   PullQueueItemResult,
   QueueItemPayload,
@@ -41,6 +42,7 @@ import type {
 } from "../orchestrator/types.js";
 import { ExpectedError } from "../shared/expected-error.js";
 import { chunk, type StepProgress } from "../shared/util.js";
+import { addApexQueueItem, deleteApexQueueItem, startApexJob, stopApexJob } from "./actions.js";
 import {
   type ApexArtifact,
   type ApexJobDetail,
@@ -534,3 +536,24 @@ export function apexBuildQueueItemPayload(args: QueueItemPayloadArgs): QueueItem
     },
   };
 }
+
+// ---- the assembled backend --------------------------------------------------
+
+export const apexBackend: OrchestratorBackend = {
+  name: "apex",
+  listJobs: apexListJobs,
+  getJobs: apexGetJobs,
+  getJobLogs: apexGetJobLogs,
+  listQueues: apexListQueues,
+  listQueueItems: apexListQueueItems,
+  findOrderQueueItems: apexFindOrderQueueItems,
+  pullQueueItem: apexPullQueueItem,
+  listProcesses: apexListProcesses,
+  listTriggers: apexListTriggers,
+  buildFaultedJobIssue: apexBuildFaultedJobIssue,
+  buildQueueItemPayload: apexBuildQueueItemPayload,
+  addQueueItem: addApexQueueItem,
+  deleteQueueItem: deleteApexQueueItem,
+  startJob: startApexJob,
+  stopJob: stopApexJob,
+};

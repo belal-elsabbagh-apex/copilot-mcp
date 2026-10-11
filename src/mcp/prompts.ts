@@ -7,7 +7,7 @@ import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listProfiles } from "../config/config.js";
-import { ENABLED_ORCHESTRATORS } from "../orchestrator/registry.js";
+import { ORCHESTRATORS } from "../orchestrator/types.js";
 
 // Profiles are read live from the config so autocompletion reflects whatever the
 // running server is configured with, not a hardcoded list.
@@ -237,7 +237,7 @@ export function registerPrompts(server: McpServer): void {
       argsSchema: {
         orchestrator: completable(
           z.string().min(1).describe("Orchestrator to scan (uipath | apex) (required)"),
-          () => [...ENABLED_ORCHESTRATORS],
+          () => [...ORCHESTRATORS],
         ),
         env: completable(
           z.string().optional().describe("Env to scan (prod | pre_prod); defaults to prod"),

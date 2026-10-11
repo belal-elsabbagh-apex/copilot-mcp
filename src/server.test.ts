@@ -327,3 +327,57 @@ describe("orchestrator argument", () => {
     });
   }
 });
+
+describe("orchestrator tools accept orchestrator: apex", () => {
+  const ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const apex = { env: "pre_prod", orchestrator: "apex" };
+  const VALID: Record<string, Record<string, unknown>> = {
+    list_jobs: { ...apex, processName: "CENCAL" },
+    get_job: { ...apex, jobId: ID, includeLogDigest: true },
+    get_job_logs: { ...apex, jobId: ID, tail: 50 },
+    build_faulted_job_issue: { ...apex, jobId: ID },
+    list_queues: { ...apex, nameContains: "auth" },
+    list_queue_items: { ...apex, queue: "CENCAL", status: "New" },
+    find_order_queue_items: { ...apex, orderUid: "abcdefgh" },
+    pull_queue_item: { ...apex, queueId: ID, itemId: ID },
+    list_processes: { ...apex },
+    list_triggers: { ...apex, queueId: ID },
+    build_queue_item: { ...apex, orderUid: "abcdefgh", profile: "ossm" },
+    find_stuck_orders: { ...apex, profile: "ossm", crossCheck: true },
+    add_queue_item: {
+      ...apex,
+      queue: "CENCAL auth submit queue",
+      reference: "ord-1-1700000000",
+      specificContent: { orderUid: "abcdefgh" },
+    },
+    delete_queue_item: { ...apex, itemId: ID, queueId: ID },
+    start_job: { ...apex, processId: ID, matchValue: "auto-1" },
+    stop_job: { ...apex, jobId: ID, strategy: "Kill" },
+  };
+  // orchestrator is optional on these two (omitted = every backend)
+  const OPTIONAL_ORCHESTRATOR = new Set(["find_order_queue_items", "find_stuck_orders"]);
+  const APEX_WRITES = ["add_queue_item", "delete_queue_item", "start_job", "stop_job"];
+
+  for (const [name, valid] of Object.entries(VALID)) {
+    test(`${name} accepts an apex payload`, () => {
+      expect(registered[name]?.inputSchema?.safeParse(valid).success).toBe(true);
+    });
+    test(`${name} rejects an unknown orchestrator`, () => {
+      const bad = { ...valid, orchestrator: "nope" };
+      expect(registered[name]?.inputSchema?.safeParse(bad).success).toBe(false);
+    });
+    test(`${name} ${OPTIONAL_ORCHESTRATOR.has(name) ? "allows" : "requires"} orchestrator`, () => {
+      const { orchestrator: _drop, ...rest } = valid;
+      expect(registered[name]?.inputSchema?.safeParse(rest).success).toBe(
+        OPTIONAL_ORCHESTRATOR.has(name),
+      );
+    });
+  }
+
+  for (const name of APEX_WRITES) {
+    test(`${name} rejects env=prod for apex at the schema`, () => {
+      const prod = { ...VALID[name], env: "prod" };
+      expect(registered[name]?.inputSchema?.safeParse(prod).success).toBe(false);
+    });
+  }
+});

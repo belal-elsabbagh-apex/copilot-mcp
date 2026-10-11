@@ -38,6 +38,7 @@ function safetyLimits(): QueueSafetyLimits {
   return {
     preProdServerUrl: cfg.serverUrlByEnv?.pre_prod ?? "",
     queueUrl: cfg.queueUrl ?? "",
+    configSection: "uipath",
   };
 }
 
