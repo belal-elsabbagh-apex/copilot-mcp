@@ -89,6 +89,25 @@ A few states are deliberately transient between tasks:
 - After Task 5, `find_order_queue_items` has `orchestrator` required; Task 13 relaxes it.
 - `find_stuck_orders` stays UiPath-direct until Task 14.
 - The prompt keeps its old name until Task 15.
+- `ORCHESTRATORS` (the type) lists both backends from Task 1, but tools expose only `ENABLED_ORCHESTRATORS` (`["uipath"]`) until Task 17 registers Apex.
+
+## Dry run (2026-10-11)
+
+Every task except the live steps of Task 20 was replayed literally, in order, in a throwaway worktree at this plan's base (`feat/apex-orchestrator` @ `2b69b8f` plus this plan). Each task was committed through the lefthook pre-commit hook and passed the task-end gate. The plan text above already contains the fixes the replay found (stale expected counts, one over-quoted anchor, one unclosed fence, Biome reflows).
+
+| Tasks | Full-suite tests after the gate | Notes |
+|---|---|---|
+| baseline | 397 | typecheck, Biome clean |
+| 1 / 2 / 3 | 407 / 433 / 472 | the golden test also passes against the UNMODIFIED v1.33.1 `buildQueueItem` before reshaping |
+| 4 (A / B) / 5 | 473 / 498 / 518 | every `server.ts` anchor in Task 5 matched exactly once |
+| 6 / 7 / 8 | 528 / 565 / 571 | the Apex client tests ran 3× in a row, not flaky (~0.4 s for all Apex tests) |
+| 9 / 10 / 11 / 12 | 590 / 627 / 682 / 693 | `get_job_artifacts` wrote nothing inside the repo |
+| 13 / 14 / 15 / 16 / 17 | 702 / 710 / 726 / 744 / 840 | unconfigured Apex is skipped by "search every backend" (`registry.test.ts`) |
+| 18 / 19 | 840 / 840 | `copilot://reference/orchestrators` parses over stdio; manifest passes `mcpb validate` |
+
+Also checked: `bun run build && node dist/server.js` starts with no stack trace; stdio `tools/list` returns 33 tools; all 15 orchestrator tools carry an `orchestrator` enum of exactly `["uipath","apex"]` (not required on `find_order_queue_items`), and the four write tools' `env` is the const `"pre_prod"`. Three mutations were each caught by a test: removing the pre-prod assert from `stopApexJob`, removing the non-GET gate in `apex/client.ts`, and ranking `job-never-started` below `job-faulted`.
+
+Not exercised: Task 20's live steps (V1 onward). They need real Apex/UiPath/Copilot credentials and, for the write probe, explicit operator approval.
 
 ---
 
@@ -759,7 +778,7 @@ export class ExpectedError extends Error {}
 | `src/uipath/errors.ts` line 7 | `import { ExpectedError } from "../mcp/feedback.js";` | `import { ExpectedError } from "../shared/expected-error.js";` |
 | `src/uipath/errors.test.ts` line 2 | `import { ExpectedError } from "../mcp/feedback.js";` | `import { ExpectedError } from "../shared/expected-error.js";` |
 
-(`src/server.test.ts:166` mentions the word in a comment only.) Check: `rg -n "ExpectedError" src | rg "mcp/feedback"` → no output.
+(`src/server.test.ts:166` mentions the word in a comment only.) Check: `rg -n 'import .*ExpectedError.* from "[./]*/mcp/feedback' src` → no output.
 
 - [ ] **Step 6: Edit `src/uipath/faults.ts`** — apply bottom-up (line numbers are the current file's)
 
@@ -3600,7 +3619,7 @@ test("the real buildQueueItem reproduces the golden", async () => {
 });
 ```
 Run: `bun test src/uipath/golden-head.test.ts` — Expected: PASS. Then `rm src/uipath/golden-head.test.ts`.
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (473 tests: 472 + the golden)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/uipath/queue-item.ts src/uipath/payload.fixture.ts src/uipath/payload.test.ts
@@ -4584,7 +4603,7 @@ In the `build_queue_item` handler (v1.33.1 lines 514–529) replace from `      
 ```
 Run `bunx biome check --write src/server.ts src/uipath/backend.ts` (import ordering).
 - [ ] **Step 10: Run tests** — `bun test src/orchestrator/queue-item.test.ts src/uipath/payload.test.ts src/uipath/backend-writes.test.ts src/uipath/actions.test.ts` → PASS
-- [ ] **Step 11: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 11: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (498 tests)
 - [ ] **Step 12: Commit**
 ```bash
 git add -A src/orchestrator src/uipath src/server.ts
@@ -5941,7 +5960,10 @@ server.registerTool(
           `4. Derive per-job verdict yourself: job.details.output.out_Result when present, else job.state — Successful -> success, ` +
           `Faulted/Stopped -> failure, anything else -> still running or pending. The newest run is the latest ` +
           `job.createdAt; retry cadence is each run's createdAt minus the previous (older) run's endedAt.\n` +
-          // 5. (unchanged)
+          `5. Compare the queue item's specificContent (from step 2) against the order from step 1 — facility, ` +
+          `speciality, DOS, member name/DOB/ID, insurance, CPT/ICD — and call out any divergence between what Copilot ` +
+          `sent to UiPath and what the order record says. The full payload is returned for exactly this; only the ` +
+          `token field is redacted.\n` +
           `6. Only if the digest is not enough, call get_job_logs with the failing jobId and onlyFailures=true ` +
           `(add fullMessages=true for a full stack trace, includeVideo=true for the recording).\n` +
 ```
@@ -6007,8 +6029,8 @@ export function parseQueueItemUrl(url: string): ParsedQueueUrl {
  - `src/uipath/faults.ts`: delete the old `JobFault` interface and the `extractFault` function (with their comment blocks) — the only caller was the deleted `shapeJobDetail`; `uipathFault` (map.ts) replaced it. KEEP `EXCEPTION_TYPE`, `topError`, `extractTransactionOutcome`, `TransactionOutcome`, `formatFaultedJobIssue`, `buildFaultedJobIssue`. In `src/uipath/faults.test.ts` delete the `describe("extractFault", …)` block (and any import it alone needed). Then `bunx tsc --noEmit` and delete whatever imports it reports as unused (TS6133) in those two files.
 - [ ] **Step 4: Run the tests**
 Run: `bun test src/orchestrator/job-batch.test.ts src/server.test.ts src/uipath` — Expected: PASS.
-Sweep for stragglers: `rg -n "extractFault|jobDeepLinkBase|shapeJobDetail|JobKeyResult" src` — Expected: no match in `src/server.ts`/`src/mcp`/`src/orchestrator`; the only `jobDeepLinkBase` hits are its definition and `jobDeepLink` (which composes it) in `src/uipath/uipath.ts` — keep it exported; nothing else imports it any more. `rg -n "jobKeys|\bjobKey\b|releaseKey|queueDefId|txnId" src --glob '!*.test.ts'` — Expected: no match in `src/server.ts`, `src/mcp/prompts.ts`, `src/uipath/queue.ts`; remaining hits are UiPath-internal OData names (`src/uipath/uipath.ts`, `src/uipath/actions.ts`, `src/uipath/faults.ts`) and `src/copilot/sweep.ts` (Task 14).
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+Sweep for stragglers: `rg -n "extractFault|jobDeepLinkBase|shapeJobDetail|JobKeyResult" src` — Expected: no match in `src/server.ts`/`src/mcp`/`src/orchestrator`; the only `jobDeepLinkBase` hits are its definition and `jobDeepLink` (which composes it) in `src/uipath/uipath.ts` — keep it exported; nothing else imports it any more. `rg -n "jobKeys|\bjobKey\b|releaseKey|queueDefId|txnId" src --glob '!*.test.ts'` — Expected: no match in `src/server.ts`, `src/mcp/prompts.ts`, `src/orchestrator`, `src/copilot/sweep.ts`; remaining hits are UiPath-internal names in `src/uipath/{uipath,actions,faults,map,backend,queue}.ts` (`txnId` in `queue.ts`'s `ParsedQueueUrl`, `releaseKey`/`jobKey` in the `map.ts`/`backend.ts` adapters).
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (518 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add -A src
@@ -6245,7 +6267,6 @@ export class ApexNotConfiguredError extends ExpectedError {
     this.partial = configured > 0;
   }
 }
-
 ```
 
 3b. Apply to `src/config/config.ts` (line numbers are the current ones; hunks carry enough context to locate):
@@ -6410,7 +6431,7 @@ export class ApexNotConfiguredError extends ExpectedError {
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/config/config.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (528 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/errors.ts src/config/config.ts src/config/config.test.ts copilot-mcp.config.example.json
@@ -7416,7 +7437,7 @@ export function apexDashboardLink(path: string): string {
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/client.test.ts` → PASS (37 tests)
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (565 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/client.ts src/apex/client.test.ts src/apex/test-support.ts src/apex/errors.ts
@@ -7666,8 +7687,8 @@ Run: `bun test src/copilot/doctor.test.ts` — Expected: FAIL (`apexProbes` is n
  //   - search_orders            filter orders by location/insurance/referredTo/type/auth/date range (read-only)
  //   - get_order_category_stats per-folder order counts for a given filter (read-only)
  //   - get_login_token          log into the Copilot BE for a profile/env and return the session JWT (read-only)
--//   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
-+//   - doctor                   probe the BE + UiPath + Apex connections and report what's reachable (read-only)
+-//   - doctor                   probe the BE + orchestrator connections and report what's reachable (read-only)
++//   - doctor                   probe the BE + orchestrator (UiPath, Apex) connections and report what's reachable (read-only)
  //
  // See the copilot + copilot-order-mirror skills for the full flow and quirks.
  
@@ -7688,7 +7709,7 @@ Run: `bun test src/copilot/doctor.test.ts` — Expected: FAIL (`apexProbes` is n
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/copilot/doctor.test.ts` → PASS (6 tests)
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (571 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/copilot/doctor.ts src/copilot/doctor.test.ts src/server.ts
@@ -8105,7 +8126,7 @@ export function parseJobLog(text: string): ParsedJobLog {
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/job-log.test.ts` → PASS (19 tests).
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (590 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/job-log.ts src/apex/job-log.test.ts
@@ -9451,7 +9472,7 @@ export const toApexScheduleTrigger = (s: ApexSchedule): TriggerCore<{ timezone: 
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/map.test.ts src/apex/api.test.ts` → PASS (30 + 7 tests).
-- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex && bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex && bun run typecheck && bun test && bunx biome check src` → all green (627 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/api.ts src/apex/map.ts src/apex/test-rows.ts src/apex/api.test.ts src/apex/map.test.ts
@@ -10789,7 +10810,7 @@ export async function apexListTriggers(args: ListTriggersArgs): Promise<TriggerC
 `backend.ts` is above the ~200-line guideline on purpose: the contract homes all read functions in this one module and Tasks 15–17 add to it; the pure, separately tested logic already lives in `read-support.ts`/`map.ts`.
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/read-support.test.ts src/apex/backend.test.ts` → PASS (20 + 35 tests).
-- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex && bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex && bun run typecheck && bun test && bunx biome check src` → all green (682 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/backend.ts src/apex/read-support.ts src/apex/read-support.test.ts src/apex/backend.test.ts
@@ -10935,19 +10956,19 @@ Modify `src/server.test.ts` — two hunks:
 ```
 2. In `const cases` inside `describe("tool input schemas accept representative payloads", …)`, insert a case immediately before the `add_queue_item: {` case (currently line 215):
 ```ts
-    get_job_artifacts: {
-      valid: {
-        env: "pre_prod",
-        jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        download: ["job.log", "trace.zip"],
-      },
-      // `download` is "all" or a non-empty filename list — any other string is rejected
-      invalid: {
-        env: "pre_prod",
-        jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        download: "everything",
-      },
+  get_job_artifacts: {
+    valid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: ["job.log", "trace.zip"],
     },
+    // `download` is "all" or a non-empty filename list — any other string is rejected
+    invalid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: "everything",
+    },
+  },
 ```
 `WRITE_TOOLS` and `CLOSED_WORLD_TOOLS` stay unchanged: the existing annotation tests then assert readOnly true / destructive false / idempotent true / openWorld true for the new tool.
 
@@ -11057,7 +11078,7 @@ export async function downloadJobArtifacts(
 
 Modify `src/server.ts` — three hunks:
 
-1. Header tool list (comment block at the top, currently lines 9–33): add one line after the `get_job` line (currently line 20; in Task 5 it reads `get_job … by jobId`):
+1. Header tool list (comment block at the top): add one line after the `get_job` line (Task 5 rewrote it to `fetch one job's state/output by id, or several via jobIds (read-only)`; match it by its `get_job` prefix):
 ```ts
 //   - get_job_artifacts        list or download an Apex job's artifacts (read-only; files land under ~/.cache/copilot-mcp/artifacts)
 ```
@@ -11124,7 +11145,7 @@ server.registerTool(
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/artifacts.test.ts src/server.test.ts` → PASS (9 artifacts tests; server.test green including the new schema accept/reject pair and the four-hint assertions).
-- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex src/server.ts src/server.test.ts && bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex src/server.ts src/server.test.ts && bun run typecheck && bun test && bunx biome check src` → all green (693 tests)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/artifacts.ts src/apex/artifacts.test.ts src/server.ts src/server.test.ts
@@ -11551,7 +11572,7 @@ server.registerTool(
     },
 ````
 
-`src/mcp/prompts.ts` — in the `diagnose-order` prompt, replace steps 2 and 3 (the two template strings starting `` `2. Call find_order_queue_items `` and ending `…Read state, output, fault, logDigest per job.\n` + `` — Task 5 may have renamed `jobKeys`→`jobIds` inside them; replace the whole span) with:
+`src/mcp/prompts.ts` — in the `diagnose-order` prompt, replace steps 2 and 3 (everything from the start of the `` `2. Call find_order_queue_items `` template string up to, but not including, the `` `4. Derive per-job verdict `` string; Task 5 renamed `jobKeys`→`jobIds` and the output paths inside them, so match by those two boundaries, not by the old text) with:
 
 ````ts
           `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg} and since=<that creationDate> — omit ` +
@@ -11566,7 +11587,7 @@ server.registerTool(
 ````
 
 - [ ] **Step 4: Run tests** — `bun test src/orchestrator/find-order.test.ts src/server.test.ts src/mcp/prompts.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/orchestrator src/server.ts src/server.test.ts src/mcp/prompts.ts && bun run typecheck && bun test && bunx biome check src` → all green (702 tests; Biome reflows a few long lines and collapses the test's type-only import to `import type { … }`)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/orchestrator/find-order.ts src/orchestrator/find-order.test.ts src/orchestrator/registry.ts src/server.ts src/server.test.ts src/mcp/prompts.ts
@@ -12100,6 +12121,8 @@ server.registerTool(
 );
 ````
 
+`src/server.ts` header comment — in the `find_stuck_orders` bullet change the tail `optionally cross-checked against UiPath (read-only)` to `optionally cross-checked against every orchestrator (read-only)`.
+
 `src/server.test.ts` — add this entry to the `cases` map (next to `find_order_queue_items`):
 
 ````ts
@@ -12129,7 +12152,7 @@ server.registerTool(
 ````
 
 - [ ] **Step 4: Run tests** — `bun test src/copilot/sweep.test.ts src/server.test.ts src/mcp/prompts.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (`rg -n "crossCheckUipath|\.uipath\b" src` must show no remaining hits in `src/copilot` or `src/server.ts`)
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/copilot src/server.ts src/server.test.ts src/mcp/prompts.ts && bun run typecheck && bun test && bunx biome check src` → all green (710 tests; `rg -nw crossCheckUipath src` must show nothing)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/copilot/sweep.ts src/copilot/sweep.test.ts src/server.ts src/server.test.ts src/mcp/prompts.ts
@@ -12866,16 +12889,16 @@ Replace the whole `report-faulted-uipath-jobs` registration (from its `// ---- r
 `src/server.ts` — in the `build_faulted_job_issue` description, replace the text
 
 ````ts
-"alone) instead of failing the whole call. The caller (the report-faulted-uipath-jobs prompt) " +
+"report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search " +
 ````
 
 with
 
 ````ts
-"alone) instead of failing the whole call. The caller (the report-faulted-jobs prompt) " +
+"report-faulted-jobs prompt) hands this to the host's GitHub MCP server: search " +
 ````
 
-(pre-Task-5 line 1097; Task 5 leaves the prompt name as is, so the string is found verbatim). Also append, at the end of that tool's description string, nothing else: Task 5 already made it orchestrator-aware.
+(Task 5 re-wrapped this description, so the string reads `"report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search " +` — it starts a line; match on that and change only the prompt name. It is the only occurrence in `src/server.ts`. Task 5 already made the rest of the description orchestrator-aware.)
 
 `src/uipath/faults.ts` — in the header comment (line 3 pre-Task-1), replace the token `report-faulted-uipath-jobs` with `report-faulted-jobs`:
 
@@ -12884,7 +12907,7 @@ with
 ````
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/faults.test.ts src/apex/backend-fault-issue.test.ts src/mcp/prompts.test.ts src/server.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (`rg -n "report-faulted-uipath-jobs" src` must return nothing)
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex src/server.ts src/mcp && bun run typecheck && bun test && bunx biome check src` → all green (726 tests; `rg -n "report-faulted-uipath-jobs" src` must return nothing)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/faults.ts src/apex/faults.test.ts src/apex/backend.ts src/apex/backend-fault-issue.test.ts src/mcp/prompts.ts src/mcp/prompts.test.ts src/server.ts src/uipath/faults.ts
@@ -13269,7 +13292,7 @@ export function apexBuildQueueItemPayload(args: QueueItemPayloadArgs): QueueItem
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/payload.test.ts src/apex/backend-payload.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green (if Biome reformats the long `expect(() => apexBuildQueueItemPayload(...)).toThrow(` line in the test, run `bunx biome check --write src/apex` once and re-run the gate)
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex && bun run typecheck && bun test && bunx biome check src` → all green (744 tests; Biome reflows a couple of long lines in the two new test files)
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/payload.ts src/apex/payload.test.ts src/apex/backend.ts src/apex/backend-payload.test.ts
@@ -14312,7 +14335,7 @@ const writeEnvArg = z
 ```
 
 - [ ] **Step 4: Run tests** — `bun test src/apex/actions.test.ts src/server.test.ts src/orchestrator/safety.test.ts src/orchestrator/registry.test.ts` → PASS
-- [ ] **Step 5: Full gate** — `bun run typecheck && bun test && bunx biome check src` → all green. Two things to expect: (a) `bunx biome check --write src/apex src/orchestrator` may reflow the long lines above (Biome's line width) — re-run the gate after; (b) registering `apex` means "search everything" now goes through `searchableBackends()`, which skips an unconfigured Apex, so Task 13/14 tests that run without Apex config stay UiPath-only; a test that deliberately configures Apex (via `useApexStub`) will see both backends.
+- [ ] **Step 5: Full gate** — `bunx biome check --write src/apex src/orchestrator && bun run typecheck && bun test && bunx biome check src` → all green (840 tests; Biome wraps several long lines). Also expect: registering `apex` means "search everything" now goes through `searchableBackends()`, which skips an unconfigured Apex, so Task 13/14 tests that run without Apex config stay UiPath-only; a test that deliberately configures Apex (via `useApexStub`) will see both backends.
 - [ ] **Step 6: Commit**
 ```bash
 git add src/apex/actions.ts src/apex/actions.test.ts src/apex/backend.ts src/orchestrator/safety.ts src/orchestrator/safety.test.ts src/uipath/actions.ts src/orchestrator/registry.ts src/orchestrator/registry.test.ts src/server.ts src/server.test.ts
@@ -14379,7 +14402,8 @@ export const ORCHESTRATOR_REFERENCE = {
       "pre_prod ('Authorization Test') only: schema literal + domain assert + the HTTP chokepoint refusing any non-GET unless env=pre_prod. delete_queue_item refuses anything but status New; stop_job refuses terminal jobs. The MCP never deploys, pins, or creates Processes/queues, and never touches Apex credentials, assets or Action Center.",
   },
   stateLabels: {
-    uipathJobState: "UiPath job State passes through unchanged (Pending, Running, Successful, Faulted, Stopped, …).",
+    uipathJobState:
+      "UiPath job State passes through unchanged (Pending, Running, Successful, Faulted, Stopped, …).",
     apexJobStatusToState: APEX_JOB_LABELS,
     apexItemStatusToStatus: APEX_ITEM_LABELS,
   },
@@ -14393,6 +14417,7 @@ export const ORCHESTRATOR_REFERENCE = {
     "Never-started jobs: a job that ended failed with started_at null (typically error_class missing_credential, reaped before any worker claimed it) has no logs and no artifacts — logsUnavailable.reason='never-started', details.neverStarted=true, and find_stuck_orders reports verdict 'job-never-started'. Fix the credential binding; re-running does not help.",
   ],
 } as const;
+```
 
 2b. `src/mcp/reference.ts` — `SAFETY_RULES` (anchor: the two rules starting `"Dry-run gate:` and `"This MCP never writes to prod:`; then append two rules before the closing `],`). Replace lines 535-537 and add after line 537:
 
@@ -14820,7 +14845,7 @@ and
 
 - [ ] **Step 3: `.claude/rules/`** (kept in sync with CLAUDE.md)
 
-3a. `env-profile-required.md`, replace lines 9-13 (`UiPath-only tools (…` through `…circular).`):
+3a. `env-profile-required.md`, replace lines 9-14 (`UiPath-only tools (…` through `…circular).`):
 ```markdown
 Orchestrator tools (`list_jobs`, `get_job`, `get_job_logs`, `get_job_artifacts`, `build_faulted_job_issue`,
 `list_queues`, `list_queue_items`, `find_order_queue_items`, `pull_queue_item`, `list_processes`,
@@ -14972,7 +14997,7 @@ edit("manifest.json", [
 '
 git diff --stat package.json manifest.json src/server.ts
 ```
-Expected: no throw; `git diff --stat` shows `package.json | 4 +-`, `manifest.json` ≈ 30 lines changed, `src/server.ts | 2 +-` (the Task 18/5 edits are already committed). If an anchor throws "matched 0x", a previous task already reworded that string — print the live text (`rg -n '<fragment>' manifest.json`) and adjust only that pair.
+Expected: no throw; `git diff --stat` shows `package.json | 4 +-`, `manifest.json` ≈ 43 lines changed (24+/19-), `src/server.ts | 2 +-` (the Task 18/5 edits are already committed). If an anchor throws "matched 0x", a previous task already reworded that string — print the live text (`rg -n '<fragment>' manifest.json`) and adjust only that pair.
 
 - [ ] **Step 6: Verify** 
 ```bash
@@ -14981,7 +15006,7 @@ rg -n "1\.33\.1" package.json manifest.json src/server.ts
 bunx mcpb validate manifest.json
 bun run typecheck && bun test && bunx biome check src
 ```
-Expected: `2.0.0 2.0.0 33 true` (manifest has 33 entries: it already lacked `list_clinics`, so tool count = 32 existing manifest entries + `get_job_artifacts`; if the printed count is 32, `list_clinics` is absent as before — that is a pre-existing gap, not touched here); `rg` prints nothing; `mcpb validate` passes; gate green.
+Expected: `2.0.0 2.0.0 32 true` (the manifest already lacked `list_clinics`, so its tool count is the 31 existing entries + `get_job_artifacts`; that gap is pre-existing and not touched here); `rg` prints nothing; `mcpb validate` passes; gate green.
 
 - [ ] **Step 7: Commit**
 ```bash
