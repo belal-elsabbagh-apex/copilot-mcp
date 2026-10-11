@@ -2,10 +2,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ApexNotConfiguredError } from "../apex/errors.js";
+import { ExpectedError } from "../shared/expected-error.js";
 import {
   getUipath,
+  loadConfig,
   onConfigReload,
   resetConfigCache,
+  resolveApex,
   resolveAuth,
   resolveSupport,
 } from "./config.js";
@@ -213,6 +217,154 @@ describe("uipath auth schema", () => {
   test("rejects neither bearer nor oauth", () => {
     withUipath({ orchestratorUrl: FIXTURE.uipath.orchestratorUrl });
     expect(() => getUipath()).toThrow(/bearer, oauth, or both/);
+  });
+});
+
+describe("resolveApex", () => {
+  const ENV_VARS = [
+    "APEX_API_URL",
+    "APEX_USER_NAME",
+    "APEX_PASSWORD",
+    "APEX_URL",
+    "APEX_API_URL_1",
+  ];
+  let apexDir: string;
+  let apexConfigPath: string;
+  let prevConfig: string | undefined;
+  let prevEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    apexDir = mkdtempSync(join(tmpdir(), "copilot-mcp-apex-cfg-"));
+    apexConfigPath = join(apexDir, "config.json");
+    prevConfig = process.env["COPILOT_MCP_CONFIG"];
+    process.env["COPILOT_MCP_CONFIG"] = apexConfigPath;
+    prevEnv = Object.fromEntries(ENV_VARS.map((k) => [k, process.env[k]]));
+    for (const k of ENV_VARS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    if (prevConfig === undefined) delete process.env["COPILOT_MCP_CONFIG"];
+    else process.env["COPILOT_MCP_CONFIG"] = prevConfig;
+    for (const k of ENV_VARS) {
+      const v = prevEnv[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetConfigCache();
+    rmSync(apexDir, { recursive: true, force: true });
+  });
+
+  // `apex: undefined` writes a config with no apex section at all.
+  const withApex = (apex: Record<string, unknown> | undefined) => {
+    writeFileSync(apexConfigPath, JSON.stringify({ ...FIXTURE, ...(apex ? { apex } : {}) }));
+    resetConfigCache();
+  };
+
+  test("a config without an apex section still loads", () => {
+    withApex(undefined);
+    expect(loadConfig().apex).toBeUndefined();
+    expect(getUipath().bearer).toBe("test-bearer");
+  });
+
+  test("an invalid apex.apiUrl fails config validation naming the field", () => {
+    withApex({ apiUrl: "not a url" });
+    expect(() => loadConfig()).toThrow(/apex\.apiUrl must be a valid URL/);
+  });
+
+  test("the file wins per field and the env fills only what the file leaves out", () => {
+    withApex({ apiUrl: "https://file.example.com", username: "file-user" });
+    process.env["APEX_API_URL"] = "https://env.example.com";
+    process.env["APEX_USER_NAME"] = "env-user";
+    process.env["APEX_PASSWORD"] = "env-pw";
+    const apex = resolveApex();
+    expect(apex.apiUrl).toBe("https://file.example.com");
+    expect(apex.username).toBe("file-user");
+    expect(apex.password).toBe("env-pw");
+    expect(apex.sources).toEqual({ apiUrl: "config", username: "config", password: "env" });
+  });
+
+  test("env alone is enough, and a trailing slash on the url is stripped", () => {
+    withApex(undefined);
+    process.env["APEX_API_URL"] = "https://env.example.com//";
+    process.env["APEX_USER_NAME"] = "env-user";
+    process.env["APEX_PASSWORD"] = "env-pw";
+    const apex = resolveApex();
+    expect(apex.apiUrl).toBe("https://env.example.com");
+    expect(apex.sources).toEqual({ apiUrl: "env", username: "env", password: "env" });
+  });
+
+  test("an unconfigured field is an ApexNotConfiguredError naming exactly the missing ones", () => {
+    withApex({ apiUrl: "https://file.example.com" });
+    process.env["APEX_PASSWORD"] = "env-pw";
+    let err: unknown;
+    try {
+      resolveApex();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ApexNotConfiguredError);
+    expect(err).toBeInstanceOf(ExpectedError);
+    const message = (err as Error).message;
+    expect(message).toContain("missing username");
+    expect(message).not.toContain("apiUrl");
+    expect(message).not.toContain("password");
+    expect(message).toContain("apex.username");
+    expect(message).toContain("APEX_USER_NAME");
+    expect((err as ApexNotConfiguredError).missing).toEqual(["username"]);
+    expect((err as ApexNotConfiguredError).partial).toBe(true);
+  });
+
+  test("with nothing configured the error lists all three fields and both ways to supply them", () => {
+    withApex(undefined);
+    expect(() => resolveApex()).toThrow(
+      /missing apiUrl, username, password.*apex\.apiUrl.*APEX_API_URL, APEX_USER_NAME, APEX_PASSWORD/,
+    );
+    try {
+      resolveApex();
+    } catch (e) {
+      expect((e as ApexNotConfiguredError).partial).toBe(false);
+    }
+  });
+
+  test("an empty env var counts as unset, and the numbered/legacy names are never read", () => {
+    withApex({ username: "u", password: "p" });
+    process.env["APEX_API_URL"] = "";
+    process.env["APEX_API_URL_1"] = "https://numbered.example.com";
+    process.env["APEX_URL"] = "https://legacy.example.com";
+    expect(() => resolveApex()).toThrow(/missing apiUrl/);
+  });
+
+  test("reads the environment on every call, not once at load", () => {
+    withApex({ username: "u", password: "p" });
+    process.env["APEX_API_URL"] = "https://one.example.com";
+    expect(resolveApex().apiUrl).toBe("https://one.example.com");
+    process.env["APEX_API_URL"] = "https://two.example.com";
+    expect(resolveApex().apiUrl).toBe("https://two.example.com");
+  });
+
+  test("folders default per env and a partial override keeps the other default", () => {
+    const base = { apiUrl: "https://a.example.com", username: "u", password: "p" };
+    withApex(base);
+    expect(resolveApex().folderByEnv).toEqual({
+      prod: "Authorization",
+      pre_prod: "Authorization Test",
+    });
+    withApex({ ...base, folderByEnv: { pre_prod: "Sandbox" } });
+    expect(resolveApex().folderByEnv).toEqual({ prod: "Authorization", pre_prod: "Sandbox" });
+  });
+
+  test("write-guard settings pass through; unset ones stay absent / empty", () => {
+    const base = { apiUrl: "https://a.example.com", username: "u", password: "p" };
+    withApex(base);
+    expect(resolveApex().serverUrlByEnv).toEqual({});
+    expect(resolveApex().queueUrl).toBe("");
+    withApex({
+      ...base,
+      serverUrlByEnv: { pre_prod: "https://be.pre.example.com" },
+      queueUrl: "https://sqs.example.com/q",
+    });
+    expect(resolveApex().serverUrlByEnv).toEqual({ pre_prod: "https://be.pre.example.com" });
+    expect(resolveApex().queueUrl).toBe("https://sqs.example.com/q");
   });
 });
 

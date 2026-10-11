@@ -1,5 +1,5 @@
 {
-  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is the normal path (every Copilot tool takes a required profile arg). Prod now uses support-account auth for every shipped profile below: each prod entry is just { clinicUid } and the credentials come from copilot.support.prod; get the clinicUid from the list_clinics tool. Pre_prod stays on the existing direct per-account login shape. clinicUid wins if both are present. copilot.support is required for prod, and direct prod credentials are no longer shown in this example.",
+  "_note": "Copy to copilot-mcp.config.json (gitignored) and point COPILOT_MCP_CONFIG at it. copilot.profiles is the normal path (every Copilot tool takes a required profile arg). Prod now uses support-account auth for every shipped profile below: each prod entry is just { clinicUid } and the credentials come from copilot.support.prod; get the clinicUid from the list_clinics tool. Pre_prod stays on the existing direct per-account login shape. clinicUid wins if both are present. copilot.support is required for prod, and direct prod credentials are no longer shown in this example. The optional apex block configures the Apex orchestrator: apiUrl/username/password may instead come from the APEX_API_URL / APEX_USER_NAME / APEX_PASSWORD environment variables (the file wins per field, so delete any field you want the environment to supply); omit the whole block to leave Apex unused.",
   "copilot": {
     "sessionCache": true,
     "support": {
@@ -21,6 +21,14 @@
     "queueUrl": "<queue url used in SpecificContent>",
     "addQueueItemPath": "/odata/Queues/UiPathODataSvc.AddQueueItem",
     "serverUrlByEnv": { "prod": "https://prod-be-batch.ehrcopilotbe.com", "pre_prod": "https://pre-prod-be-batch.ehrcopilotbe.com" }
+  },
+  "apex": {
+    "apiUrl": "https://orchestrator.apexmedicalai.com",
+    "username": "<your own Apex login>",
+    "password": "<your Apex password>",
+    "folderByEnv": { "prod": "Authorization", "pre_prod": "Authorization Test" },
+    "serverUrlByEnv": { "pre_prod": "https://pre-prod-be-batch.ehrcopilotbe.com" },
+    "queueUrl": "<SQS queue url used in the pre-prod SpecificContent>"
   },
   "feedback": { "enabled": true, "repositoryUrl": "https://github.com/belal-elsabbagh-apex/copilot-mcp" }
 }

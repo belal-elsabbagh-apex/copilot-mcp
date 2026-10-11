@@ -1,9 +1,9 @@
 // Single-file, validated configuration for the copilot MCP server.
 //
-// One file holds BOTH the Copilot BE credentials and the UiPath Orchestrator
-// args: { copilot: {...}, uipath: {...} }. The path is taken from the
-// COPILOT_MCP_CONFIG env var, else `copilot-mcp.config.json` in the project root
-// (cwd), else the older `config.local.json` name for existing setups.
+// One file holds the Copilot BE credentials, the UiPath Orchestrator args and, optionally,
+// the Apex orchestrator account: { copilot: {...}, uipath: {...}, apex?: {...} }. The path
+// is taken from the COPILOT_MCP_CONFIG env var, else `copilot-mcp.config.json` in the
+// project root (cwd), else the older `config.local.json` name for existing setups.
 //
 // The config is live: loadConfig() cheaply stats the backing file(s) on every call
 // and re-reads/re-validates only when they changed, so editing the file while the
@@ -20,6 +20,7 @@ import { join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { ApexNotConfiguredError } from "../apex/errors.js";
 
 // ---- Schemas -------------------------------------------------------------
 
@@ -121,6 +122,27 @@ const UipathSchema = z
     message: "uipath requires bearer, oauth, or both",
   });
 
+// Apex orchestrator. Every field is optional in the file: apiUrl/username/password fall
+// back to APEX_API_URL / APEX_USER_NAME / APEX_PASSWORD (see resolveApex), so a missing
+// section is valid and only Apex tools fail (with ApexNotConfiguredError).
+const ApexEnvMapSchema = z
+  .object({ prod: z.string().min(1).optional(), pre_prod: z.string().min(1).optional() })
+  .partial()
+  .optional();
+
+const ApexSchema = z
+  .object({
+    apiUrl: z.string().url("apex.apiUrl must be a valid URL").optional(),
+    username: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    // Folder NAME per env; resolved to the X-Folder-Id uuid at runtime. Defaults below.
+    folderByEnv: ApexEnvMapSchema,
+    // Write guard: specific_content.serverURL / queueUrl must equal these (fails closed unset).
+    serverUrlByEnv: ApexEnvMapSchema,
+    queueUrl: z.string().min(1).optional(),
+  })
+  .passthrough();
+
 // On-failure GitHub-issue suggestion (see feedback.ts). Optional; on by default.
 const FeedbackSchema = z
   .object({
@@ -132,6 +154,7 @@ const FeedbackSchema = z
 const ConfigSchema = z.object({
   copilot: CopilotSchema,
   uipath: UipathSchema,
+  apex: ApexSchema.optional(),
   feedback: FeedbackSchema.optional(),
 });
 
@@ -318,6 +341,71 @@ export function configStatus(): { ok: boolean; error?: string } {
 }
 
 export const getUipath = (): UipathConfig => loadConfig().uipath;
+
+export interface ApexConfig {
+  apiUrl: string; // no trailing slash
+  username: string;
+  password: string;
+  folderByEnv: Record<Env, string>;
+  serverUrlByEnv: Partial<Record<Env, string>>;
+  queueUrl: string; // "" when unset
+  sources: { apiUrl: ApexSource; username: ApexSource; password: ApexSource };
+}
+type ApexSource = "config" | "env";
+
+const APEX_ENV_VARS = {
+  apiUrl: "APEX_API_URL",
+  username: "APEX_USER_NAME",
+  password: "APEX_PASSWORD",
+} as const;
+export const DEFAULT_APEX_FOLDERS: Record<Env, string> = {
+  prod: "Authorization",
+  pre_prod: "Authorization Test",
+};
+
+// File value first, then the env var. Read per call (never cached) so a changed
+// environment — or a test — takes effect immediately. An empty env var counts as unset.
+function apexField(field: keyof typeof APEX_ENV_VARS, fromFile: string | undefined) {
+  if (fromFile) return { value: fromFile, source: "config" as const };
+  const fromEnv = process.env[APEX_ENV_VARS[field]];
+  return fromEnv ? { value: fromEnv, source: "env" as const } : undefined;
+}
+
+// The resolved Apex settings, or ApexNotConfiguredError naming every missing field.
+// Precedence is per field: the file wins; the environment only fills what it leaves out.
+export function resolveApex(): ApexConfig {
+  const apex = loadConfig().apex;
+  const found = {
+    apiUrl: apexField("apiUrl", apex?.apiUrl),
+    username: apexField("username", apex?.username),
+    password: apexField("password", apex?.password),
+  };
+  const { apiUrl, username, password } = found;
+  if (!(apiUrl && username && password)) {
+    const fields = Object.keys(APEX_ENV_VARS) as (keyof typeof APEX_ENV_VARS)[];
+    const missing = fields
+      .filter((field) => !found[field])
+      .map((field) => ({ field, envVar: APEX_ENV_VARS[field] }));
+    throw new ApexNotConfiguredError(missing, fields.length - missing.length);
+  }
+  const folders = apex?.folderByEnv;
+  const serverUrls = apex?.serverUrlByEnv;
+  return {
+    apiUrl: apiUrl.value.replace(/\/+$/, ""),
+    username: username.value,
+    password: password.value,
+    folderByEnv: {
+      prod: folders?.prod ?? DEFAULT_APEX_FOLDERS.prod,
+      pre_prod: folders?.pre_prod ?? DEFAULT_APEX_FOLDERS.pre_prod,
+    },
+    serverUrlByEnv: {
+      ...(serverUrls?.prod ? { prod: serverUrls.prod } : {}),
+      ...(serverUrls?.pre_prod ? { pre_prod: serverUrls.pre_prod } : {}),
+    },
+    queueUrl: apex?.queueUrl ?? "",
+    sources: { apiUrl: apiUrl.source, username: username.source, password: password.source },
+  };
+}
 
 // Names of the credential profiles defined in the config (copilot.profiles). Used to
 // drive prompt autocompletion; never throws (returns [] when the config is absent or
