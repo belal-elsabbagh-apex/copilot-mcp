@@ -186,6 +186,20 @@ describe("apexBuildFaultedJobIssue", () => {
     );
   });
 
+  test("a cancelled job is a cancellation or a superseded retry parent, not a fault", async () => {
+    serveJob(
+      apex,
+      JOB,
+      rawJob({ status: "cancelled", error_class: null, error_message: null }),
+      [],
+    );
+
+    const err = await apexBuildFaultedJobIssue({ env: "prod", jobId: JOB }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ExpectedError);
+    expect((err as Error).message).toMatch(/cancel/);
+  });
+
   test("the same fault on another job (new id, timestamps, message ids) keeps one signature", async () => {
     const other = "22222222-aaaa-bbbb-cccc-000000000002";
     serveJob(

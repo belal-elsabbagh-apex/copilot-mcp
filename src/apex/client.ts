@@ -1,7 +1,8 @@
 // The single Apex HTTP chokepoint — nothing else in the repo may fetch against Apex.
 // Owns: login (JWT from the Set-Cookie, in-memory, single-flighted, refreshed before its
-// own `exp`), folder-name -> X-Folder-Id resolution (sent on EVERY request: omitting it
-// silently reads the user's default folder), the pre_prod-only write gate, retries
+// own `exp`), folder-name -> X-Folder-Id resolution (sent on every apexRequest call; login, the
+// /folders listing and apexDownload are the documented exceptions — omitting it silently reads
+// the user's default folder), the pre_prod-only write gate, retries
 // (GETs only), and error shaping. Apex routes take paths relative to `/api/v1`.
 
 import { type ApexConfig, type Env, onConfigReload, resolveApex } from "../config/config.js";
@@ -203,6 +204,25 @@ function assertWritable(env: Env, method: Method, path: string, folder: string |
   }
 }
 
+// A pre_prod folder that resolves to the prod folder would point every "pre_prod-only" write at
+// prod — refuse before the write is sent. Uses the cached /folders listing: no extra request.
+async function assertEnvFoldersDistinct(
+  cfg: ApexConfig,
+  method: Method,
+  path: string,
+): Promise<void> {
+  const [preProd, prod] = await Promise.all([
+    lookupFolder(cfg, "pre_prod", undefined),
+    lookupFolder(cfg, "prod", undefined),
+  ]);
+  if (preProd.id === prod.id) {
+    throw new ExpectedError(
+      `Apex ${method} ${path} refused: pre_prod and prod resolve to the same folder ` +
+        `('${preProd.name}' / '${prod.name}') — fix apex.folderByEnv`,
+    );
+  }
+}
+
 // One Apex JSON call, scoped to the env's folder (or `opts.folder`, reads only).
 // Returns the parsed body (null when empty); throws ApexApiError on a non-2xx.
 export async function apexRequest(
@@ -213,6 +233,7 @@ export async function apexRequest(
 ): Promise<unknown> {
   assertWritable(env, method, path, opts.folder);
   const cfg = resolveApex();
+  if (method !== "GET") await assertEnvFoldersDistinct(cfg, method, path);
   const { id } = await lookupFolder(cfg, env, opts.folder);
   const qs = new URLSearchParams(opts.query ?? {}).toString();
   const hasBody = opts.body !== undefined;

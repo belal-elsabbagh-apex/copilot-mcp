@@ -410,9 +410,8 @@ export async function fetchJobVideoUrl(jobKey: string, folder?: string): Promise
 
 const JOB_DEEP_LINK_PLACEHOLDER = "{key}";
 
-// A per-org/tenant template with a literal "{key}" placeholder — callers returning many
-// job rows hoist this once instead of repeating the full URL (only the key differs) per row.
-export const jobDeepLinkBase = (): string => {
+// A per-org/tenant template with a literal "{key}" placeholder; jobDeepLink fills in the key.
+const jobDeepLinkBase = (): string => {
   const { org, tenant } = orgTenant();
   if (!(org && tenant)) return "";
   return `https://cloud.uipath.com/${org}/${tenant}/orchestrator_/jobs(sidepanel:sidepanel/jobs/${JOB_DEEP_LINK_PLACEHOLDER}/details)`;

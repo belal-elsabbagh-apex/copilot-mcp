@@ -17,6 +17,7 @@ import type { ApexLogRow } from "./job-log.js";
 import { APEX_TERMINAL_STATUSES } from "./map.js";
 
 export const JOB_LOG = "job.log";
+export const MAX_LOG_ROWS = 500; // UiPath's robot-log fetch window
 
 // Matching is case-insensitive over the queue name: `<KEY> auth <kind> queue` for the
 // portal key and each of its aliases, or the input as a whole name. A queue id wins outright.
@@ -37,8 +38,9 @@ const MIN_LEVELS: Record<NonNullable<LogFilter["minLevel"]>, ReadonlySet<string>
   error: new Set(["Error", "Fatal", "Critical"]),
 };
 
-// minLevel, contains (case-sensitive) and onlyFailures narrow the rows; `tail` then keeps the
-// last N of what matched. totalMatching is the match count before the tail cut.
+// minLevel, contains (case-sensitive) and onlyFailures narrow the rows; the window then mirrors
+// UiPath's 500-row fetch: the first 500 matches, or with `tail` the last min(tail, 500).
+// totalMatching is the match count before the window cut.
 export function filterLogRows(
   rows: ApexLogRow[],
   f: LogFilter,
@@ -50,7 +52,10 @@ export function filterLogRows(
       (!f.contains || r.Message.includes(f.contains)) &&
       (!f.onlyFailures || isFailureLog(r)),
   );
-  return { kept: f.tail ? matched.slice(-f.tail) : matched, totalMatching: matched.length };
+  const kept = f.tail
+    ? matched.slice(-Math.min(f.tail, MAX_LOG_ROWS))
+    : matched.slice(0, MAX_LOG_ROWS);
+  return { kept, totalMatching: matched.length };
 }
 
 // `raw` carries the NDJSON `fields` object (null for rows that had none).

@@ -112,7 +112,7 @@ export function digestLogs(logs: JobLog[]): JobLogDigest {
     stalls: findLogStalls(logs),
     note:
       "Failure-focused digest (messages truncated, benign lines omitted). " +
-      "If this is not enough, call get_job_logs with this job's key for the complete raw logs " +
+      "If this is not enough, call get_job_logs with this job's jobId for the complete raw logs " +
       "(filters: minLevel, contains, onlyFailures, tail).",
   };
 }

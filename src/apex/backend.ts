@@ -83,6 +83,7 @@ import {
   filterLogRows,
   JOB_LOG,
   logsUnavailableBeforeFetch,
+  MAX_LOG_ROWS,
   mergeNewestFirst,
   pickQueue,
   toLogRow,
@@ -94,6 +95,8 @@ const FIND_CONCURRENCY = 6;
 const SEARCH_PER_QUEUE_MAX = 200; // one page of fuzzy `search` hits per queue
 const ATTEMPTS_PER_ITEM_MAX = 50; // max_attempts is 1–10
 const MAX_LOG_BYTES = 5 * 1024 * 1024; // a larger job.log is read from its tail
+const PARTIAL_LOG_NOTE =
+  " Only the last 5 MiB of job.log were read: earlier lines (and failures) are not reflected.";
 
 const toMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const jobLink = (id: string): string => apexDashboardLink(`/jobs/${id}`);
@@ -128,10 +131,17 @@ export async function apexListJobs(args: ListJobsArgs): Promise<ListJobsResult> 
   return { folder: resolved.name, jobs };
 }
 
-async function readLogArtifact(env: Env, artifact: ApexArtifact): Promise<ParsedJobLog> {
-  const range = artifact.size_bytes > MAX_LOG_BYTES ? `bytes=-${MAX_LOG_BYTES}` : undefined;
-  const { bytes } = await downloadArtifact(env, artifact, range);
-  return parseJobLog(new TextDecoder().decode(bytes));
+type ReadLog = ParsedJobLog & { partial: boolean };
+
+// partial: the job.log exceeded MAX_LOG_BYTES, so only its tail was read.
+async function readLogArtifact(env: Env, artifact: ApexArtifact): Promise<ReadLog> {
+  const partial = artifact.size_bytes > MAX_LOG_BYTES;
+  const { bytes } = await downloadArtifact(
+    env,
+    artifact,
+    partial ? `bytes=-${MAX_LOG_BYTES}` : undefined,
+  );
+  return { ...parseJobLog(new TextDecoder().decode(bytes)), partial };
 }
 
 // The job's parsed job.log, or null when no job.log artifact is listed. Throws on any HTTP failure.
@@ -139,7 +149,7 @@ export async function readJobLog(
   env: Env,
   folder: string | undefined,
   jobId: string,
-): Promise<ParsedJobLog | null> {
+): Promise<ReadLog | null> {
   const artifact = (await listArtifacts(env, folder, jobId)).find((a) => a.filename === JOB_LOG);
   return artifact ? readLogArtifact(env, artifact) : null;
 }
@@ -161,6 +171,7 @@ async function digestPart(
       ...digestLogs(parsed.rows),
       run: toApexRunSummary(detail, parsed),
     };
+    if (parsed.partial) logDigest.note += PARTIAL_LOG_NOTE;
     return { logDigest };
   } catch (e) {
     return { logDigestError: toMessage(e) };
@@ -219,13 +230,14 @@ async function jobLogsEntry(args: GetJobLogsArgs, jobId: string): Promise<JobLog
   const logArtifact = artifacts.find((a) => a.filename === JOB_LOG);
   if (!logArtifact) return { ...empty, logsUnavailable: ARTIFACT_POLICY_UNAVAILABLE, ...video };
 
-  const { rows } = await readLogArtifact(env, logArtifact);
+  const { rows, partial } = await readLogArtifact(env, logArtifact);
   const { kept, totalMatching } = filterLogRows(rows, filter);
   return {
     ...empty,
     logs: kept.map((r) => toLogRow(r, fullMessages, includeRawFields)),
     returned: kept.length,
-    totalMatching, // exact: the whole log is fetched, so truncated stays false
+    totalMatching, // of the rows read; truncated = the 500-row window or a tail-only read hid rows
+    truncated: totalMatching > MAX_LOG_ROWS || partial,
     ...video,
   };
 }
@@ -470,10 +482,16 @@ export async function apexBuildFaultedJobIssue(
   const detail = await getJob(env, folder, jobId);
   const job = toApexJobCore(detail, apexDashboardLink(`/jobs/${detail.id}`));
   const { fault } = job;
+  if (detail.status === "cancelled") {
+    throw new ExpectedError(
+      `job ${jobId} is ${job.state} (cancelled): a stopped Apex job is a cancellation or a ` +
+        "superseded retry parent, not a fault — nothing to file",
+    );
+  }
   if (!fault?.message || !fault.signature) {
     throw new ExpectedError(
       `job ${jobId} is ${job.state}, not a fault — build_faulted_job_issue needs a failed, ` +
-        "timed-out, lost or stopped job",
+        "timed-out or lost job",
     );
   }
   const [attempts, logs] = await Promise.all([

@@ -203,6 +203,27 @@ describe("write gate", () => {
   });
 });
 
+describe("write gate when both envs resolve to one folder", () => {
+  const apex = useApexStub({
+    apex: {
+      apiUrl: "https://apex.example.com",
+      username: "tester",
+      password: "pw",
+      folderByEnv: { pre_prod: "Authorization" },
+    },
+  });
+
+  test("a pre_prod write is refused before any POST, reads still work", async () => {
+    apex.route("POST", "/queues/", () => json({ id: "item-1" }, 201));
+    apex.route("GET", "/jobs/", () => json({}));
+    const err = await caught(apexRequest("pre_prod", "POST", "/queues/q/items", { body: {} }));
+    expect(err).toBeInstanceOf(ExpectedError);
+    expect((err as Error).message).toMatch(/same folder/);
+    expect(apex.callsTo("POST", "/queues/").length).toBe(0);
+    await apexRequest("pre_prod", "GET", "/jobs/a");
+  });
+});
+
 describe("retries", () => {
   const apex = useApexStub();
   const reset = (): never => {

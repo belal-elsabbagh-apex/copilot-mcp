@@ -233,6 +233,31 @@ describe("apexGetJobLogs", () => {
     expect(full?.logs.find((l) => l.Message.startsWith("xxx"))?.Message).toHaveLength(500);
   });
 
+  test("keeps the first 500 matching rows (UiPath's window) and flags truncated", async () => {
+    const many = Array.from({ length: 600 }, (_, i) => nd({ level: "INFO", message: `row ${i}` }));
+    routeJob(stub, jobDetail({ status: "failed" }), [ART], many.join("\n"));
+    const [entry] = (await apexGetJobLogs(base)).entries;
+    expect(entry).toMatchObject({ returned: 500, totalMatching: 600, truncated: true });
+    expect(entry?.logs[0]?.Message).toBe("row 0");
+    expect(entry?.logs[499]?.Message).toBe("row 499");
+    const tail = (await apexGetJobLogs({ ...base, filter: { onlyFailures: false, tail: 800 } }))
+      .entries[0];
+    expect(tail).toMatchObject({ returned: 500, totalMatching: 600, truncated: true });
+    expect(tail?.logs[499]?.Message).toBe("row 599");
+  });
+
+  test("a job.log over 5 MiB is read from its tail and reported truncated, in the digest too", async () => {
+    const big = artifactRow({ size_bytes: 5 * 1024 * 1024 + 1 });
+    routeJob(stub, jobDetail({ status: "failed" }), [big]);
+    const [entry] = (await apexGetJobLogs(base)).entries;
+    expect(stub.callsTo("GET", artPath(big))[0]?.headers["range"]).toBe("bytes=-5242880");
+    expect(entry).toMatchObject({ returned: 7, totalMatching: 7, truncated: true });
+    const [job] = (
+      await apexGetJobs({ env: "pre_prod", jobIds: [JOB_ID], batch: false, includeLogDigest: true })
+    ).entries;
+    expect(job?.logDigest?.note).toContain("last 5 MiB");
+  });
+
   test("minLevel, contains and tail narrow client-side; totalMatching is the pre-tail count", async () => {
     routeJob(stub, jobDetail({ status: "failed" }));
     const warn = (
