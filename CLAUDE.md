@@ -162,11 +162,13 @@ Before finishing a change: `bun run typecheck`, `bun test`, and `bunx biome chec
   whose State is already `Successful`/`Faulted`/`Stopped`. The MCP never repins releases and
   never creates queues — `list_processes`/`list_queues`/`list_triggers` are the read-side
   discovery/verification tools (dev-clone queue ids differ from the prod ids in `PORTALS`).
-- **Apex has one HTTP chokepoint and always scopes to a folder.** `apex/client.ts`'s `apexRequest`
-  is the only Apex `fetch` (login, `apexDownload` and paging all go through it). It always sends
-  `X-Folder-Id` (omitting it silently reads the user's default folder), sends only verified query
-  params (unknown ones are silently ignored by the server), and refuses any request other than GET
-  unless `env === "pre_prod"` — before any network call. Writes are never auto-retried (a retry could double-post).
+- **Apex has one HTTP chokepoint and always scopes to a folder.** All Apex HTTP lives in
+  `apex/client.ts`. `apexRequest` is the only entry point to Apex's data and write routes: it always
+  sends `X-Folder-Id` (omitting it silently reads the user's default folder), sends only verified
+  query params (unknown ones are silently ignored by the server), and refuses any request other than
+  GET unless `env === "pre_prod"` — before any network call. The only other requests, both in
+  `client.ts`, are the login POST and `apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths,
+  no folder header). Writes are never auto-retried (a retry could double-post).
 - **Apex writes are test-folder-only and guarded.** Mirrors the UiPath invariant: schema
   `z.literal("pre_prod")`, domain assert, the chokepoint gate, `guardQueueItemSafety`, and fetch-first
   refusal (`delete_queue_item` only on `new`; `stop_job` refuses every terminal status including `lost`/`timed_out`),

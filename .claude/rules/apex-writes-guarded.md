@@ -3,10 +3,12 @@ id: apex-writes-guarded
 files: src/apex/client.ts, src/apex/actions.ts, src/orchestrator/safety.ts
 ---
 
-`src/apex/client.ts`'s `apexRequest` is the ONLY Apex `fetch`: login, paging and artifact downloads
-(`apexDownload`) all go through it. It ALWAYS sends `X-Folder-Id` (omitting it silently reads the
-user's default folder), sends only verified query params, and refuses any method other than GET
-unless `env === "pre_prod"` — before any network call. Writes are never auto-retried.
+All Apex HTTP lives in `src/apex/client.ts`. `apexRequest` is the ONLY entry point to Apex's data and
+write routes: it ALWAYS sends `X-Folder-Id` (omitting it silently reads the user's default folder),
+sends only verified query params, and refuses any method other than GET unless `env === "pre_prod"`
+— before any network call. The only other requests, both in `client.ts`, are the login POST and
+`apexDownload` (GET-only, Bearer, same-origin `/api/v1/` paths, no folder header). Writes are never
+auto-retried.
 
 `src/apex/actions.ts` is the ONLY module that mutates Apex (`add_queue_item`, `delete_queue_item`,
 `start_job`, `stop_job`). All four take `env: z.literal("pre_prod")` at the schema layer AND assert
@@ -22,6 +24,7 @@ credentials, assets or Action Center.
 only boundary; a dropped gate could write to prod.
 
 **Violation signature:** a `fetch(` against Apex outside `apex/client.ts`; a non-GET path that
-doesn't pass through the `pre_prod` gate; a request without `X-Folder-Id`; an Apex write outside
+doesn't pass through the `pre_prod` gate; an `apexRequest` path that omits `X-Folder-Id`; an
+`apexDownload` that is not GET or leaves the configured host's `/api/v1/`; an Apex write outside
 `apex/actions.ts`; a write endpoint that accepts a `folder` argument; a retry loop around a
 POST; the gate test (`apex/client.test.ts`) not running before `fetch`.
