@@ -134,6 +134,17 @@ describe("guardQueueItemSafety — preProdPost mode", () => {
     expect(message).toMatch(/placeholder/);
   });
 
+  test.each([
+    ["an array", { Diagnoses: ["<TO-FILL>"] }, /placeholder .* Diagnoses/],
+    [
+      "a nested object",
+      { callbackContext: { physicianId: "<TO-FILL>" } },
+      /placeholder .* callbackContext/,
+    ],
+  ])("rejects a <TO-FILL> placeholder nested in %s", (_name, sc, message) => {
+    expect(() => guardQueueItemSafety(sc, "preProdPost", LIMITS)).toThrow(message);
+  });
+
   test("refusal messages name the calling backend's config section", () => {
     const apex: QueueSafetyLimits = {
       preProdServerUrl: "",

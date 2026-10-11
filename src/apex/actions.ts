@@ -113,6 +113,7 @@ export async function addApexQueueItem(args: AddQueueItemArgs): Promise<AddQueue
 // Fetch-first: only a never-picked-up ('new') item may go — anything else is execution
 // history (and possibly a running job's transaction). The dashboard also offers delete
 // for failed/abandoned items; parity with UiPath and evidence preservation keep this strict.
+// queueId must be a queue in the pre-prod folder's own listing (client-side folder proof).
 export async function deleteApexQueueItem(
   args: DeleteQueueItemArgs,
 ): Promise<DeleteQueueItemResult> {
@@ -122,6 +123,12 @@ export async function deleteApexQueueItem(
   if (!queueId) {
     throw new ExpectedError(
       "queueId is required for Apex (from list_queue_items / find_order_queue_items output)",
+    );
+  }
+  const wanted = queueId.toLowerCase();
+  if (!(await listQueues(PRE_PROD, undefined)).some((q) => q.id.toLowerCase() === wanted)) {
+    throw new ExpectedError(
+      `queueId '${queueId}' not found in the pre_prod folder — see list_queues; nothing deleted`,
     );
   }
   const item = await getQueueItem(PRE_PROD, undefined, queueId, itemId);
@@ -217,11 +224,18 @@ const STOP_ROUTES: Record<
 
 // Fetch-first: a job already in a terminal state (completed/failed/cancelled/lost/timed_out)
 // has nothing left to stop, so it is refused before any write. The job is read scoped to the
-// pre-prod folder.
+// pre-prod folder, and its own folder_id must equal the pre-prod folder's (client-side proof:
+// by-id routes are not verified to be folder-scoped server-side).
 export async function stopApexJob(args: StopJobArgs): Promise<StopJobResult> {
   assertPreProd(args.env);
   const jobId = required("jobId", args.jobId);
   const job = await getJob(PRE_PROD, undefined, jobId);
+  const folder = await resolveFolderId(PRE_PROD);
+  if (job.folder_id !== folder.id) {
+    throw new ExpectedError(
+      `refusing to stop job '${jobId}': it is not in the pre_prod folder ('${folder.name}') — nothing was stopped`,
+    );
+  }
   if (APEX_TERMINAL_STATUSES.has(job.status)) {
     throw new ExpectedError(
       `refusing to stop job '${jobId}': state is already '${label(APEX_JOB_LABELS, job.status)}' (terminal)`,

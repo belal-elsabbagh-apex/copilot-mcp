@@ -67,10 +67,9 @@ export function guardQueueItemSafety(
     );
   }
 
-  const placeholderKeys = Object.keys(sc).filter((k) => {
-    const v = sc[k];
-    return typeof v === "string" && PLACEHOLDER_RE.test(v);
-  });
+  const placeholderKeys = Object.keys(sc).filter((k) =>
+    PLACEHOLDER_RE.test(JSON.stringify(sc[k]) ?? ""),
+  );
   if (placeholderKeys.length) {
     violations.push(
       `placeholder (<TO-FILL>) values in: ${placeholderKeys.join(", ")} — mint/fill them first`,

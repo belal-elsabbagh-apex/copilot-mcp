@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { ExpectedError } from "../shared/expected-error.js";
 import { addApexQueueItem, deleteApexQueueItem, startApexJob, stopApexJob } from "./actions.js";
 import { APEX_URL, type ApexCall, FOLDER_IDS, json, useApexStub } from "./test-support.js";
@@ -164,6 +164,8 @@ describe("deleteApexQueueItem", () => {
   const apex = useApexStub();
   const itemPath = `/queues/${QUEUE_ID}/items/${ITEM_ID}`;
 
+  beforeEach(() => apex.route("GET", "/queues?", () => paged([QUEUE])));
+
   test("refuses env=prod in the domain, before any fetch", async () => {
     await expect(
       deleteApexQueueItem({ env: "prod", itemId: ITEM_ID, queueId: QUEUE_ID }),
@@ -208,7 +210,11 @@ describe("deleteApexQueueItem", () => {
       previousStatus: "New",
       reference: "ref-1",
     });
-    expect(sequence(apex.calls)).toEqual([`GET ${itemPath}`, `POST ${itemPath}:delete`]);
+    expect(sequence(apex.calls)).toEqual([
+      "GET /queues",
+      `GET ${itemPath}`,
+      `POST ${itemPath}:delete`,
+    ]);
     expect(writes(apex.calls)[0]?.body).toEqual({});
     expect(writes(apex.calls)[0]?.headers["x-folder-id"]).toBe(TEST_FOLDER_ID);
   });
@@ -219,6 +225,18 @@ describe("deleteApexQueueItem", () => {
       deleteApexQueueItem({ env: "pre_prod", itemId: ITEM_ID, queueId: QUEUE_ID }),
     ).rejects.toThrow();
     expect(writes(apex.calls).length).toBe(0);
+  });
+
+  test("refuses a queueId not in the pre_prod folder (no POST)", async () => {
+    apex.route("GET", "/queues?", () => paged([]));
+    const err = await deleteApexQueueItem({
+      env: "pre_prod",
+      itemId: ITEM_ID,
+      queueId: QUEUE_ID,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExpectedError);
+    expect((err as Error).message).toContain("pre_prod folder");
+    expect(actionCalls(apex.calls).some((c) => c.path.startsWith("/queues/"))).toBe(false);
   });
 });
 
@@ -339,7 +357,7 @@ describe("stopApexJob", () => {
     ["lost", "Lost"],
     ["timed_out", "Timed Out"],
   ])("refuses a terminal '%s' job (names the state) and posts nothing", async (status, label) => {
-    apex.route("GET", jobPath, () => json({ id: JOB_ID, status }));
+    apex.route("GET", jobPath, () => json({ id: JOB_ID, status, folder_id: TEST_FOLDER_ID }));
     const err = await stop("Kill").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExpectedError);
     expect((err as Error).message).toContain(label);
@@ -347,7 +365,9 @@ describe("stopApexJob", () => {
   });
 
   test("SoftStop on a running job posts cancel {force:false}", async () => {
-    apex.route("GET", jobPath, () => json({ id: JOB_ID, status: "running" }));
+    apex.route("GET", jobPath, () =>
+      json({ id: JOB_ID, status: "running", folder_id: TEST_FOLDER_ID }),
+    );
     apex.route("POST", `${jobPath}/cancel`, () => json({}));
     const out = await stop("SoftStop");
     expect(out).toEqual({ env: "pre_prod", jobId: JOB_ID, strategy: "SoftStop", stopped: true });
@@ -357,7 +377,9 @@ describe("stopApexJob", () => {
   });
 
   test("Kill posts force_cancel with an empty body", async () => {
-    apex.route("GET", jobPath, () => json({ id: JOB_ID, status: "cancelling" }));
+    apex.route("GET", jobPath, () =>
+      json({ id: JOB_ID, status: "cancelling", folder_id: TEST_FOLDER_ID }),
+    );
     apex.route("POST", `${jobPath}/force_cancel`, () => json({}));
     const out = await stop("Kill");
     expect(out.strategy).toBe("Kill");
@@ -366,7 +388,9 @@ describe("stopApexJob", () => {
   });
 
   test("a 403 on Kill becomes an ExpectedError that names jobs:force_cancel", async () => {
-    apex.route("GET", jobPath, () => json({ id: JOB_ID, status: "running" }));
+    apex.route("GET", jobPath, () =>
+      json({ id: JOB_ID, status: "running", folder_id: TEST_FOLDER_ID }),
+    );
     apex.route("POST", `${jobPath}/force_cancel`, () => json({ detail: "forbidden" }, 403));
     const err = await stop("Kill").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExpectedError);
@@ -376,6 +400,16 @@ describe("stopApexJob", () => {
 
   test("a job that cannot be fetched is never cancelled", async () => {
     await expect(stop("SoftStop")).rejects.toThrow();
+    expect(writes(apex.calls).length).toBe(0);
+  });
+
+  test("refuses a job outside the pre_prod folder (no POST)", async () => {
+    apex.route("GET", jobPath, () =>
+      json({ id: JOB_ID, status: "running", folder_id: FOLDER_IDS["Authorization"] }),
+    );
+    const err = await stop("Kill").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExpectedError);
+    expect((err as Error).message).toContain("Authorization Test");
     expect(writes(apex.calls).length).toBe(0);
   });
 });
