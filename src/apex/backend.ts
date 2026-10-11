@@ -2,7 +2,7 @@
 // `apexBackend`). Fetching lives here; shaping is in map.ts and the pure selection logic in
 // read-support.ts. Every call is folder-scoped by the client (api.ts `folder` = name override).
 
-import type { Env } from "../config/config.js";
+import { type Env, resolveApex } from "../config/config.js";
 import { resolvePortal } from "../mcp/reference.js";
 import type {
   FaultedJobIssueResult,
@@ -24,6 +24,8 @@ import type {
   ListTriggersArgs,
   PullQueueItemArgs,
   PullQueueItemResult,
+  QueueItemPayload,
+  QueueItemPayloadArgs,
   QueueKind,
 } from "../orchestrator/backend.js";
 import { digestLogs } from "../orchestrator/log-digest.js";
@@ -73,6 +75,7 @@ import {
   toApexRunSummary,
   toApexScheduleTrigger,
 } from "./map.js";
+import { matchValueOf, serializeApexContent } from "./payload.js";
 import {
   ARTIFACT_POLICY_UNAVAILABLE,
   filterLogRows,
@@ -481,4 +484,53 @@ export async function apexBuildFaultedJobIssue(
     { env, attempts, repo: args.repo, labels: args.labels },
   );
   return { ...issue, found: true, ...(logs.error ? { logsError: logs.error } : {}) };
+}
+
+// ---- build_queue_item serializer -------------------------------------------
+
+// Pure given config: native content + the configured callback host/queue, guarded
+// (IsApproved forced false), shaped as the body add_queue_item posts. No silent fallback
+// for serverURL/queueUrl — an item pointing a robot at the wrong host is worse than none.
+export function apexBuildQueueItemPayload(args: QueueItemPayloadArgs): QueueItemPayload {
+  const apex = resolveApex();
+  const serverURL = apex.serverUrlByEnv[args.env];
+  if (!serverURL) {
+    throw new ExpectedError(
+      `cannot build an Apex queue item for env '${args.env}': apex.serverUrlByEnv.${args.env} ` +
+        "is not configured (it is the callback host the item's serverURL must carry)",
+    );
+  }
+  if (!apex.queueUrl) {
+    throw new ExpectedError(
+      "cannot build an Apex queue item: apex.queueUrl is not configured " +
+        "(the callback queue the item's queueUrl must carry)",
+    );
+  }
+  const { specificContent, forced } = guardQueueItemSafety(
+    { ...args.content, serverURL, queueUrl: apex.queueUrl },
+    "force",
+  );
+  const content = serializeApexContent(specificContent);
+  const reference = `${args.orderUid}-${Math.floor(Date.now() / 1000)}`;
+  const notes = [
+    `serverURL/queueUrl come from apex.serverUrlByEnv.${args.env} / apex.queueUrl; native types ` +
+      "(arrays, booleans, numbers, callbackContext object) are kept as Apex stores them.",
+    `To post: add_queue_item(orchestrator: "apex", env: "pre_prod", queue: "${args.queueName}", ` +
+      "reference: payload.body.reference, specificContent: payload.body.specific_content). " +
+      "match_value is re-derived from specificContent.automationId at post time.",
+  ];
+  if (forced.length) notes.unshift(`${forced.join(", ")} forced to false (test-safety guard).`);
+  return {
+    payload: {
+      queueName: args.queueName,
+      body: { specific_content: content, reference, match_value: matchValueOf(content) },
+    },
+    notes,
+    meta: {
+      queueName: args.queueName,
+      env: args.env,
+      orderUid: args.orderUid,
+      note: "post with add_queue_item(orchestrator: apex)",
+    },
+  };
 }
