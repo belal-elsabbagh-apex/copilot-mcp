@@ -15,6 +15,7 @@ import {
   resolvePortal,
   resolvePortalByDefId,
 } from "../mcp/reference.js";
+import { memberFilename, toPortalRef } from "../orchestrator/portal.js";
 import { guardQueueItemSafety } from "../orchestrator/safety.js";
 import type { PortalRef } from "../orchestrator/types.js";
 import {
@@ -58,17 +59,6 @@ export function parseQueueItemUrl(url: string): ParsedQueueUrl {
     folderId,
     queueId: queueMatch ? Number(queueMatch[1]) : 0,
   };
-}
-
-// Build a PHI-light filename slug from a queue item's member name.
-function memberFilename(sc: Record<string, unknown>): string {
-  const s = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
-  const first = s(sc["MemberFirstName"]);
-  const last = s(sc["MemberLastName"]);
-  let slug = `${first}-${last}`.replace(/^-|-$/g, "");
-  if (!slug) slug = s(sc["MemberFullName"]) || "unknown";
-  slug = slug.replace(/,/g, "").replace(/\s+/g, "-");
-  return `${slug}.yaml`;
 }
 
 // Where to pull a queue item from: either an Orchestrator URL (fid + txn id parsed
@@ -143,13 +133,7 @@ export async function pullQueueItem(args: PullQueueItemArgs): Promise<PullQueueI
     queueName,
     ...(queueNameError ? { queueNameError } : {}),
     queueDefinitionId: item.queueDefinitionId,
-    portal: {
-      matched: portal.matched,
-      key: portal.key,
-      portalDir: portal.portalDir,
-      buildArtifact: portal.buildArtifact,
-      family: portal.family,
-    },
+    portal: toPortalRef(portal),
     isApprovedForced: true,
     suggestedFilename: memberFilename(specificContent),
     specificContent,
