@@ -152,9 +152,8 @@ const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
     invalid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" }, // orchestrator is required
   },
   find_order_queue_items: {
-    // orchestrator is required until the cross-backend search makes it optional.
-    valid: { orderUid: "abcdefgh", env: "prod", orchestrator: "uipath" },
-    invalid: { orderUid: "abcdefgh", env: "prod" },
+    valid: { orderUid: "abcdefgh", env: "prod" }, // orchestrator omitted = every orchestrator
+    invalid: { orderUid: "abcdefgh" }, // env is required
   },
   pull_queue_item: {
     valid: { orchestrator: "uipath", env: "pre_prod", itemId: "123" },

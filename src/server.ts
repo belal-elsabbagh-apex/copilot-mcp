@@ -13,7 +13,7 @@
 //   - create_preprod_order     mint a fresh pre-prod order from an explicit spec (stops at forReview, never submits)
 //   - submit_preprod_order     submit a pre-prod order sitting at forReview (explicit, separate write)
 //   - build_queue_item         build an orchestrator queue-item request from an order (build-only)
-//   - find_order_queue_items   find the queue item(s) an order flowed through + their job ids (read-only)
+//   - find_order_queue_items   find the queue item(s) + job ids an order flowed through, across every orchestrator (read-only)
 //   - pull_queue_item          fetch one queue item as a ready-to-run test payload, IsApproved forced false (read-only)
 //   - list_queue_items         browse a portal's queue for triage (read-only)
 //   - list_jobs                list recent jobs in a folder (read-only)
@@ -95,6 +95,7 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
+import { findOrderAcross, selectBackends } from "./orchestrator/find-order.js";
 import { jobEntriesEnvelope, resolveJobIds } from "./orchestrator/job-batch.js";
 import { buildQueueItemContent } from "./orchestrator/queue-item.js";
 import { backendFor, ENABLED_ORCHESTRATORS } from "./orchestrator/registry.js";
@@ -557,60 +558,70 @@ server.registerTool(
     },
     description:
       "Given a Copilot orderUid, find the orchestrator queue item(s) it flowed through and the " +
-      "ids of the jobs that ran them — every order flows through a queue item carrying the " +
-      "orderUid, so this reaches faulted/still-running consumer jobs an OutputArguments scan can't. " +
-      "READ-ONLY. Each item's full specificContent is returned deliberately, in full " +
-      "(member/clinical fields visible) — the point is divergence analysis: comparing what Copilot " +
-      "actually sent to the orchestrator against the order record from get_order. Only the JWT " +
-      "`token` is redacted ('[redacted]': a live credential, opaque, useless for divergence). Feed " +
-      "`jobIds[orchestrator]` straight into get_job's jobIds batch with includeLogDigest=true to " +
-      "diagnose every run and retry in one call. `count === 0` means the order never reached the " +
-      "orchestrator; an empty jobIds list with items present means it is queued but not yet " +
-      "picked up. Pass env (required) or, with it, an explicit folder name override. `since` " +
-      "narrows the search (automatically retried unbounded if nothing matches) — pass the order's " +
-      "creationDate from get_order. Returns {orchestrator, env, orderUid, folder, searchMode, " +
-      "scanned, count, jobIds:{<orchestrator>:[id…]}, items:[{orchestrator,queueId,queueName," +
-      "itemId,reference,orderUid,status,rawStatus,exceptionType,createdAt,endedAt," +
-      "jobs:[{orchestrator,id,state,neverStarted}],specificContent,details}], notes?, searchError?}.",
+      "job ids that ran them — every order flows through a queue item carrying the orderUid and " +
+      "its job(s), so this reaches faulted/still-running consumer jobs an OutputArguments scan " +
+      "can't. Omit `orchestrator` to search EVERY orchestrator (uipath | apex) in parallel: routing " +
+      "is decided per portal outside this repo, so where the item actually sits is the truth. Each " +
+      "orchestrator fails independently into `searchErrors` without losing the others' items. " +
+      "`folder` is accepted only together with an explicit `orchestrator`. READ-ONLY. The item's " +
+      "full specificContent is returned deliberately, in full (member/clinical fields visible) — " +
+      "the point is divergence analysis: comparing what Copilot actually sent against the order " +
+      "record from get_order. Only the JWT `token` is redacted (a live credential, opaque, useless " +
+      "for divergence). Feed `jobIds[<orchestrator>]` into get_job's jobIds with THAT orchestrator " +
+      "and includeLogDigest=true to diagnose every run and retry in one call per orchestrator " +
+      "(Apex lists every attempt of a retried item). `count === 0` with no `searchErrors` means the " +
+      "order never reached any searched orchestrator; with `searchErrors` it is inconclusive for " +
+      "the failed ones. `jobIds[o]: []` with items present means queued but not yet picked up by a " +
+      "worker. Env picks each orchestrator's folder (see copilot://reference/orchestrators). " +
+      "`since` narrows the queue-item search (each orchestrator retries unbounded if nothing " +
+      "matches) — pass the order's creationDate from get_order. Returns {orderUid, env, count, " +
+      "jobIds:{<orchestrator>:string[]}, items:QueueItemCore[] (newest first), searched, " +
+      "backends:{<orchestrator>:{folder,searchMode,scanned}}, notes? (prefixed '<orchestrator>: '), " +
+      "searchErrors?:{<orchestrator>:string}}.",
     inputSchema: {
-      env: envArg,
       orderUid: z.string().min(8).describe("Copilot orderUid to correlate"),
-      orchestrator: orchestratorArg,
-      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
+      env: envArg,
+      orchestrator: orchestratorArg
+        .optional()
+        .describe(
+          "Search only this orchestrator (uipath | apex); omit to search every orchestrator",
+        ),
+      folder: z
+        .string()
+        .optional()
+        .describe(
+          "Explicit folder override for the one orchestrator named by `orchestrator` (wins " +
+            "over env); refused without `orchestrator`",
+        ),
       since: z
         .string()
         .optional()
         .describe(
           "ISO lower bound on the queue item's creation time — pass the order's creationDate " +
-            "from get_order; retried without the bound if nothing matches",
+            "from get_order; each orchestrator retries without the bound if nothing matches",
         ),
-      top: z.number().int().min(1).max(500).optional().default(50),
+      top: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .default(50)
+        .describe("Max queue items per orchestrator"),
       includeSpecificContent: z.boolean().optional().default(true),
     },
   },
-  async ({ env, orderUid, orchestrator, folder, since, top, includeSpecificContent }, extra) => {
+  async ({ orderUid, env, orchestrator, folder, since, top, includeSpecificContent }, extra) => {
     try {
-      const result = await withHeartbeat(
+      const found = await withHeartbeat(
         extra,
         "Orchestrator",
-        backendFor(orchestrator).findOrderQueueItems({
-          env,
-          orderUid,
-          folder,
-          since,
-          top,
-          includeSpecificContent,
-        }),
+        findOrderAcross(
+          { env, orderUid, folder, since, top, includeSpecificContent },
+          selectBackends(orchestrator, folder),
+        ),
       );
-      const jobIds = [...new Set(result.items.flatMap((i) => i.jobs.map((j) => j.id)))];
-      return ok({
-        orchestrator,
-        env,
-        orderUid,
-        ...result,
-        count: result.items.length,
-        jobIds: { [orchestrator]: jobIds },
-      });
+      return ok({ orderUid, env, ...found });
     } catch (e) {
       return toolError("find_order_queue_items", e, VERSION);
     }

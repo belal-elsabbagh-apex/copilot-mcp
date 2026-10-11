@@ -13,3 +13,6 @@ export const BACKENDS: Record<EnabledOrchestrator, OrchestratorBackend> = {
 };
 
 export const backendFor = (o: EnabledOrchestrator): OrchestratorBackend => BACKENDS[o];
+
+// What an omitted `orchestrator` searches (find_order_queue_items, find_stuck_orders).
+export const searchableBackends = (): OrchestratorBackend[] => Object.values(BACKENDS);

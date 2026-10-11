@@ -40,11 +40,15 @@ export function registerPrompts(server: McpServer): void {
       return userText(
         `Diagnose Copilot order ${orderUid}${env ? ` (env: ${env})` : ""}. Work through it step by step:\n` +
           `1. Call get_order with orderUid="${orderUid}"${envArg} to read its current normalized state; note its creationDate.\n` +
-          `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg}, orchestrator="uipath" and since=<that creationDate> to find the ` +
-          `queue item(s) and their job ids (jobIds.uipath). If count is 0, the order never reached UiPath — report and stop. If items ` +
-          `exist but jobIds.uipath is empty, it is queued and not yet picked up by a robot — report the item statuses and stop.\n` +
-          `3. Call get_job with env${env ? `="${env}"` : ""}, orchestrator="uipath" and jobIds=<every id from jobIds.uipath in step 2> and includeLogDigest=true — ` +
-          `ONE call covering the original run and every retry. Read job.state, job.details.output, job.fault, logDigest per job.\n` +
+          `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg} and since=<that creationDate> — omit ` +
+          `orchestrator to search every orchestrator — to find the queue item(s) and their jobIds (keyed per ` +
+          `orchestrator). If count is 0 and searchErrors is absent, the order never reached any orchestrator — report and ` +
+          `stop. If searchErrors names an orchestrator, that search failed: report it and retry rather than concluding the ` +
+          `order never arrived. If items exist but an orchestrator's jobIds list is empty, the order is queued and not yet ` +
+          `picked up by a worker — report the item statuses and stop.\n` +
+          `3. For each orchestrator that has jobIds, call get_job with orchestrator=<that orchestrator>, env${env ? `="${env}"` : ""}, ` +
+          `jobIds=<its ids from step 2> and includeLogDigest=true — ONE call per orchestrator covering the original run ` +
+          `and every retry. Read state, fault, details, logDigest per job.\n` +
           `4. Derive per-job verdict yourself: job.details.output.out_Result when present, else job.state — Successful -> success, ` +
           `Faulted/Stopped -> failure, anything else -> still running or pending. The newest run is the latest ` +
           `job.createdAt; retry cadence is each run's createdAt minus the previous (older) run's endedAt.\n` +
