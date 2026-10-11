@@ -34,7 +34,7 @@
 //     per community reports) — parse defensively, never assume success.
 
 import { isRecord, safeJsonParse } from "../shared/util.js";
-import type { JobLog } from "./uipath.js";
+import type { UiPathLogRow } from "./uipath.js";
 
 // Every key this module surfaces as a typed field below; anything else lands in
 // `custom` unchanged. `transactionStatus` is intentionally excluded — see module doc.
@@ -95,7 +95,7 @@ export interface RawMessageFields {
 // Parses one log row's RawMessage. Returns null when the field is absent, not an
 // object, or not valid JSON — all three are normal (most rows carry none of this,
 // and RawMessage isn't guaranteed parseable), never an error condition.
-export function parseRawMessage(log: JobLog): RawMessageFields | null {
+export function parseRawMessage(log: UiPathLogRow): RawMessageFields | null {
   if (!log.RawMessage) return null;
   const parsed = safeJsonParse(log.RawMessage);
   if (!isRecord(parsed)) return null;

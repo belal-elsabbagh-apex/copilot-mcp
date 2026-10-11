@@ -4,10 +4,12 @@
 
 import { type Env, getUipath } from "../config/config.js";
 import { folderIdFor } from "../mcp/reference.js";
+import { isFailureLog } from "../orchestrator/log-semantics.js";
+import type { JobLog } from "../orchestrator/types.js";
+import { MAX_RATE_LIMIT_RETRIES, rateLimitDelayMs, sleep } from "../shared/http.js";
 import { chunk, isRecord, type StepProgress, safeJsonParse } from "../shared/util.js";
 import { invalidateBearerToken, resolveBearerToken } from "./auth.js";
 import { isNotFound, UiPathApiError } from "./errors.js";
-import { isFailureLog } from "./log-semantics.js";
 
 export type { Env };
 
@@ -54,10 +56,7 @@ export const toUiPathJob = (raw: unknown): UiPathJob => {
 // expanded payload down to just the two fields we flatten in toUiPathJob.
 const JOB_EXPAND = "Robot($select=Name),Release($select=ProcessVersion)";
 
-export interface JobLog {
-  Level: string;
-  Message: string;
-  TimeStamp: string;
+export interface UiPathLogRow extends JobLog {
   // Only populated when JobLogFilter.includeRawFields is set — see raw-message.ts
   // for what it contains and why it's opt-in (benchmarked ~4-6x each row's bytes,
   // not a mere doubling — see get_job_logs' includeRawFields description).
@@ -94,32 +93,6 @@ const odataValues = <T>(data: unknown): T[] =>
 
 type HttpMethod = "GET" | "POST" | "DELETE";
 
-// GET/odata/Jobs and GET/odata/QueueItems filtered queries are rate-limited by
-// Orchestrator at 100 req/min/tenant for direct API usage (this server's usage —
-// "non-automation" per UiPath's classification), 1000/min for the Orchestrator
-// System Activities. That's exactly fetchJobByKey / searchQueueItemsByOrderId /
-// listQueueItems — the calls analyze_order_execution and find_stuck_orders fan out
-// concurrently per job/order. A 429 carries a `Retry-After` (seconds) telling the
-// caller precisely when the window reopens
-// (https://docs.uipath.com/orchestrator/automation-cloud/latest/api-guide/rate-limits#exposed-headers) —
-// honor it instead of failing the whole analysis/sweep outright.
-const MAX_RATE_LIMIT_RETRIES = 5;
-const DEFAULT_RATE_LIMIT_RETRY_MS = 5_000; // used when Retry-After is missing/unparseable
-const MAX_RATE_LIMIT_RETRY_MS = 65_000; // clamp: one rate-limit window, never longer
-
-const sleep = (ms: number): Promise<void> => {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-};
-
-function rateLimitDelayMs(retryAfterHeader: string | null): number {
-  const seconds = retryAfterHeader ? Number(retryAfterHeader) : Number.NaN;
-  const ms =
-    Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : DEFAULT_RATE_LIMIT_RETRY_MS;
-  return Math.min(ms, MAX_RATE_LIMIT_RETRY_MS);
-}
-
 interface UipathRequestOpts {
   params?: Record<string, string>; // become the OData querystring
   body?: unknown; // JSON.stringify'd; adds Content-Type: application/json
@@ -136,7 +109,7 @@ interface UipathRequestOpts {
 // revoked/expired OAuth token instead of failing for the rest of the process (a
 // no-op retry, harmless, when only a static bearer/PAT is configured). A 429 gets up
 // to MAX_RATE_LIMIT_RETRIES retries, sleeping the server-told Retry-After each time
-// (see the rate-limit comment above) — attempt and rateLimitAttempt are independent
+// (see shared/http.ts) — attempt and rateLimitAttempt are independent
 // counters so a 401 retry never eats into the 429 budget or vice versa.
 async function uipathRequest(
   method: HttpMethod,
@@ -340,7 +313,7 @@ export function jobLogQueryParams(
 // Client-side refinement matching jobLogQueryParams: restore oldest-first order
 // (a tail fetch comes back newest-first), apply the semantic failure filter,
 // then keep the last `tail` rows.
-export function refineJobLogs(logs: JobLog[], filter: JobLogFilter = {}): JobLog[] {
+export function refineJobLogs(logs: UiPathLogRow[], filter: JobLogFilter = {}): UiPathLogRow[] {
   let out = filter.tail !== undefined ? [...logs].reverse() : logs;
   if (filter.onlyFailures) out = out.filter(isFailureLog);
   if (filter.tail !== undefined) out = out.slice(-filter.tail);
@@ -348,7 +321,7 @@ export function refineJobLogs(logs: JobLog[], filter: JobLogFilter = {}): JobLog
 }
 
 export interface JobLogResult {
-  logs: JobLog[];
+  logs: UiPathLogRow[];
   // Rows matching the server-side filters (@odata.count), before the 500 cap
   // and before onlyFailures/tail. null when Orchestrator omits the count.
   totalMatching: number | null;
@@ -368,7 +341,7 @@ export async function fetchFilteredJobLogs(
   const data = await uipathGet("/odata/RobotLogs", jobLogQueryParams(jobKey, filter), folder);
   const count = isRecord(data) ? data["@odata.count"] : undefined;
   return {
-    logs: refineJobLogs(odataValues<JobLog>(data), filter),
+    logs: refineJobLogs(odataValues<UiPathLogRow>(data), filter),
     totalMatching: typeof count === "number" ? count : null,
   };
 }
@@ -377,7 +350,7 @@ export async function fetchJobLogs(
   jobKey: string,
   folder?: string,
   filter: JobLogFilter = {},
-): Promise<JobLog[]> {
+): Promise<UiPathLogRow[]> {
   return (await fetchFilteredJobLogs(jobKey, folder, filter)).logs;
 }
 
@@ -437,9 +410,8 @@ export async function fetchJobVideoUrl(jobKey: string, folder?: string): Promise
 
 const JOB_DEEP_LINK_PLACEHOLDER = "{key}";
 
-// A per-org/tenant template with a literal "{key}" placeholder — callers returning many
-// job rows hoist this once instead of repeating the full URL (only the key differs) per row.
-export const jobDeepLinkBase = (): string => {
+// A per-org/tenant template with a literal "{key}" placeholder; jobDeepLink fills in the key.
+const jobDeepLinkBase = (): string => {
   const { org, tenant } = orgTenant();
   if (!(org && tenant)) return "";
   return `https://cloud.uipath.com/${org}/${tenant}/orchestrator_/jobs(sidepanel:sidepanel/jobs/${JOB_DEEP_LINK_PLACEHOLDER}/details)`;

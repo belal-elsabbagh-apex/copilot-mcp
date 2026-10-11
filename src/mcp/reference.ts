@@ -532,9 +532,11 @@ export const SAFETY_RULES = {
     "IsApproved is ALWAYS false on pulled/test queue items — never submit a real auth from a test run.",
     "Never persist PHI (member names, DOBs, IDs, phones) — redact to placeholders in filenames/docs.",
     "Never commit credentials — bearer/passwords stay in local config, read at runtime.",
-    "Dry-run gate: the 'Authorization Dev Clone' folder (434039) skips all BE notifications; only 'Authorization' (231517) fires real BE calls.",
-    "This MCP never writes to prod: queue-item POSTs/deletes and job starts are pre_prod-only (dev clone 434039, schema-enforced) and it never repins releases.",
-    "Every posted queue item passes the test-safety guard: IsApproved forced false, serverURL/queueUrl pinned to the configured pre-prod values, <TO-FILL> placeholders rejected.",
+    "UiPath dry-run gate: the 'Authorization Dev Clone' folder (434039) skips all BE notifications; only 'Authorization' (231517) fires real BE calls.",
+    "This MCP never writes to prod: queue-item POSTs/deletes and job starts/stops are pre_prod-only (UiPath dev clone 434039, Apex 'Authorization Test'; schema-enforced) and it never repins releases or deploys.",
+    "Every posted queue item (either orchestrator) passes the test-safety guard: IsApproved forced false, serverURL/queueUrl pinned to the configured pre-prod values, <TO-FILL> placeholders rejected.",
+    "Apex prod and test folders share one deployment and one login, so the folder is the only boundary: the Apex client always sends X-Folder-Id and refuses any non-GET request unless env=pre_prod, before any network call.",
+    "get_job_artifacts writes only under ~/.cache/copilot-mcp/artifacts/ (directory mode 0700), never inside a repo. Treat everything downloaded (job.log adapter lines, result_payload, screenshots, trace.zip) as PHI: never commit, paste or summarize its contents.",
   ],
 } as const;
 
@@ -553,7 +555,8 @@ export const CONFIG_GUIDE = {
     "1. Ask the user for the values marked <ASK-USER> below — credentials and tokens cannot be guessed and must never be invented.",
     "2. Write the JSON file (template below) somewhere private and gitignored, e.g. ~/.config/copilot-mcp/config.json or copilot-mcp.config.json next to the server.",
     "3. If not using the default copilot-mcp.config.json location, set COPILOT_MCP_CONFIG to the file's absolute path in the MCP host's server config (the `env` block of this server's entry).",
-    "4. For any env using support accounts, call the list_clinics tool (env=prod|pre_prod) to get the clinicUid of each clinic and fill copilot.profiles.<name>.<env>.clinicUid; then call the doctor tool (profile=<one of copilot.profiles>) to verify auth + clinic scope + UiPath.",
+    "4. For any env using support accounts, call the list_clinics tool (env=prod|pre_prod) to get the clinicUid of each clinic and fill copilot.profiles.<name>.<env>.clinicUid; then call the doctor tool (profile=<one of copilot.profiles>) to verify auth + clinic scope + UiPath + Apex.",
+    "5. Apex is optional: add the `apex` block (or export APEX_API_URL / APEX_USER_NAME / APEX_PASSWORD) only if you need orchestrator=apex. With neither configured, every orchestrator=apex call fails with 'Apex is not configured' while UiPath and Copilot tools keep working.",
   ],
   template: {
     copilot: {
@@ -589,6 +592,17 @@ export const CONFIG_GUIDE = {
       },
       folderPathByEnv: { prod: "Authorization", pre_prod: "Authorization Dev Clone" },
     },
+    apex: {
+      apiUrl:
+        "https://orchestrator.apexmedicalai.com (the load-balancer host, never a CloudFront host) (optional if $APEX_API_URL is set)",
+      username:
+        "<ASK-USER: the user's own Apex login — Apex audits writes per user> (optional if $APEX_USER_NAME is set)",
+      password: "<ASK-USER: that user's Apex password> (optional if $APEX_PASSWORD is set)",
+      folderByEnv: { prod: "Authorization", pre_prod: "Authorization Test" },
+      serverUrlByEnv: { pre_prod: "https://pre-prod-be-batch.ehrcopilotbe.com" },
+      queueUrl:
+        "<ASK-USER: the SQS queue URL carried by BE-built Apex items (specific_content.queueUrl)>",
+    },
   },
   fields: {
     "copilot.profiles":
@@ -614,6 +628,15 @@ export const CONFIG_GUIDE = {
       "Optional numeric OrganizationUnitId per env (defaults: prod 231517 / pre_prod 434039).",
     "uipath.queueUrl / uipath.addQueueItemPath / uipath.serverUrlByEnv":
       "Only needed for build_queue_item / add_queue_item; the safety guard pins posted items to these pre-prod values.",
+    apex: "Optional block enabling orchestrator=apex (the Apex orchestrator replacing UiPath portal by portal). Any of apiUrl / username / password the file leaves out is read from APEX_API_URL / APEX_USER_NAME / APEX_PASSWORD (file wins per field). The env fallback only works when the MCP host passes its environment through (CLI hosts and bunx do); MCPB installs only pass COPILOT_MCP_CONFIG, so they MUST put Apex in the file. Numbered APEX_API_URL_<n> and APEX_URL are not read. No source configured = Apex calls fail with 'Apex is not configured'; UiPath/Copilot are unaffected.",
+    "apex.apiUrl":
+      "Apex orchestrator base URL. Use the LB host (https://orchestrator.apexmedicalai.com), NEVER a CloudFront host — CloudFront caps request bodies at 8 KB, which truncates queue-item and job writes.",
+    "apex.username / apex.password":
+      "The user's OWN Apex login (Apex audits writes per user — no shared bot account). The session JWT (24 h) is cached in memory only, never on disk.",
+    "apex.folderByEnv":
+      "Folder NAME per env; optional, defaults prod='Authorization', pre_prod='Authorization Test'. Names resolve to folder UUIDs at runtime (cached per process) — never put ids here. Every Apex request is scoped by X-Folder-Id; a tool's `folder` arg overrides it for READS only.",
+    "apex.serverUrlByEnv / apex.queueUrl":
+      "Write guard limits, needed for build_queue_item / add_queue_item on Apex: specific_content.serverURL must equal serverUrlByEnv.pre_prod and a non-empty specific_content.queueUrl must equal queueUrl. Unset = writes are refused (fails closed). Deliberately duplicated with the uipath keys; deleted together with UiPath at retirement.",
     feedback:
       "Optional on-failure GitHub-issue feedback; on by default (feedback.enabled=false disables). When a tool fails in a way that looks like a bug in this server, the error payload carries reportIssue.url — a prefilled GitHub new-issue link (tool name + error + server version only, no args/credentials) targeting feedback.repositoryUrl (default: this server's repo). Surface or open it so bugs get reported.",
   },
@@ -621,6 +644,7 @@ export const CONFIG_GUIDE = {
     "NEVER invent credentials, tokens, or emails — every <ASK-USER> value must come from the user.",
     "The config holds secrets: keep it out of version control and never echo passwords/bearer back in chat or logs.",
     "Prod creds grant READ access paths only in practice here: this server's write tools are hard-wired to pre-prod / the dev clone and refuse prod at both the schema and domain layer.",
+    "Apex credentials are the operator's own login: never reuse another person's, never echo them, and never point apex.apiUrl at a CloudFront host.",
     "Sessions are cached at ~/.cache/copilot-mcp/sessions.json (mode 0600; COPILOT_MCP_CACHE overrides the path, copilot.sessionCache:false disables persistence). That file holds live JWTs — never commit it and never echo its contents.",
   ],
 } as const;

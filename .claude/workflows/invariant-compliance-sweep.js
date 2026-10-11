@@ -14,6 +14,7 @@ const RULES = [
   { id: 'prod-preprod-isolation', file: '.claude/rules/prod-preprod-isolation.md' },
   { id: 'order-minting-single-engine', file: '.claude/rules/order-minting-single-engine.md' },
   { id: 'uipath-writes-guarded', file: '.claude/rules/uipath-writes-guarded.md' },
+  { id: 'apex-writes-guarded', file: '.claude/rules/apex-writes-guarded.md' },
   { id: 'settings-sync-plan-apply', file: '.claude/rules/settings-sync-plan-apply.md' },
   { id: 'tool-response-contract', file: '.claude/rules/tool-response-contract.md' },
 ]

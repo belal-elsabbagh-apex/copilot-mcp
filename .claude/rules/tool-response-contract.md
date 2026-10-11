@@ -15,5 +15,5 @@ mistagged as read-only when it writes state, or missing hints entirely, defeats 
 **Violation signature:** a `server.registerTool(...)` call missing one of the four annotation
 keys; a handler that returns a raw object/string instead of going through `ok()`/`err()`; a
 write tool (anything touching `copilot-client.ts`'s `req` with a mutating verb, or
-`uipath/actions.ts`) tagged `readOnlyHint: true` or `destructiveHint: false` when it isn't
+`uipath/actions.ts` or `apex/actions.ts`) tagged `readOnlyHint: true` or `destructiveHint: false` when it isn't
 actually safe to retry/no-op.

@@ -6,12 +6,14 @@ MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://
 
 ## Tools
 
-32 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
-(`env`, `profile`) — see each tool's own schema for the rest. Every Copilot tool requires an
+33 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
+(`env`, `profile`, `orchestrator`) — see each tool's own schema for the rest. Every Copilot tool requires an
 explicit `profile`; most also require an explicit `env` (`prod` | `pre_prod`) — neither is ever
 defaulted. The one exception is `list_clinics`, which takes `env` but no `profile`: it's the
 discovery tool that produces the profile → clinicUid mapping, so requiring a profile would be
-circular. UiPath-only tools also take `env` but no `profile` (UiPath auths globally, not per-account).
+circular. Orchestrator tools also take `env` but no `profile` (orchestrators auth globally, not per-account), plus an
+`orchestrator` (`uipath` | `apex`) that is **required and never defaulted** on every job- or queue-level tool. The carve-outs:
+`find_order_queue_items` and `find_stuck_orders` (omitted = every registered backend) and the Apex-only `get_job_artifacts` (no `orchestrator` arg).
 
 ### Copilot orders
 
@@ -27,38 +29,40 @@ All read tools here are READ-ONLY. Writes (`delete_preprod_order`, `create_prepr
 | `submit_preprod_order` | `profile` | Submit a PRE-PROD order sitting at forReview, advancing it to inProgress. A real, deliberate write — requires explicit user authorization before calling. |
 | `delete_preprod_order` | `profile` | Delete one or more orders from PRE-PROD (`DELETE /api/v1/orders/{uid}`). Never targets prod. |
 | `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
-| `find_stuck_orders` | `env`, `profile` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheckUipath` correlates each to its UiPath job(s) for a coarse verdict. |
-| `build_queue_item` | `env`, `profile` | Fetch an order and BUILD the UiPath AddQueueItem request payload from it — never POSTs. `IsApproved` is always `false`. Pair with `add_queue_item` to actually post it. |
+| `find_stuck_orders` | `env`, `profile`, `orchestrator?` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheck` correlates each to its queue item(s) and job(s) on UiPath and/or Apex (`orchestrator` omitted = both) for a coarse verdict using the latest attempt; adds `job-never-started` for an Apex job that failed before any worker claimed it. Each stuck order carries `orchestrator: { backend, verdict, … }`. |
+| `build_queue_item` | `env`, `profile`, `orchestrator` | Fetch an order and BUILD the queue-item request payload for the chosen orchestrator — never POSTs. `IsApproved` is always `false`. UiPath stringifies array/object fields as before; Apex keeps native types. Pair with `add_queue_item` to actually post it. |
 | `get_login_token` | `env`, `profile` | Log into the Copilot BE (reusing a cached session) and return the session JWT (the same token UiPath callbacks use as `SpecificContent.token`), plus `mode` (`support`/`direct`), `clinicUid`, and `activeClinicId`. Authenticates only — reads/writes no order data. |
 | `list_clinics` | `env` (no `profile` — see note above) | List the clinics the configured **support account** can switch into (`clinicUid`, name, last-active, owner email), each annotated with the config profile already mapped to it (`null` if unmapped). Use it to fill `copilot.profiles.<name>.<env>.clinicUid`. Requires `copilot.support.<env>`. |
 
-### UiPath Orchestrator — reads
+### Orchestrator (UiPath + Apex) — reads
 
-All READ-ONLY.
+All READ-ONLY. Every tool takes `env` and `orchestrator` (`uipath` | `apex`); results come back as `{ orchestrator, env, … }` with backend-neutral cores (`JobCore`, `QueueItemCore`, `QueueCore`, `ProcessCore`, `TriggerCore`) and backend-specific fields under `details`. Job `state` uses UiPath's vocabulary on both backends (Apex statuses are mapped; `rawState` keeps the original). One Apex transaction can have **many** jobs (a retry is a new job on the same queue item), so queue items carry `jobs[]`, newest first.
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `analyze_order_execution` | `env`, `profile` | Trace a Copilot `orderUid` to its UiPath job(s) and diagnose the run: state/verdict, computed durations/retry gaps, a structured fault (headline, stable signature, exception type), a condensed log digest, video link, and Orchestrator deep link. Optionally enriches with the order's current BE status. |
-| `list_jobs` | `env` | List the most recent Orchestrator jobs in a folder, newest first, no order correlation. |
-| `get_job` | `env` | Fetch one (or up to 25 via `jobKeys`) job(s) by GUID Key — the light poll target after `start_job`. `includeLogDigest:true` adds a structured fault + condensed log digest. |
-| `get_job_logs` | `env` | Fetch a job's robot logs (oldest first, capped 500), optionally batched via `jobKeys` (up to 25) and filtered (`minLevel`, `contains`, `onlyFailures`, `tail`); messages truncate to 400 chars unless `fullMessages:true`. |
-| `list_queue_items` | `env` | Browse a portal's UiPath queue for triage — resolve by `queueName` (prod) or `queueDefId` (pre-prod), optionally filtered by status. |
-| `list_queues` | `env` | List the queue definitions in a folder — use to discover a `queueDefId` (dev-clone ids differ from the prod portal registry) or the exact queue `Name` for `add_queue_item`. |
-| `list_processes` | `env` | List the releases ("processes") in a folder — `key` is the `releaseKey` `start_job` takes; check `processVersion`/`isLatestVersion` for the pinned package before starting. |
-| `list_triggers` | `env` | List triggers (queue + time) in a folder — verify a queue trigger's `releaseId` points at your dev release before enqueueing. |
-| `pull_queue_item` | `env` (optional if `url` given) | Fetch one queue item (by Orchestrator URL or `txnId`) and return its `SpecificContent` as a ready-to-run test payload. `IsApproved` is always forced `false`. |
-| `build_faulted_job_issue` | `env` | Read a faulted job (by Key) + its robot logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`). Posts nothing — the caller hands the payload to a GitHub MCP server. |
+| `list_jobs` | `env`, `orchestrator` | List the most recent jobs in a folder, newest first, no order correlation (`since`, `processName`, `top`, `folder`). Apex rows are thin (`fault.class` = `error_class`); use `get_job` for detail. |
+| `get_job` | `env`, `orchestrator` | Fetch one (`jobId`) or up to 25 (`jobIds`) jobs — the light poll target after `start_job`. `includeLogDigest:true` adds a structured fault + condensed log digest; on Apex a missing log yields `logsUnavailable.reason` = `running` \| `never-started` \| `artifact-policy` instead of a digest. |
+| `get_job_logs` | `env`, `orchestrator` | Fetch a job's logs (oldest first, capped 500), batchable via `jobIds` (up to 25) and filterable (`minLevel`, `contains`, `onlyFailures`, `tail`); messages truncate to 400 chars unless `fullMessages:true`; `includeRawFields` adds each row's structured fields; `includeVideo` adds a `video` reference. |
+| `get_job_artifacts` | `env` (**no `orchestrator`: Apex-only**) | List a job's artifacts (`filename`, `type`, `sizeBytes`) and optionally `download` named files (or `"all"`) to `~/.cache/copilot-mcp/artifacts/<jobId>/` (mode `0700`) — `job.log`, `trace.zip`, screenshots, recording. PHI: never commit or paste them. |
+| `find_order_queue_items` | `env`, `orchestrator?` | Find the queue item(s) an order flowed through and their job ids. `orchestrator` omitted = search every registered backend (each fails independently into `searchErrors`); `folder` is only accepted with an explicit `orchestrator`. Output `jobIds: { uipath?: […], apex?: […] }` feeds straight into `get_job`'s `jobIds`. |
+| `list_queue_items` | `env`, `orchestrator` | Browse a portal's queue for triage — `queue` is a portal key/alias or a queue id, optionally filtered by `status`. |
+| `list_queues` | `env`, `orchestrator` | List queues in a folder — use to discover a queue id (pre-prod ids differ from the prod portal registry) or the exact queue name for `add_queue_item`. |
+| `list_processes` | `env`, `orchestrator` | List processes (UiPath releases / Apex workflows) — `id` is the `processId` `start_job` takes; check `version` (UiPath: `isLatestVersion`) and, on Apex, `details.artifactPolicy`. |
+| `list_triggers` | `env`, `orchestrator` | List triggers (queue + time). Apex has no triggers API, so queue triggers are synthesized from queues (`enabled` = active and auto-drain) and time triggers come from schedules. |
+| `pull_queue_item` | `orchestrator`, `env` (optional if `url` given) | Fetch one queue item (UiPath: Orchestrator `url` or `itemId`; Apex: `queueId` + `itemId`) and return its content as a ready-to-run test payload. `IsApproved` is always forced `false`. |
+| `build_faulted_job_issue` | `env`, `orchestrator` | Read a faulted job + its logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`). Posts nothing — the caller hands the payload to a GitHub MCP server. |
 
-### UiPath Orchestrator — writes (pre-prod only)
+### Orchestrator (UiPath + Apex) — writes (pre-prod only)
 
 `env` is a schema-enforced literal `"pre_prod"` on every tool below — `"prod"` is rejected before
-any HTTP call, and every posted payload passes a safety guard.
+any HTTP call (UiPath: the dev-clone folder; Apex: the `Authorization Test` folder), and every posted payload passes a safety guard.
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `add_queue_item` | `env` | POST one item to a dev-clone queue. `IsApproved` is forced `false`; a configured `serverURL`/`queueUrl` must match pre-prod; `<TO-FILL>` placeholders are rejected. Pace ~1/s when enqueueing many. |
-| `delete_queue_item` | `env` | Delete one queue item from the dev clone. Fetch-first: refuses unless the item's current status is `New`, so run history is never destroyed. |
-| `start_job` | `env` | Start job(s) for a release in the dev clone. A job resolves its package version at START (not creation) — re-check `list_processes` right before starting if others are publishing. |
+| `add_queue_item` | `env`, `orchestrator` | POST one item to a pre-prod queue (`queue`, `reference`, `specificContent`). `IsApproved` is forced `false`; a configured `serverURL`/`queueUrl` must match pre-prod; `<TO-FILL>` placeholders are rejected. Pace ~1/s when enqueueing many. |
+| `delete_queue_item` | `env`, `orchestrator` | Delete one queue item (`itemId`; Apex also `queueId`). Fetch-first: refuses unless the item's current status is `New`, so run history is never destroyed. Apex also refuses a `queueId` that isn't in the `Authorization Test` folder. |
+| `start_job` | `env`, `orchestrator` | Start job(s) for a process (`processId`, `input`, `jobsCount` 1–5; Apex also requires `matchValue`). The job runs the process's pinned/current version as resolved at dispatch — re-check `list_processes` right before starting if others are publishing. |
+| `stop_job` | `env`, `orchestrator` | Stop (`SoftStop`) or kill (`Kill`) a job. Fetch-first: refuses a job already in a terminal state. Apex also refuses a job outside the `Authorization Test` folder. |
 
 ### Settings sync (prod ↔ pre-prod)
 
@@ -77,14 +81,14 @@ only settings tool that writes, and it's additive-only against pre-prod (never o
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `doctor` | `profile` | Probe the server's external connections — three checks per env (prod + pre-prod): Copilot BE auth (reusing a cached session; reports `mode` and, for support-account envs, the `activeClinicId` it switched to), a clinic-scope fingerprint (`GET /orders/locations`, which differs per clinic — the cheap proof a support session really landed on the intended clinic, not just that login succeeded), and one cheap UiPath Orchestrator call per env/folder. Reports what's reachable per check, plus which UiPath auth mode (`oauth`/`bearer`) is active. |
+| `doctor` | `profile` | Probe the server's external connections — three checks per env (prod + pre-prod): Copilot BE auth (reusing a cached session; reports `mode` and, for support-account envs, the `activeClinicId` it switched to), a clinic-scope fingerprint (`GET /orders/locations`, which differs per clinic — the cheap proof a support session really landed on the intended clinic, not just that login succeeded), and one cheap UiPath Orchestrator call per env/folder. Reports what's reachable per check, plus which UiPath auth mode (`oauth`/`bearer`) is active. When Apex is configured it adds an Apex check: which config source supplied the credentials (file or env), that login succeeds, and that both folders resolve to ids. |
 | `build_mcp_issue` | — | Compose a GitHub issue about **this MCP server** from a bug report or general feedback — no tool failure required. Posts nothing and holds no GitHub credentials; returns `title`/`body`/`labels` (+ a prefilled `url`) for the host's GitHub tooling to file. |
 
 ## Prompts
 
 User-invokable workflow prompts chain the tools above for common ops tasks:
 `diagnose-order`, `reconcile-settings`, `inspect-settings`, `clone-and-verify-order`,
-`triage-stuck-orders`, and `report-faulted-uipath-jobs`.
+`triage-stuck-orders`, and `report-faulted-jobs`.
 
 `reconcile-settings` walks the full settings workflow: `list_setting_sections` →
 `diff_settings` → `plan_settings_sync` → review the planned action ids with the user →
@@ -100,16 +104,17 @@ fails or the order doesn't reach forReview, the prompt diagnoses via `list_setti
 Submitting the resulting order is a separate, explicit `submit_preprod_order` call that only
 happens with the user's authorization.
 
-`report-faulted-uipath-jobs` finds faulted UiPath jobs (prod by default) and files each as a
+`report-faulted-jobs` finds faulted jobs on the chosen `orchestrator` (`uipath` or `apex`; prod by default) and files each as a
 GitHub issue on `Apex-Medical-AI-Inc/RPAPlaywright` — creating one issue per distinct fault
-and commenting on the existing issue when the same fault recurs. This server holds **no
+and commenting on the existing issue when the same fault recurs. Apex fault signatures are
+`apex:`-prefixed so they never collide with UiPath ones. This server holds **no
 GitHub credentials**: the prompt drives a **GitHub MCP server connected in the host** to do
 the actual search/create/comment, so that server must be connected with write access to the
 repo.
 
 ## Configuration
 
-The server reads one validated config holding both the Copilot BE creds and the UiPath
+The server reads one validated config holding the Copilot BE creds and the UiPath / Apex
 args. Two ways to provide it:
 
 1. **Single file (preferred):** set `COPILOT_MCP_CONFIG` to a JSON file shaped like
@@ -147,6 +152,33 @@ required by `build_queue_item`. Editing the config file while the server is runn
 takes effect on the next tool call — no restart needed — and the server sends an MCP
 logging notification when it reloads.
 
+### Apex orchestrator (optional)
+
+Add an `apex` block to enable `orchestrator: "apex"`:
+
+```json
+"apex": {
+  "apiUrl": "https://orchestrator.apexmedicalai.com",
+  "username": "…", "password": "…",
+  "folderByEnv": { "prod": "Authorization", "pre_prod": "Authorization Test" },
+  "serverUrlByEnv": { "pre_prod": "https://pre-prod-be-batch.ehrcopilotbe.com" },
+  "queueUrl": "https://sqs.…"
+}
+```
+
+- `apiUrl` is the **load-balancer host, never a CloudFront host** (CloudFront caps request bodies at 8 KB).
+- `username`/`password` are your own login — Apex audits writes per user.
+- `folderByEnv` is optional (the values above are the defaults); folder names resolve to ids at runtime.
+- `serverUrlByEnv` / `queueUrl` pin what a posted queue item may carry (the write guard fails closed when they are unset).
+- Any of `apiUrl` / `username` / `password` the file leaves out is read from `APEX_API_URL` /
+  `APEX_USER_NAME` / `APEX_PASSWORD`. This needs a host that passes its environment through (CLI
+  hosts and `bunx` do); **MCPB installs only pass `COPILOT_MCP_CONFIG`, so they must use the file.**
+- With neither source configured, every `orchestrator: "apex"` call fails with "Apex is not
+  configured"; UiPath and Copilot tools are unaffected. `doctor` reports which source was used.
+
+`get_job_artifacts` downloads Apex artifacts to `~/.cache/copilot-mcp/artifacts/<jobId>/`
+(directory mode `0700`, never inside a repo). Treat them as PHI.
+
 See the `copilot://reference/config-guide` MCP resource for a full field-by-field walkthrough
 (load order, an annotated JSON template, and the `doctor`/`list_clinics` verification steps) —
 it's what an agent reads to set this server up from scratch.
@@ -160,6 +192,34 @@ it off or repoints it:
 ```json
 "feedback": { "enabled": false, "repositoryUrl": "https://github.com/your-org/your-fork" }
 ```
+
+## Migrating from v1.x (v2.0.0 breaking changes)
+
+v2.0.0 puts UiPath and Apex behind one tool surface, so argument names and output shapes became
+backend-neutral. Skills/prompts that call the old names must be updated.
+
+| v1.x | v2.0.0 |
+|------|--------|
+| (no such arg) | `orchestrator: "uipath" \| "apex"` — **required** on every job/queue-level tool; optional on `find_order_queue_items` / `find_stuck_orders` (omitted = every registered backend) |
+| `jobKey` / `jobKeys` (`get_job`, `get_job_logs`, `build_faulted_job_issue`) | `jobId` / `jobIds` |
+| `releaseKey` (`start_job`) | `processId` (UiPath release Key \| Apex workflow uuid, from `list_processes`) |
+| `inputArguments` (`start_job`) | `input` |
+| `queueName` (`list_queue_items`, `add_queue_item`) / `queueDefId` (`list_queue_items`) | `queue` — a portal key/alias or queue id (`list_queue_items`); the exact queue name or id (`add_queue_item`) |
+| `queueDefinitionId` (`list_triggers`) | `queueId` |
+| `txnId` (`delete_queue_item`, `pull_queue_item`) | `itemId` (string; Apex also needs `queueId`) |
+| `crossCheckUipath` (`find_stuck_orders`) | `crossCheck` |
+| `find_order_queue_items` → `jobKeys` | `jobIds: { uipath?: string[], apex?: string[] }` |
+| `find_stuck_orders` → per-order `uipath` | per-order `orchestrator: { backend, verdict, … }` |
+| `get_job_logs` → `videoUrl` | `video` (`{kind:"url"}` on UiPath, `{kind:"artifact"}` on Apex — fetch it with `get_job_artifacts`) |
+| `jobDeepLinkBase` + `{key}` substitution | per-job `link` |
+| `get_job` / `list_jobs` flat job rows | `JobCore` (`id`, `state`, `rawState`, `terminal`, `process`, `queueItem`, `createdAt`/`startedAt`/`endedAt`, `attempt`, `retryOfJobId`, `fault`, `link`, `details`); backend-specific fields live under `details` |
+| tool results `{env, …}` | `{orchestrator, env, …}` |
+| prompt `report-faulted-uipath-jobs` | `report-faulted-jobs` (adds `orchestrator`) |
+| resource `copilot://reference/uipath-folders` | `copilot://reference/orchestrators` |
+
+UiPath `state` values and UiPath fault signatures are unchanged. Apex job statuses are mapped
+onto the same state vocabulary (`completed`→`Successful`, `failed`→`Faulted`, `cancelled`→`Stopped`, …);
+the raw value is always in `rawState`.
 
 ## Local development
 

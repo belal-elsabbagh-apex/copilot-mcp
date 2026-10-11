@@ -4,9 +4,14 @@ import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
 const LIMITS: QueueSafetyLimits = {
   preProdServerUrl: "https://pre-prod-be-batch.example.com",
   queueUrl: "https://sqs.example.com/dev-queue",
+  configSection: "uipath",
 };
 
-const NO_LIMITS: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "" };
+const NO_LIMITS: QueueSafetyLimits = {
+  preProdServerUrl: "",
+  queueUrl: "",
+  configSection: "uipath",
+};
 
 describe("guardQueueItemSafety — force mode", () => {
   test("forces IsApproved=false and reports it in forced", () => {
@@ -127,5 +132,34 @@ describe("guardQueueItemSafety — preProdPost mode", () => {
     }
     expect(message).toMatch(/serverURL/);
     expect(message).toMatch(/placeholder/);
+  });
+
+  test.each([
+    ["an array", { Diagnoses: ["<TO-FILL>"] }, /placeholder .* Diagnoses/],
+    [
+      "a nested object",
+      { callbackContext: { physicianId: "<TO-FILL>" } },
+      /placeholder .* callbackContext/,
+    ],
+  ])("rejects a <TO-FILL> placeholder nested in %s", (_name, sc, message) => {
+    expect(() => guardQueueItemSafety(sc, "preProdPost", LIMITS)).toThrow(message);
+  });
+
+  test("refusal messages name the calling backend's config section", () => {
+    const apex: QueueSafetyLimits = {
+      preProdServerUrl: "",
+      queueUrl: "https://sqs.example.com/q",
+      configSection: "apex",
+    };
+    expect(() =>
+      guardQueueItemSafety({ serverURL: "https://x.example.com" }, "preProdPost", apex),
+    ).toThrow(/apex\.serverUrlByEnv\.pre_prod/);
+    expect(() =>
+      guardQueueItemSafety({ queueUrl: "https://sqs.example.com/other" }, "preProdPost", apex),
+    ).toThrow(/apex\.queueUrl/);
+    // UiPath wording is unchanged
+    expect(() =>
+      guardQueueItemSafety({ serverURL: "https://x.example.com" }, "preProdPost", NO_LIMITS),
+    ).toThrow(/uipath\.serverUrlByEnv\.pre_prod/);
   });
 });

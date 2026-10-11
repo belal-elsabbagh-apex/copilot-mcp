@@ -17,7 +17,7 @@ describe("prompt + resource template registration", () => {
       "diagnose-order",
       "inspect-settings",
       "reconcile-settings",
-      "report-faulted-uipath-jobs",
+      "report-faulted-jobs",
       "send-mcp-feedback",
       "triage-stuck-orders",
     ]);

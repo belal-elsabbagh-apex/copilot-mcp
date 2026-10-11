@@ -16,5 +16,6 @@ stay in sync, not fork.
 - [prod-preprod-isolation.md](prod-preprod-isolation.md)
 - [order-minting-single-engine.md](order-minting-single-engine.md)
 - [uipath-writes-guarded.md](uipath-writes-guarded.md)
+- [apex-writes-guarded.md](apex-writes-guarded.md)
 - [settings-sync-plan-apply.md](settings-sync-plan-apply.md)
 - [tool-response-contract.md](tool-response-contract.md)

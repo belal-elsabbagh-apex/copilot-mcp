@@ -1,7 +1,7 @@
 // Action ids + apply selection (pure; unit-tested). Generic over any SyncAction — no
 // section-specific logic lives here.
 
-import { ExpectedError } from "../../mcp/feedback.js";
+import { ExpectedError } from "../../shared/expected-error.js";
 import { asArray } from "./internal.js";
 import type { ApplyFilter, PlannedActionSummary, PlannedSyncAction, SyncAction } from "./types.js";
 

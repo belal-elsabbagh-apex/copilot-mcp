@@ -9,8 +9,9 @@
 // Pure and config-free: the caller injects the configured limits.
 
 export interface QueueSafetyLimits {
-  preProdServerUrl: string; // config uipath.serverUrlByEnv?.pre_prod ?? ""
-  queueUrl: string; // config uipath.queueUrl ?? ""
+  preProdServerUrl: string; // config <configSection>.serverUrlByEnv?.pre_prod ?? ""
+  queueUrl: string; // config <configSection>.queueUrl ?? ""
+  configSection: "uipath" | "apex"; // names the caller's config keys in refusal messages
 }
 
 export type SafetyMode = "force" | "preProdPost";
@@ -30,7 +31,7 @@ const PLACEHOLDER_RE = /<\s*TO[-_ ]?FILL/i;
 export function guardQueueItemSafety(
   sc: Record<string, unknown>,
   mode: SafetyMode,
-  limits: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "" },
+  limits: QueueSafetyLimits = { preProdServerUrl: "", queueUrl: "", configSection: "uipath" },
 ): GuardedContent {
   const forced: string[] = [];
   if (sc["IsApproved"] !== false) forced.push("IsApproved");
@@ -47,7 +48,7 @@ export function guardQueueItemSafety(
   if (serverURL) {
     if (!limits.preProdServerUrl) {
       violations.push(
-        "item carries a serverURL but uipath.serverUrlByEnv.pre_prod is not configured — " +
+        `item carries a serverURL but ${limits.configSection}.serverUrlByEnv.pre_prod is not configured — ` +
           "set it so the guard can verify the callback host is pre-prod",
       );
     } else if (serverURL !== limits.preProdServerUrl) {
@@ -61,15 +62,14 @@ export function guardQueueItemSafety(
   if (queueUrl && queueUrl !== limits.queueUrl) {
     violations.push(
       limits.queueUrl
-        ? `queueUrl '${queueUrl}' is neither empty nor the configured uipath.queueUrl`
-        : `queueUrl '${queueUrl}' must be empty (uipath.queueUrl is not configured)`,
+        ? `queueUrl '${queueUrl}' is neither empty nor the configured ${limits.configSection}.queueUrl`
+        : `queueUrl '${queueUrl}' must be empty (${limits.configSection}.queueUrl is not configured)`,
     );
   }
 
-  const placeholderKeys = Object.keys(sc).filter((k) => {
-    const v = sc[k];
-    return typeof v === "string" && PLACEHOLDER_RE.test(v);
-  });
+  const placeholderKeys = Object.keys(sc).filter((k) =>
+    PLACEHOLDER_RE.test(JSON.stringify(sc[k]) ?? ""),
+  );
   if (placeholderKeys.length) {
     violations.push(
       `placeholder (<TO-FILL>) values in: ${placeholderKeys.join(", ")} — mint/fill them first`,

@@ -19,8 +19,8 @@ interface RegisteredTool {
 }
 
 // Tools that mutate state (everything else is read-only). apply_settings_sync writes
-// additively to pre-prod only; the UiPath writes (add_queue_item, delete_queue_item,
-// start_job, stop_job) are schema-restricted to the pre_prod dev clone.
+// additively to pre-prod only; the orchestrator writes (add_queue_item, delete_queue_item,
+// start_job, stop_job) are schema-restricted to pre_prod.
 const WRITE_TOOLS = new Set([
   "delete_preprod_order",
   "create_preprod_order",
@@ -64,6 +64,7 @@ const EXPECTED = [
   "list_processes",
   "list_triggers",
   "get_job",
+  "get_job_artifacts",
   "add_queue_item",
   "delete_queue_item",
   "start_job",
@@ -111,142 +112,179 @@ describe("server tool registration", () => {
   });
 });
 
-describe("tool input schemas accept representative payloads", () => {
-  const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
-    // profile is required (any non-empty string; validated against config at call time).
-    // env is required on every env-taking tool. Invalid cases omit a required field or
-    // use a wrong type.
-    find_clone_candidates: { valid: { profile: "ossm" }, invalid: {} },
-    delete_preprod_order: {
-      valid: { uids: ["abcdefgh"], profile: "ossm" },
-      invalid: { uids: [], profile: "ossm" },
-    },
-    create_preprod_order: {
-      valid: {
-        profile: "ossm",
-        patientName: "DOE, JOHN",
-        patientBirthDate: "01/02/1980",
-        insuranceName: "Acme Health",
-        typeUid: "abcdefgh-type",
-        orderNamesUids: ["abcdefgh-name"],
-        icdCodes: [{ code: "M54.5" }],
-      },
-      invalid: {
-        // profile is required
-        patientName: "DOE, JOHN",
-        patientBirthDate: "01/02/1980",
-        insuranceName: "Acme Health",
-        typeUid: "abcdefgh-type",
-        orderNamesUids: ["abcdefgh-name"],
-      },
-    },
-    submit_preprod_order: {
-      valid: { profile: "ossm", orderUid: "abcdefgh" },
-      invalid: { orderUid: "abcdefgh" }, // profile is required
-    },
-    build_queue_item: {
-      valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" },
-      invalid: { orderUid: "abcdefgh", profile: "ossm" }, // env is required
-    },
-    find_order_queue_items: {
-      valid: { orderUid: "abcdefgh", env: "prod" },
-      invalid: { orderUid: "abcdefgh" }, // env is required
-    },
-    diff_settings: { valid: { tags: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
-    list_setting_sections: { valid: { tag: "orders" }, invalid: { tag: 123 } },
-    get_settings: {
-      valid: { env: "pre_prod", profile: "ossm", tags: ["orders"] },
-      invalid: { profile: "ossm" }, // env is required
-    },
-    plan_settings_sync: {
-      valid: { profile: "ossm", tags: ["orders"] },
-      invalid: {}, // profile is required
-    },
-    apply_settings_sync: {
-      // The actionIds-XOR-all rule is enforced at runtime (ExpectedError), not in the schema.
-      valid: { profile: "ossm", actionIds: ["specialties:create:MRI:Cardiology"] },
-      invalid: { actionIds: ["specialties:create:MRI:Cardiology"] }, // profile is required
-    },
-    get_order: {
-      valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
-      invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required
-    },
-    search_orders: {
-      valid: { env: "prod", profile: "ossm", insurances: ["OPTUM CARE NETWORK"] },
-      invalid: { profile: "ossm" }, // env is required
-    },
-    get_order_category_stats: {
-      valid: { env: "prod", profile: "ossm" },
-      invalid: { profile: "ossm" }, // env is required
-    },
-    get_login_token: {
-      valid: { env: "prod", profile: "ossm" },
-      invalid: { profile: "ossm" }, // env is required
-    },
-    list_clinics: {
-      valid: { env: "prod" },
-      invalid: {}, // env is required
-    },
-    doctor: { valid: { profile: "ossm" }, invalid: {} }, // profile is required
-    build_faulted_job_issue: {
-      valid: { env: "prod", jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
-      invalid: { jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, // env is required
-    },
-    list_jobs: {
-      valid: { env: "prod", processName: "OPTUM" },
-      invalid: { processName: "OPTUM" }, // env is required
-    },
-    list_queues: {
-      valid: { env: "pre_prod", nameContains: "auth" },
-      invalid: { nameContains: "auth" }, // env is required
-    },
-    list_processes: {
-      valid: { env: "pre_prod" },
-      invalid: {}, // env is required
-    },
-    list_triggers: {
-      valid: { env: "pre_prod", queueDefinitionId: 79926 },
-      invalid: { queueDefinitionId: 79926 }, // env is required
-    },
-    get_job: {
-      valid: { env: "pre_prod", jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
-      invalid: { jobKey: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, // env is required
-    },
-    add_queue_item: {
-      valid: {
-        env: "pre_prod",
-        queueName: "Scratch queue",
-        reference: "TEST-1-abcd1234",
-        specificContent: { orderUid: "abcd1234" },
-      },
-      // env is a z.literal("pre_prod") — prod must be rejected at the schema layer
-      invalid: {
-        env: "prod",
-        queueName: "Scratch queue",
-        reference: "TEST-1-abcd1234",
-        specificContent: { orderUid: "abcd1234" },
-      },
-    },
-    delete_queue_item: {
-      valid: { env: "pre_prod", itemId: 123 },
-      invalid: { env: "prod", itemId: 123 }, // prod rejected by the schema literal
-    },
-    start_job: {
-      valid: { env: "pre_prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
-      // prod rejected by the schema literal (env is also required)
-      invalid: { env: "prod", releaseKey: "609b3602-b6f2-44b2-9ee2-6a8988fac1f5" },
-    },
-    build_mcp_issue: {
-      valid: {
-        kind: "feedback",
-        title: "clone_order output is hard to scan",
-        details:
-          "The per-order rows mix successes and failures; a split summary would read better.",
-      },
-      invalid: { kind: "complaint", title: "x", details: "too short" },
-    },
-  };
+const JOB_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const PROCESS_ID = "609b3602-b6f2-44b2-9ee2-6a8988fac1f5";
 
+const cases: Record<string, { valid: unknown; invalid?: unknown }> = {
+  // profile is required (any non-empty string; validated against config at call time).
+  // env is required on every env-taking tool. Invalid cases omit a required field or
+  // use a wrong type.
+  find_clone_candidates: { valid: { profile: "ossm" }, invalid: {} },
+  delete_preprod_order: {
+    valid: { uids: ["abcdefgh"], profile: "ossm" },
+    invalid: { uids: [], profile: "ossm" },
+  },
+  create_preprod_order: {
+    valid: {
+      profile: "ossm",
+      patientName: "DOE, JOHN",
+      patientBirthDate: "01/02/1980",
+      insuranceName: "Acme Health",
+      typeUid: "abcdefgh-type",
+      orderNamesUids: ["abcdefgh-name"],
+      icdCodes: [{ code: "M54.5" }],
+    },
+    invalid: {
+      // profile is required
+      patientName: "DOE, JOHN",
+      patientBirthDate: "01/02/1980",
+      insuranceName: "Acme Health",
+      typeUid: "abcdefgh-type",
+      orderNamesUids: ["abcdefgh-name"],
+    },
+  },
+  submit_preprod_order: {
+    valid: { profile: "ossm", orderUid: "abcdefgh" },
+    invalid: { orderUid: "abcdefgh" }, // profile is required
+  },
+  build_queue_item: {
+    valid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm", orchestrator: "uipath" },
+    invalid: { orderUid: "abcdefgh", env: "pre_prod", profile: "ossm" }, // orchestrator is required
+  },
+  find_order_queue_items: {
+    valid: { orderUid: "abcdefgh", env: "prod" }, // orchestrator omitted = every orchestrator
+    invalid: { orderUid: "abcdefgh" }, // env is required
+  },
+  find_stuck_orders: {
+    valid: { env: "prod", profile: "ossm", crossCheck: true }, // orchestrator omitted = every orchestrator
+    invalid: { env: "prod", profile: "ossm", orchestrator: "nope" }, // unknown orchestrator
+  },
+  pull_queue_item: {
+    valid: { orchestrator: "uipath", env: "pre_prod", itemId: "123" },
+    invalid: { orchestrator: "uipath", url: "not a url" },
+  },
+  list_queue_items: {
+    valid: { env: "pre_prod", orchestrator: "uipath", queue: "PMG", status: "New" },
+    invalid: { env: "pre_prod", orchestrator: "uipath", queue: "PMG", status: "Bogus" },
+  },
+  diff_settings: { valid: { tags: ["orders"], profile: "ossm" }, invalid: { profile: 123 } },
+  list_setting_sections: { valid: { tag: "orders" }, invalid: { tag: 123 } },
+  get_settings: {
+    valid: { env: "pre_prod", profile: "ossm", tags: ["orders"] },
+    invalid: { profile: "ossm" }, // env is required
+  },
+  plan_settings_sync: {
+    valid: { profile: "ossm", tags: ["orders"] },
+    invalid: {}, // profile is required
+  },
+  apply_settings_sync: {
+    // The actionIds-XOR-all rule is enforced at runtime (ExpectedError), not in the schema.
+    valid: { profile: "ossm", actionIds: ["specialties:create:MRI:Cardiology"] },
+    invalid: { actionIds: ["specialties:create:MRI:Cardiology"] }, // profile is required
+  },
+  get_order: {
+    valid: { orderUid: "abcdefgh", env: "prod", profile: "ossm" },
+    invalid: { orderUid: "abcdefgh", env: "prod" }, // profile is required
+  },
+  search_orders: {
+    valid: { env: "prod", profile: "ossm", insurances: ["OPTUM CARE NETWORK"] },
+    invalid: { profile: "ossm" }, // env is required
+  },
+  get_order_category_stats: {
+    valid: { env: "prod", profile: "ossm" },
+    invalid: { profile: "ossm" }, // env is required
+  },
+  get_login_token: {
+    valid: { env: "prod", profile: "ossm" },
+    invalid: { profile: "ossm" }, // env is required
+  },
+  list_clinics: {
+    valid: { env: "prod" },
+    invalid: {}, // env is required
+  },
+  doctor: { valid: { profile: "ossm" }, invalid: {} }, // profile is required
+  build_faulted_job_issue: {
+    valid: { env: "prod", orchestrator: "uipath", jobId: JOB_ID },
+    invalid: { env: "prod", jobId: JOB_ID }, // orchestrator is required
+  },
+  list_jobs: {
+    valid: { env: "prod", orchestrator: "uipath", processName: "OPTUM" },
+    invalid: { env: "prod", processName: "OPTUM" }, // orchestrator is required
+  },
+  get_job_logs: {
+    // The jobId-XOR-jobIds rule is enforced at runtime (ExpectedError), not in the schema.
+    valid: { env: "prod", orchestrator: "uipath", jobIds: [JOB_ID, JOB_ID] },
+    invalid: { env: "prod", orchestrator: "uipath", jobIds: Array(26).fill(JOB_ID) }, // max 25
+  },
+  list_queues: {
+    valid: { env: "pre_prod", orchestrator: "uipath", nameContains: "auth" },
+    invalid: { env: "pre_prod", nameContains: "auth" }, // orchestrator is required
+  },
+  list_processes: {
+    valid: { env: "pre_prod", orchestrator: "uipath" },
+    invalid: { env: "pre_prod" }, // orchestrator is required
+  },
+  list_triggers: {
+    valid: { env: "pre_prod", orchestrator: "uipath", queueId: "79926" },
+    invalid: { env: "pre_prod", queueId: "79926" }, // orchestrator is required
+  },
+  get_job: {
+    valid: { env: "pre_prod", orchestrator: "uipath", jobId: JOB_ID },
+    invalid: { env: "pre_prod", jobId: JOB_ID }, // orchestrator is required
+  },
+  get_job_artifacts: {
+    valid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: ["job.log", "trace.zip"],
+    },
+    // `download` is "all" or a non-empty filename list — any other string is rejected
+    invalid: {
+      env: "pre_prod",
+      jobId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      download: "everything",
+    },
+  },
+  add_queue_item: {
+    valid: {
+      env: "pre_prod",
+      orchestrator: "uipath",
+      queue: "Scratch queue",
+      reference: "TEST-1-abcd1234",
+      specificContent: { orderUid: "abcd1234" },
+    },
+    // env is a z.literal("pre_prod") — prod must be rejected at the schema layer
+    invalid: {
+      env: "prod",
+      orchestrator: "uipath",
+      queue: "Scratch queue",
+      reference: "TEST-1-abcd1234",
+      specificContent: { orderUid: "abcd1234" },
+    },
+  },
+  delete_queue_item: {
+    valid: { env: "pre_prod", orchestrator: "uipath", itemId: "123" },
+    invalid: { env: "prod", orchestrator: "uipath", itemId: "123" }, // prod rejected by the schema literal
+  },
+  start_job: {
+    valid: { env: "pre_prod", orchestrator: "uipath", processId: PROCESS_ID },
+    invalid: { env: "prod", orchestrator: "uipath", processId: PROCESS_ID }, // prod rejected by the schema literal
+  },
+  stop_job: {
+    valid: { env: "pre_prod", orchestrator: "uipath", jobId: JOB_ID, strategy: "Kill" },
+    invalid: { env: "prod", orchestrator: "uipath", jobId: JOB_ID }, // prod rejected by the schema literal
+  },
+  build_mcp_issue: {
+    valid: {
+      kind: "feedback",
+      title: "clone_order output is hard to scan",
+      details: "The per-order rows mix successes and failures; a split summary would read better.",
+    },
+    invalid: { kind: "complaint", title: "x", details: "too short" },
+  },
+};
+
+describe("tool input schemas accept representative payloads", () => {
   for (const [name, c] of Object.entries(cases)) {
     test(`${name} accepts a valid payload`, () => {
       expect(registered[name]?.inputSchema?.safeParse(c.valid).success).toBe(true);
@@ -256,5 +294,90 @@ describe("tool input schemas accept representative payloads", () => {
         expect(registered[name]?.inputSchema?.safeParse(c.invalid).success).toBe(false);
       });
     }
+  }
+});
+
+// Every tool that dispatches through backendFor() must name its orchestrator, and only an
+// enabled one. Derived from the cases above so a new orchestrator tool can't skip the check.
+describe("orchestrator argument", () => {
+  const ORCHESTRATOR_TOOLS = [
+    "build_queue_item",
+    "find_order_queue_items",
+    "pull_queue_item",
+    "list_queue_items",
+    "list_jobs",
+    "get_job_logs",
+    "build_faulted_job_issue",
+    "list_queues",
+    "list_processes",
+    "list_triggers",
+    "get_job",
+    "add_queue_item",
+    "delete_queue_item",
+    "start_job",
+    "stop_job",
+  ] as const;
+
+  for (const name of ORCHESTRATOR_TOOLS) {
+    test(`${name} rejects an unknown orchestrator`, () => {
+      const valid = (cases[name]?.valid ?? {}) as Record<string, unknown>;
+      const schema = registered[name]?.inputSchema;
+      expect(schema?.safeParse({ ...valid, orchestrator: "uipath" }).success).toBe(true);
+      expect(schema?.safeParse({ ...valid, orchestrator: "bogus" }).success).toBe(false);
+    });
+  }
+});
+
+describe("orchestrator tools accept orchestrator: apex", () => {
+  const ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const apex = { env: "pre_prod", orchestrator: "apex" };
+  const VALID: Record<string, Record<string, unknown>> = {
+    list_jobs: { ...apex, processName: "CENCAL" },
+    get_job: { ...apex, jobId: ID, includeLogDigest: true },
+    get_job_logs: { ...apex, jobId: ID, tail: 50 },
+    build_faulted_job_issue: { ...apex, jobId: ID },
+    list_queues: { ...apex, nameContains: "auth" },
+    list_queue_items: { ...apex, queue: "CENCAL", status: "New" },
+    find_order_queue_items: { ...apex, orderUid: "abcdefgh" },
+    pull_queue_item: { ...apex, queueId: ID, itemId: ID },
+    list_processes: { ...apex },
+    list_triggers: { ...apex, queueId: ID },
+    build_queue_item: { ...apex, orderUid: "abcdefgh", profile: "ossm" },
+    find_stuck_orders: { ...apex, profile: "ossm", crossCheck: true },
+    add_queue_item: {
+      ...apex,
+      queue: "CENCAL auth submit queue",
+      reference: "ord-1-1700000000",
+      specificContent: { orderUid: "abcdefgh" },
+    },
+    delete_queue_item: { ...apex, itemId: ID, queueId: ID },
+    start_job: { ...apex, processId: ID, matchValue: "auto-1" },
+    stop_job: { ...apex, jobId: ID, strategy: "Kill" },
+  };
+  // orchestrator is optional on these two (omitted = every backend)
+  const OPTIONAL_ORCHESTRATOR = new Set(["find_order_queue_items", "find_stuck_orders"]);
+  const APEX_WRITES = ["add_queue_item", "delete_queue_item", "start_job", "stop_job"];
+
+  for (const [name, valid] of Object.entries(VALID)) {
+    test(`${name} accepts an apex payload`, () => {
+      expect(registered[name]?.inputSchema?.safeParse(valid).success).toBe(true);
+    });
+    test(`${name} rejects an unknown orchestrator`, () => {
+      const bad = { ...valid, orchestrator: "nope" };
+      expect(registered[name]?.inputSchema?.safeParse(bad).success).toBe(false);
+    });
+    test(`${name} ${OPTIONAL_ORCHESTRATOR.has(name) ? "allows" : "requires"} orchestrator`, () => {
+      const { orchestrator: _drop, ...rest } = valid;
+      expect(registered[name]?.inputSchema?.safeParse(rest).success).toBe(
+        OPTIONAL_ORCHESTRATOR.has(name),
+      );
+    });
+  }
+
+  for (const name of APEX_WRITES) {
+    test(`${name} rejects env=prod for apex at the schema`, () => {
+      const prod = { ...VALID[name], env: "prod" };
+      expect(registered[name]?.inputSchema?.safeParse(prod).success).toBe(false);
+    });
   }
 });

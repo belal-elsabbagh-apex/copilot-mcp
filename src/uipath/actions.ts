@@ -8,12 +8,12 @@
 // delete a stale New item, and start a job for a release.
 
 import { type Env, getUipath } from "../config/config.js";
+import { guardQueueItemSafety, type QueueSafetyLimits } from "../orchestrator/safety.js";
 import { isRecord } from "../shared/util.js";
-import { guardQueueItemSafety, type QueueSafetyLimits } from "./safety.js";
+import { UIPATH_TERMINAL_STATES } from "./map.js";
 import {
   fetchJobByKey,
   getQueueItem,
-  jobDeepLinkBase,
   type QueueItem,
   resolveFolder,
   scopeForEnv,
@@ -38,6 +38,7 @@ function safetyLimits(): QueueSafetyLimits {
   return {
     preProdServerUrl: cfg.serverUrlByEnv?.pre_prod ?? "",
     queueUrl: cfg.queueUrl ?? "",
+    configSection: "uipath",
   };
 }
 
@@ -58,6 +59,7 @@ export interface AddQueueItemResult {
   queueName: string;
   reference: string;
   itemId: number; // id of the created item (0 if the response omitted it)
+  queueDefinitionId: number; // the queue it landed in (0 if the response omitted it)
   status: string; // "New" on success
   forced: string[]; // fields the safety guard overrode, e.g. ["IsApproved"]
 }
@@ -100,6 +102,7 @@ export async function addQueueItem(args: AddQueueItemArgs): Promise<AddQueueItem
     queueName: args.queueName,
     reference: args.reference,
     itemId: item.id,
+    queueDefinitionId: item.queueDefinitionId,
     status: item.status,
     forced: guarded.forced,
   };
@@ -154,7 +157,6 @@ export interface StartedJob {
 
 export interface StartJobResult {
   env: Env;
-  jobDeepLinkBase: string;
   jobs: StartedJob[];
 }
 
@@ -189,7 +191,7 @@ export async function startJob(args: StartJobArgs): Promise<StartJobResult> {
       releaseName: typeof r["ReleaseName"] === "string" ? r["ReleaseName"] : "",
     };
   });
-  return { env: args.env, jobDeepLinkBase: jobDeepLinkBase(), jobs };
+  return { env: args.env, jobs };
 }
 
 // ---- stop_job ---------------------------------------------------------------
@@ -210,11 +212,8 @@ export interface StopJobResult {
   stopped: true;
 }
 
-// A job already in one of these states has nothing left to stop.
-const TERMINAL_JOB_STATES = new Set(["Successful", "Faulted", "Stopped"]);
-
 export function assertStoppable(job: UiPathJob): void {
-  if (job.State && TERMINAL_JOB_STATES.has(job.State)) {
+  if (job.State && UIPATH_TERMINAL_STATES.has(job.State)) {
     throw new Error(
       `refusing to stop job '${job.Key}': state is already '${job.State}' (terminal)`,
     );

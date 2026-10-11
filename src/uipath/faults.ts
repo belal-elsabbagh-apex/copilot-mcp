@@ -1,33 +1,30 @@
 // build_faulted_job_issue: turn a faulted UiPath job into a ready-to-post GitHub
 // issue payload — WITHOUT touching GitHub. This server holds no GitHub credentials;
-// the `report-faulted-uipath-jobs` prompt hands the payload to the host's GitHub MCP
+// the `report-faulted-jobs` prompt hands the payload to the host's GitHub MCP
 // server, which creates the issue (or comments on a matching one). Keeping the
 // formatting here makes it consistent and lets the pure formatter be unit-tested.
 
 import type { Env } from "../config/config.js";
-import { extractTransactionOutcome } from "./log-digest.js";
+import {
+  DEFAULT_REPO,
+  type FaultedJobIssue,
+  faultSearchQuery,
+  firstLine,
+  normalizeError,
+  signatureMarker,
+} from "../orchestrator/faults.js";
+import type { JobLog } from "../orchestrator/types.js";
+import { parseRawMessage } from "./raw-message.js";
 import {
   fetchJobByKey,
   fetchJobLogs,
-  type JobLog,
   jobDeepLink,
   resolveFolder,
   type UiPathJob,
+  type UiPathLogRow,
 } from "./uipath.js";
 
-// Default target repo (the RPA automation project). Override per call via opts.repo.
-export const DEFAULT_REPO = "Apex-Medical-AI-Inc/RPAPlaywright";
 export const DEFAULT_LABELS = ["uipath-fault", "bug"];
-
-export interface FaultedJobIssue {
-  repo: string;
-  title: string;
-  body: string;
-  labels: string[];
-  faultSignature: string; // stable, normalized error — the dedupe key
-  searchQuery: string; // GitHub query to find an existing issue for this fault
-  recurrenceComment: string; // post this on the existing issue when one is found
-}
 
 export interface FormatOptions {
   env: Env;
@@ -35,27 +32,6 @@ export interface FormatOptions {
   repo?: string | undefined;
   labels?: string[] | undefined;
   deepLink?: string | undefined;
-}
-
-const firstLine = (s: string): string => (s.split("\n")[0] ?? s).trim().slice(0, 120);
-
-const GUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const ISO_TS = /\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?z?/gi;
-
-// Collapse a raw error into a stable signature so the SAME recurring fault (a
-// different job Key / ids / timestamps each run) maps to one issue. Strips GUIDs,
-// ISO timestamps and long digit runs, drops quotes/backticks (they break GitHub
-// search phrases), lowercases, collapses whitespace and truncates.
-export function normalizeError(msg: string): string {
-  return msg
-    .toLowerCase()
-    .replace(GUID, "<id>")
-    .replace(ISO_TS, "<ts>")
-    .replace(/\d{4,}/g, "<n>")
-    .replace(/["`]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 160);
 }
 
 // The headline error: the first Error-level log, else the last non-empty log line,
@@ -68,6 +44,46 @@ export function topError(job: UiPathJob, logs: JobLog[]): string {
   return `Job ended in state ${job.State ?? "Faulted"}`;
 }
 
+// A dotted .NET-style type ending in Exception/Error, e.g. System.NullReferenceException.
+export const EXCEPTION_TYPE = /\b(?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Exception|Error)\b/;
+
+// The Transaction Ended row's structured fields (see raw-message.ts) — the
+// queue's OWN record of how this job's transaction concluded, independent of
+// (and more reliable for exception classification than) exceptionType's regex
+// guess over free text. null whenever RawMessage wasn't fetched, or the job never
+// reached a queue transaction end (faulted before starting one, or has no queue
+// item at all).
+export interface TransactionOutcome {
+  transactionId: string | null;
+  queueName: string | null;
+  processingExceptionType: string | null;
+  processingExceptionReason: string | null;
+  transactionExecutionTimeSec: number | null;
+  queueItemPriority: string | null;
+  queueItemReviewStatus: string | null; // as logged at the time — a snapshot, not live queue-item state
+}
+
+// The queue transaction's own outcome fields, read off the "Transaction Ended"
+// row (last one, if a job somehow logs more than one). Reverse-scans like
+// topError — the terminal transaction is what matters, not the first.
+export function extractTransactionOutcome(logs: UiPathLogRow[]): TransactionOutcome | null {
+  for (const log of [...logs].reverse()) {
+    const raw = parseRawMessage(log);
+    if (raw?.transactionState === "Ended") {
+      return {
+        transactionId: raw.transactionId,
+        queueName: raw.queueName,
+        processingExceptionType: raw.processingExceptionType,
+        processingExceptionReason: raw.processingExceptionReason,
+        transactionExecutionTimeSec: raw.transactionExecutionTimeSec,
+        queueItemPriority: raw.queueItemPriority,
+        queueItemReviewStatus: raw.queueItemReviewStatus,
+      };
+    }
+  }
+  return null;
+}
+
 const fmtLog = (l: JobLog): string =>
   `${l.TimeStamp ?? ""} [${l.Level ?? ""}] ${l.Message ?? ""}`.trim();
 
@@ -77,7 +93,7 @@ const fmtLog = (l: JobLog): string =>
  */
 export function formatFaultedJobIssue(
   job: UiPathJob,
-  logs: JobLog[],
+  logs: UiPathLogRow[],
   opts: FormatOptions,
 ): FaultedJobIssue {
   const repo = opts.repo ?? DEFAULT_REPO;
@@ -130,10 +146,10 @@ export function formatFaultedJobIssue(
     "</details>",
     "",
     "_Filed by copilot-mcp `build_faulted_job_issue`. Recurrences of this fault are added as comments below._",
-    `<!-- fault-signature: ${signature} -->`,
+    signatureMarker(signature),
   ].join("\n");
 
-  const searchQuery = `repo:${repo} is:issue is:open in:body "fault-signature: ${signature}"`;
+  const searchQuery = faultSearchQuery(repo, signature);
 
   const recurrenceComment = [
     `Recurred in \`${opts.env}\` — same fault signature.`,
@@ -170,7 +186,7 @@ export async function buildFaultedJobIssue(
   const job = await fetchJobByKey(jobKey, folder);
   // Logs are a best-effort attachment — a transient logs-fetch failure must not
   // discard an otherwise-valid job lookup, same convention as analyze.ts.
-  let logs: JobLog[] = [];
+  let logs: UiPathLogRow[] = [];
   let logsError: string | undefined;
   try {
     logs = await fetchJobLogs(jobKey, folder, { includeRawFields: true });

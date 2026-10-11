@@ -3,14 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetConfigCache } from "../config/config.js";
+import { DEFAULT_REPO } from "../orchestrator/faults.js";
+import type { JobLog } from "../orchestrator/types.js";
 import {
   buildFaultedJobIssue,
   DEFAULT_LABELS,
-  DEFAULT_REPO,
+  extractTransactionOutcome,
   formatFaultedJobIssue,
-  normalizeError,
 } from "./faults.js";
-import type { JobLog, UiPathJob } from "./uipath.js";
+import type { UiPathJob, UiPathLogRow } from "./uipath.js";
 
 const job: UiPathJob = {
   Id: "12345",
@@ -26,25 +27,72 @@ const errLog = (msg: string): JobLog => ({
   TimeStamp: "2026-06-30T10:00:30Z",
 });
 
-describe("normalizeError", () => {
-  test("two faults with different ids/timestamps collapse to the same signature", () => {
-    const a = normalizeError(
-      "Selector not found for order 998877 at 2026-06-30T10:00:30Z (job 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d)",
-    );
-    const b = normalizeError(
-      "Selector not found for order 112233 at 2026-06-29T22:14:01Z (job 9f8e7d6c-5b4a-3210-fedc-ba9876543210)",
-    );
-    expect(a).toBe(b);
-    expect(a).toContain("selector not found");
-    expect(a).toContain("<id>");
-    expect(a).toContain("<n>");
-    expect(a).toContain("<ts>");
+describe("extractTransactionOutcome", () => {
+  const row = (Message: string, TimeStamp: string, RawMessage?: string): UiPathLogRow => ({
+    Level: "Info",
+    Message,
+    TimeStamp,
+    ...(RawMessage !== undefined ? { RawMessage } : {}),
   });
 
-  test("lowercases, drops quotes/backticks, collapses whitespace, truncates", () => {
-    const s = normalizeError(`  Login   FAILED:  "bad creds"  \n\n with \`token\` `);
-    expect(s).toBe("login failed: bad creds with token");
-    expect(normalizeError("x".repeat(300)).length).toBe(160);
+  test("reads the queue's own exception classification off the Transaction Ended row", () => {
+    const ended = JSON.stringify({
+      transactionState: "Ended",
+      transactionId: "d211b063-20eb-45a9-801a-5634cd13568a",
+      queueName: "CenCal auth sync queue",
+      processingExceptionType: "BusinessException",
+      processingExceptionReason: "",
+      transactionExecutionTime: 49.93,
+      queueItemPriority: "Normal",
+      queueItemReviewStatus: "None",
+    });
+    const logs = [
+      row("Transaction Started", "2026-07-01T10:00:00Z"),
+      row("Transaction Ended", "2026-07-01T10:00:05Z", ended),
+    ];
+    expect(extractTransactionOutcome(logs)).toEqual({
+      transactionId: "d211b063-20eb-45a9-801a-5634cd13568a",
+      queueName: "CenCal auth sync queue",
+      processingExceptionType: "BusinessException",
+      processingExceptionReason: null,
+      transactionExecutionTimeSec: 49.93,
+      queueItemPriority: "Normal",
+      queueItemReviewStatus: "None",
+    });
+  });
+
+  test("null when RawMessage was never fetched", () => {
+    expect(
+      extractTransactionOutcome([row("Transaction Ended", "2026-07-01T10:00:00Z")]),
+    ).toBeNull();
+  });
+
+  test("null when no row ever reaches a Transaction Ended state", () => {
+    const logs = [
+      row(
+        "Transaction Started",
+        "2026-07-01T10:00:00Z",
+        JSON.stringify({ transactionState: "Started" }),
+      ),
+      {
+        ...row("Job crashed before ending the transaction", "2026-07-01T10:00:01Z"),
+        Level: "Error",
+      },
+    ];
+    expect(extractTransactionOutcome(logs)).toBeNull();
+  });
+
+  test("takes the LAST Transaction Ended row when a job logs more than one", () => {
+    const first = JSON.stringify({
+      transactionState: "Ended",
+      processingExceptionType: "BusinessException",
+    });
+    const second = JSON.stringify({ transactionState: "Ended", processingExceptionType: "" });
+    const logs = [
+      row("Transaction Ended", "2026-07-01T10:00:00Z", first),
+      row("Transaction Ended", "2026-07-01T10:05:00Z", second),
+    ];
+    expect(extractTransactionOutcome(logs)?.processingExceptionType).toBeNull();
   });
 });
 

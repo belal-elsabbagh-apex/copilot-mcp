@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { JobLog } from "../orchestrator/types.js";
 import {
   confirmQueueItemMatch,
-  type JobLog,
   jobLogQueryParams,
   refineJobLogs,
   toQueueItem,

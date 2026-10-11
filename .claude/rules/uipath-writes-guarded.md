@@ -1,14 +1,14 @@
 ---
 id: uipath-writes-guarded
-files: src/uipath/actions.ts, src/uipath/safety.ts
+files: src/uipath/actions.ts, src/orchestrator/safety.ts
 ---
 
-`src/uipath/actions.ts` is the ONLY module that mutates Orchestrator state, via
+`src/uipath/actions.ts` is the ONLY module that mutates UiPath Orchestrator state, via
 `add_queue_item`, `delete_queue_item`, `start_job`, and `stop_job`. All four take
 `env: z.literal("pre_prod")` at the schema layer AND assert `env === "pre_prod"` again in the
 domain function — dev-clone only, defense in depth.
 
-Every posted `SpecificContent` passes `guardQueueItemSafety` (`src/uipath/safety.ts`, pure,
+Every posted `SpecificContent` passes `guardQueueItemSafety` (`src/orchestrator/safety.ts`, pure,
 unit-tested — the single enforcement point, also used by `build_queue_item`/`pull_queue_item`):
 - `IsApproved` is forced `false`.
 - Non-empty `serverURL`/`queueUrl` must match the configured pre-prod values (fails closed if

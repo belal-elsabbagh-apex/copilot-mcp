@@ -1,11 +1,15 @@
 // doctor: probe the MCP server's connections to its external APIs and report what is
 // reachable. Read-only — it authenticates against the Copilot BE (prod + pre-prod),
 // fingerprints the clinic scope that session actually has, and makes one cheap
-// authenticated UiPath Orchestrator call per env. Intended for setup/onboarding
-// debugging ("are my creds + clinic + token + folders right?").
+// authenticated UiPath Orchestrator call per env, and — when configured — Apex: which
+// config source supplied the account, that login works, and that each env's folder
+// resolves to an id. Intended for setup/onboarding debugging ("are my creds + clinic +
+// token + folders right?").
 
-import type { Env } from "../config/config.js";
-import { getUipath, resolveAuth } from "../config/config.js";
+import { apexLogin, resolveFolderId as resolveApexFolder } from "../apex/client.js";
+import { ApexNotConfiguredError } from "../apex/errors.js";
+import type { ApexConfig, Env } from "../config/config.js";
+import { getUipath, resolveApex, resolveAuth } from "../config/config.js";
 import { prop, type StepProgress } from "../shared/util.js";
 import { listRecentJobs, resolveFolder } from "../uipath/uipath.js";
 import { connect } from "./session.js";
@@ -40,10 +44,56 @@ async function probe(
 
 const ENVS: readonly Env[] = ["prod", "pre_prod"];
 
+// Apex is optional, so the report treats "not configured" as fine: nothing is set at all =
+// one passing check saying so (UiPath/Copilot results are unaffected). A half-finished setup
+// (some but not all of apiUrl/username/password) is a failing check, since that is a mistake,
+// not a choice. Otherwise: config source, login, and one folder-resolution check per env.
+// Returned as thunks so runDoctor can count them for progress before running any.
+export function apexProbes(): (() => Promise<DoctorCheck>)[] {
+  let cfg: ApexConfig;
+  try {
+    cfg = resolveApex();
+  } catch (e) {
+    if (!(e instanceof ApexNotConfiguredError)) throw e;
+    const check: DoctorCheck = e.partial
+      ? { name: "apex config", target: "apex", ok: false, detail: e.message }
+      : {
+          name: "apex config",
+          target: "apex",
+          ok: true,
+          detail:
+            "not configured (optional) — set the apex section of the config file, or APEX_API_URL / APEX_USER_NAME / APEX_PASSWORD, to enable Apex",
+        };
+    return [async () => check];
+  }
+  const { sources } = cfg;
+  return [
+    () =>
+      probe(
+        "apex config",
+        cfg.apiUrl,
+        async () =>
+          `apiUrl from ${sources.apiUrl}, username from ${sources.username}, password from ${sources.password}`,
+      ),
+    () =>
+      probe("apex login", cfg.apiUrl, async () => {
+        await apexLogin();
+        return "login OK";
+      }),
+    ...ENVS.map(
+      (env) => () =>
+        probe(`apex ${env} folder`, cfg.apiUrl, async () => {
+          const folder = await resolveApexFolder(env);
+          return `folder '${folder.name}' -> ${folder.id}`;
+        }),
+    ),
+  ];
+}
+
 // Six independent probes: per env, an auth probe, a clinic-scope fingerprint, and an
-// Orchestrator round-trip. Each check is independent; one failure never aborts the
-// others, and config resolution happens inside the probes so one misconfigured env
-// fails one check instead of the whole report.
+// Orchestrator round-trip — plus the Apex probes (apexProbes). Each check is independent;
+// one failure never aborts the others, and config resolution happens inside the probes so
+// one misconfigured env fails one check instead of the whole report.
 export async function runDoctor(opts: {
   profile?: string | null;
   onProgress?: StepProgress;
@@ -60,7 +110,8 @@ export async function runDoctor(opts: {
     }
   };
 
-  const TOTAL_CHECKS = ENVS.length * 3;
+  const apex = apexProbes();
+  const TOTAL_CHECKS = ENVS.length * 3 + apex.length;
   let settled = 0;
   const track = (c: DoctorCheck): DoctorCheck => {
     settled++;
@@ -107,6 +158,7 @@ export async function runDoctor(opts: {
         } visible)`;
       }).then(track),
     ),
+    ...apex.map((run) => run().then(track)),
   ]);
 
   return { account, ok: checks.every((c) => c.ok), checks };

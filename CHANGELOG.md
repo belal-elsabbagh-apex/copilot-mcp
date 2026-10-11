@@ -4,6 +4,64 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-12
+
+One orchestrator tool surface backed by UiPath **and** Apex (the orchestrator replacing UiPath portal
+by portal). Cloud-EHR decides where an order runs, so the tools look at both. Retiring UiPath later is
+deleting `src/uipath/` and one enum value — no further tool renames.
+
+### Added
+
+- **Apex orchestrator backend** (`src/apex/`): reads (jobs, logs + digest, queues, queue items, processes,
+  triggers, order → item → job correlation, fault → GitHub-issue payload) and pre-prod-only writes
+  (`add_queue_item`, `delete_queue_item`, `start_job`, `stop_job`) behind the same tools as UiPath. One HTTP
+  chokepoint that always sends `X-Folder-Id` and refuses any non-GET unless `env=pre_prod`.
+- **`orchestrator` argument** (`uipath` | `apex`) on every job/queue-level tool.
+- **`get_job_artifacts`** (Apex-only): list a job's artifacts and download `job.log`, `trace.zip`, … to
+  `~/.cache/copilot-mcp/artifacts/<jobId>/` (dir mode `0700`, never inside a repo).
+- **`apex` config block** (`apiUrl` = LB host, never CloudFront; `username`/`password`; optional `folderByEnv`;
+  `serverUrlByEnv`/`queueUrl` write-guard limits) with an env fallback: `APEX_API_URL` / `APEX_USER_NAME` /
+  `APEX_PASSWORD` for any field the file omits. MCPB installs only pass `COPILOT_MCP_CONFIG` and must use the file.
+- `doctor` Apex check (config source file|env, login, both folders resolve).
+- `find_stuck_orders` verdict `job-never-started` (Apex job failed before any worker claimed it) and
+  cross-backend correlation using the latest attempt.
+- Resource `copilot://reference/orchestrators`; Apex entries in `safety-rules` and `config-guide`.
+
+### Changed
+
+- **BREAKING — argument renames:** `jobKey`/`jobKeys` → `jobId`/`jobIds` (`get_job`, `get_job_logs`, `build_faulted_job_issue`);
+  `releaseKey` → `processId` and `inputArguments` → `input` (`start_job`); `queueName` / `queueDefId`
+  (`list_queue_items`) and `queueName` (`add_queue_item`) → `queue`; `queueDefinitionId` (`list_triggers`) →
+  `queueId`; `txnId` → `itemId` (`delete_queue_item`, `pull_queue_item`; Apex also takes `queueId`);
+  `crossCheckUipath` → `crossCheck` (`find_stuck_orders`).
+- **BREAKING — `orchestrator` is required** on `list_jobs`, `get_job`, `get_job_logs`, `build_faulted_job_issue`,
+  `list_queues`, `list_queue_items`, `pull_queue_item`, `list_processes`, `list_triggers`, `build_queue_item`,
+  `add_queue_item`, `delete_queue_item`, `start_job`, `stop_job`; optional on `find_order_queue_items` and
+  `find_stuck_orders` (omitted = every registered backend; `folder` only with an explicit `orchestrator`).
+- **BREAKING — output shapes:** every orchestrator tool returns `{ orchestrator, env, … }`; jobs, queue items,
+  queues, processes and triggers are backend-neutral cores with backend-specific fields under `details`
+  (`get_job.job` is a `JobCore`); `find_order_queue_items` `jobKeys` → `jobIds: { uipath?, apex? }`;
+  `find_stuck_orders` per-order `uipath` → `orchestrator`; `get_job_logs` `videoUrl` → `video` (a url on UiPath, an
+  artifact reference on Apex); `jobDeepLinkBase` is gone — every job carries its own `link`. UiPath `state`
+  values and UiPath fault signatures are unchanged; Apex statuses map onto the same vocabulary (`rawState`
+  keeps the original).
+- **BREAKING —** prompt `report-faulted-uipath-jobs` → `report-faulted-jobs` (adds `orchestrator`); other prompts
+  that call changed tools use the new argument names. Resource `copilot://reference/uipath-folders` →
+  `copilot://reference/orchestrators`.
+- Generic code moved out of `src/uipath/` into `src/orchestrator/` (log digest/semantics, safety guard, fault
+  normalization, canonical queue-item content) and `src/shared/` (`rateLimitDelayMs`, `ExpectedError`).
+  UiPath `build_queue_item` output is unchanged, except that the unresolved-automationId warning no longer says "UiPath" and the UiPath config check (`queueUrl`, `addQueueItemPath`, `folderPath`) now runs after the order fetch (same message).
+- The `server.ts` header comment's tool list is re-synced with the registered tools.
+- `find_order_queue_items` with an explicit `orchestrator` now reports that backend's failure in
+  `searchErrors` with `count: 0` instead of failing the call; `list_queue_items` on a queue id outside the
+  portal registry reports the queue's own name instead of an empty `queueName`; the `doctor` Apex login
+  check names no account.
+
+### Removed
+
+- The old UiPath-only argument names and output fields listed above (no aliases),
+  `copilot://reference/uipath-folders`, and the `report-faulted-uipath-jobs` prompt name.
+
 ## [1.33.1] - 2026-09-09
 
 ### Fixed
