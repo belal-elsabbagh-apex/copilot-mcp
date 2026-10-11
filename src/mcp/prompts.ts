@@ -40,20 +40,20 @@ export function registerPrompts(server: McpServer): void {
       return userText(
         `Diagnose Copilot order ${orderUid}${env ? ` (env: ${env})` : ""}. Work through it step by step:\n` +
           `1. Call get_order with orderUid="${orderUid}"${envArg} to read its current normalized state; note its creationDate.\n` +
-          `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg} and since=<that creationDate> to find the ` +
-          `queue item(s) and their jobKeys. If count is 0, the order never reached UiPath — report and stop. If items ` +
-          `exist but jobKeys is empty, it is queued and not yet picked up by a robot — report the item statuses and stop.\n` +
-          `3. Call get_job with env${env ? `="${env}"` : ""} and jobKeys=<every key from step 2> and includeLogDigest=true — ` +
-          `ONE call covering the original run and every retry. Read state, output, fault, logDigest per job.\n` +
-          `4. Derive per-job verdict yourself: output.out_Result when present, else state — Successful -> success, ` +
+          `2. Call find_order_queue_items with orderUid="${orderUid}"${envArg}, orchestrator="uipath" and since=<that creationDate> to find the ` +
+          `queue item(s) and their job ids (jobIds.uipath). If count is 0, the order never reached UiPath — report and stop. If items ` +
+          `exist but jobIds.uipath is empty, it is queued and not yet picked up by a robot — report the item statuses and stop.\n` +
+          `3. Call get_job with env${env ? `="${env}"` : ""}, orchestrator="uipath" and jobIds=<every id from jobIds.uipath in step 2> and includeLogDigest=true — ` +
+          `ONE call covering the original run and every retry. Read job.state, job.details.output, job.fault, logDigest per job.\n` +
+          `4. Derive per-job verdict yourself: job.details.output.out_Result when present, else job.state — Successful -> success, ` +
           `Faulted/Stopped -> failure, anything else -> still running or pending. The newest run is the latest ` +
-          `creationTime; retry cadence is each run's creationTime minus the previous (older) run's endTime.\n` +
+          `job.createdAt; retry cadence is each run's createdAt minus the previous (older) run's endedAt.\n` +
           `5. Compare the queue item's specificContent (from step 2) against the order from step 1 — facility, ` +
           `speciality, DOS, member name/DOB/ID, insurance, CPT/ICD — and call out any divergence between what Copilot ` +
           `sent to UiPath and what the order record says. The full payload is returned for exactly this; only the ` +
           `token field is redacted.\n` +
-          `6. Only if the digest is not enough, call get_job_logs with the failing jobKey and onlyFailures=true ` +
-          `(add fullMessages=true for a full stack trace, includeVideo=true for the recording URL).\n` +
+          `6. Only if the digest is not enough, call get_job_logs with the failing jobId and onlyFailures=true ` +
+          `(add fullMessages=true for a full stack trace, includeVideo=true for the recording).\n` +
           `7. Summarize: order state, whether the automation ran, what failed or is pending, and any payload divergence.` +
           envReminder,
       );
@@ -179,7 +179,7 @@ export function registerPrompts(server: McpServer): void {
         `Triage stuck Copilot orders${p}.\n` +
           `1. Call find_stuck_orders${p} to list orders stuck in a non-terminal status.\n` +
           `2. For the stuck orders whose uipath.verdict warrants a closer look, call find_order_queue_items per order ` +
-          `to get each order's jobKeys, then diagnose them in ONE get_job call with jobKeys=[...] (up to 25 keys per ` +
+          `(orchestrator="uipath") to get each order's jobIds.uipath, then diagnose them in ONE get_job call with orchestrator="uipath" and jobIds=[...] (up to 25 ids per ` +
           `call) and includeLogDigest=true to see whether each job failed, is still running, or never started.\n` +
           `3. Group them by root cause and recommend a remediation per group (retry, re-clone, fix data, escalate).\n` +
           `Do not take any write action without the user's explicit go-ahead.`,
@@ -243,18 +243,23 @@ export function registerPrompts(server: McpServer): void {
     ({ env, since, top, repo }) => {
       const e = env || "prod";
       const repoRef = repo || "Apex-Medical-AI-Inc/RPAPlaywright";
-      const listArgs = [`env="${e}"`, since ? `since="${since}"` : "", top ? `top=${top}` : ""]
+      const listArgs = [
+        `env="${e}"`,
+        'orchestrator="uipath"',
+        since ? `since="${since}"` : "",
+        top ? `top=${top}` : "",
+      ]
         .filter(Boolean)
         .join(", ");
       return userText(
         `File GitHub issues for faulted UiPath jobs in ${e} on ${repoRef}.\n` +
           `This requires a connected GitHub MCP server with write access to ${repoRef}; if none is available, stop and say so.\n` +
           `1. Call list_jobs with ${listArgs}, then keep only jobs whose state is "Faulted" or "Stopped". If none, report that and stop.\n` +
-          `2. For each faulted job, call build_faulted_job_issue with env="${e}" and that job's key${repo ? `, repo="${repo}"` : ""} to get the issue payload (it does NOT post to GitHub).\n` +
+          `2. For each faulted job, call build_faulted_job_issue with env="${e}", orchestrator="uipath" and that job's id as jobId${repo ? `, repo="${repo}"` : ""} to get the issue payload (it does NOT post to GitHub).\n` +
           `3. Using the GitHub MCP server, run the payload's searchQuery to find an existing OPEN issue for this fault (matched by faultSignature):\n` +
           `   - If one exists, add the payload's recurrenceComment to that issue's discussion (do NOT open a duplicate).\n` +
           `   - Otherwise create a new issue with the payload's title, body, and labels.\n` +
-          `4. Report a per-job summary: faulted job key -> created issue (#/url) or commented on existing issue (#/url).\n` +
+          `4. Report a per-job summary: faulted job id -> created issue (#/url) or commented on existing issue (#/url).\n` +
           `Only write to GitHub — never take any UiPath write action.`,
       );
     },

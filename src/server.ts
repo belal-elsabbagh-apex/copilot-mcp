@@ -1,26 +1,33 @@
 #!/usr/bin/env node
 
-// MCP server: EHR Copilot operations (order cloning + Orchestrator execution analysis).
-// Thin wiring layer — src/ is organized by domain (config/, copilot/, uipath/, mcp/, shared/);
+// MCP server: EHR Copilot operations (order cloning + orchestrator execution analysis).
+// Thin wiring layer — src/ is organized by domain (config/, copilot/, orchestrator/, uipath/, mcp/, shared/);
 // tool logic lives in per-domain modules, e.g.:
-//   - config/config.ts     single-file config (copilot creds + uipath args) + validation
-//   - uipath/queue.ts      find_order_queue_items (order -> UiPath queue item(s) + job keys)
-//   - uipath/faults.ts     build_faulted_job_issue (faulted job -> GitHub issue payload)
-// Tools:
+//   - config/config.ts            single-file config (copilot creds + orchestrator args) + validation
+//   - orchestrator/registry.ts    backendFor(orchestrator): the backend every orchestrator tool dispatches through
+//   - orchestrator/queue-item.ts  build_queue_item's canonical order -> queue-item content
+//   - uipath/backend.ts           the UiPath implementation of the orchestrator backend interface
+// Tools (the orchestrator ones take an explicit orchestrator and reply { orchestrator, env, ... }):
 //   - find_clone_candidates    list recent prod orders that are actually cloneable
 //   - delete_preprod_order     delete pre-prod order(s)
 //   - create_preprod_order     mint a fresh pre-prod order from an explicit spec (stops at forReview, never submits)
 //   - submit_preprod_order     submit a pre-prod order sitting at forReview (explicit, separate write)
-//   - build_queue_item         build a UiPath AddQueueItem request from an order (build-only)
-//   - find_order_queue_items   find the UiPath queue item(s) an order flowed through + their job keys (read-only)
-//   - build_faulted_job_issue  build a GitHub issue payload for a faulted UiPath job (read-only; posts nothing)
-//   - list_queues              list queue definitions in a folder (read-only; discovers dev-clone queue ids)
-//   - list_processes           list releases/processes in a folder (read-only; releaseKey + pin verification)
-//   - list_triggers            list triggers in a folder (read-only; verify queue trigger -> release wiring)
-//   - get_job                  fetch one job's state/output by GUID Key, or several via jobKeys (read-only)
-//   - add_queue_item           POST one item to a dev-clone queue (pre_prod-only; test-safety guarded)
-//   - delete_queue_item        delete a 'New' queue item from the dev clone (pre_prod-only; fetch-first)
-//   - start_job                start job(s) for a dev-clone release (pre_prod-only)
+//   - build_queue_item         build an orchestrator queue-item request from an order (build-only)
+//   - find_order_queue_items   find the queue item(s) an order flowed through + their job ids (read-only)
+//   - pull_queue_item          fetch one queue item as a ready-to-run test payload, IsApproved forced false (read-only)
+//   - list_queue_items         browse a portal's queue for triage (read-only)
+//   - list_jobs                list recent jobs in a folder (read-only)
+//   - get_job_logs             fetch one job's logs, or several via jobIds (read-only)
+//   - build_faulted_job_issue  build a GitHub issue payload for a faulted job (read-only; posts nothing)
+//   - list_queues              list queues in a folder (read-only; discovers pre-prod queue ids)
+//   - list_processes           list processes in a folder (read-only; processId + pin verification)
+//   - list_triggers            list triggers in a folder (read-only; verify queue trigger -> process wiring)
+//   - get_job                  fetch one job's state/output by id, or several via jobIds (read-only)
+//   - add_queue_item           POST one item to a pre-prod queue (pre_prod-only; test-safety guarded)
+//   - delete_queue_item        delete a queue item from the pre-prod folder (pre_prod-only)
+//   - start_job                start job(s) for a pre-prod process (pre_prod-only)
+//   - stop_job                 stop or kill a pre-prod job (pre_prod-only; fetch-first)
+//   - find_stuck_orders        scan recent orders for non-terminal ('stuck') statuses, optionally cross-checked against UiPath (read-only)
 //   - diff_settings            diff an account's settings between prod and pre-prod (read-only)
 //   - list_setting_sections    list the settings sections/tags the settings tools can scope to (read-only, no network)
 //   - get_settings             fetch one env's settings sections (read-only)
@@ -30,7 +37,9 @@
 //   - search_orders            filter orders by location/insurance/referredTo/type/auth/date range (read-only)
 //   - get_order_category_stats per-folder order counts for a given filter (read-only)
 //   - get_login_token          log into the Copilot BE for a profile/env and return the session JWT (read-only)
-//   - doctor                   probe the BE + UiPath connections and report what's reachable (read-only)
+//   - list_clinics             list the clinics the support account can switch into (read-only)
+//   - build_mcp_issue          compose a GitHub issue for feedback/bugs on this server (posts nothing)
+//   - doctor                   probe the BE + orchestrator connections and report what's reachable (read-only)
 //
 // See the copilot + copilot-order-mirror skills for the full flow and quirks.
 
@@ -55,7 +64,6 @@ import { runDoctor } from "./copilot/doctor.js";
 import { type MintSpec, mintPreprodOrder } from "./copilot/mirror.js";
 import { orderDocuments } from "./copilot/order-docs.js";
 import { getOrderCategoryStats, searchOrders } from "./copilot/order-search.js";
-import { normalizeOutput } from "./copilot/output-schema.js";
 import { connect, listClinics } from "./copilot/session.js";
 import {
   applySettingsSync,
@@ -85,32 +93,11 @@ import {
   SAFETY_RULES,
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
-import { digestLogs, truncate } from "./orchestrator/log-digest.js";
+import { jobEntriesEnvelope, resolveJobIds } from "./orchestrator/job-batch.js";
 import { buildQueueItemContent } from "./orchestrator/queue-item.js";
-import { msBetween, stringProp } from "./shared/util.js";
-import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./uipath/actions.js";
-import { buildFaultedJobIssue, extractFault, extractTransactionOutcome } from "./uipath/faults.js";
-import { uipathBuildQueueItemPayload } from "./uipath/payload.js";
-import { findOrderQueueItems, listQueue, pullQueueItem } from "./uipath/queue.js";
-import { parseRawMessage } from "./uipath/raw-message.js";
-import {
-  fetchJobLogs,
-  fetchJobLogsForKeys,
-  fetchJobsForKeys,
-  fetchJobVideoUrl,
-  type JobLogFilter,
-  type JobLogResult,
-  type JobLookup,
-  jobDeepLinkBase,
-  listQueueDefinitions,
-  listRecentJobs,
-  listReleases,
-  listTriggers,
-  resolveFolder,
-  scopeForEnv,
-  type UiPathJob,
-  type UiPathLogRow,
-} from "./uipath/uipath.js";
+import { backendFor, ENABLED_ORCHESTRATORS } from "./orchestrator/registry.js";
+import { QUEUE_ITEM_STATUSES } from "./orchestrator/types.js";
+import { stringProp } from "./shared/util.js";
 
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol, so any stray stdout
 // write corrupts it. We therefore never let console.log/info/warn reach stdout:
@@ -129,7 +116,6 @@ console.warn = toStderr;
 const ok = (obj: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }],
 });
-const toMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // A prod order clones to forReview only if it has facility + type + orderNames.
 // Returns the candidate summary, or null if it would get stuck 'incomplete'.
@@ -475,11 +461,30 @@ server.registerTool(
   },
 );
 
+// ---- Orchestrator tools: shared argument schemas ---------------------------
+// Every orchestrator tool takes an explicit env and orchestrator (never defaulted) and
+// replies { orchestrator, env, ...result } so agents read one vocabulary across backends.
+const orchestratorArg = z
+  .enum(ENABLED_ORCHESTRATORS)
+  .describe(`Which orchestrator: ${ENABLED_ORCHESTRATORS.join(" | ")} (required)`);
+const envArg = z
+  .enum(["prod", "pre_prod"])
+  .describe(
+    "Selects the orchestrator's folder: UiPath prod='Authorization', pre_prod='Authorization Dev Clone'; " +
+      "Apex prod='Authorization', pre_prod='Authorization Test' (required)",
+  );
+const writeEnvArg = z
+  .literal("pre_prod")
+  .describe(
+    "Orchestrator writes are pre_prod-only (UiPath dev clone 'Authorization Dev Clone', Apex " +
+      "'Authorization Test'); 'prod' is rejected by the schema (required)",
+  );
+
 // ---- build_queue_item ----------------------------------------------------
 server.registerTool(
   "build_queue_item",
   {
-    title: "Build UiPath AddQueueItem request from an order",
+    title: "Build an orchestrator queue-item request from an order",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -487,10 +492,13 @@ server.registerTool(
       openWorldHint: true,
     }, // BUILD ONLY — fetches an order, never POSTs
     description:
-      "Fetch an EHR Copilot order (prod or pre-prod) and build the UiPath AddQueueItem request " +
-      "payload from its details. BUILD ONLY — never POSTs to UiPath; submit it yourself using " +
-      "meta.postUrl and your own Orchestrator bearer token (see notes). IsApproved is always " +
-      "false. Returns {payload, notes, meta}.",
+      "Fetch an EHR Copilot order (prod or pre-prod) and build the queue-item request payload for " +
+      "the chosen orchestrator from its details. BUILD ONLY — never POSTs to the orchestrator; " +
+      "submit it yourself (for UiPath, to meta.postUrl with your own Orchestrator bearer token — see " +
+      "notes; or hand payload.itemData's Name/Reference/SpecificContent to add_queue_item). " +
+      "IsApproved is always false. The payload's wire format is the orchestrator's own: UiPath " +
+      "carries the array fields and callbackContext as JSON strings, Apex keeps native types. " +
+      "Returns {payload, notes, meta}.",
     inputSchema: {
       orderUid: z.string().min(8).describe("Order UID to fetch (must exist in the chosen env)"),
       env: z
@@ -500,26 +508,27 @@ server.registerTool(
         .string()
         .min(1)
         .describe("Credential profile / account name from config (required)"),
+      orchestrator: orchestratorArg,
       automationId: z
         .string()
         .min(1)
         .optional()
         .describe(
-          "The account's real UiPath automation id (from its UiPath asset). Usually unnecessary — " +
+          "The account's real automation id (from its orchestrator asset). Usually unnecessary — " +
             "when omitted, it's resolved from `profile` against the known account table; only " +
             "needed to override that or for an account not yet in the table (falls back to a " +
             "placeholder random UUID + warning note in that case).",
         ),
     },
   },
-  async ({ orderUid, env, profile, automationId }, extra) => {
+  async ({ orderUid, env, profile, orchestrator, automationId }, extra) => {
     try {
       const built = await withHeartbeat(
         extra,
         "building queue item",
         buildQueueItemContent(orderUid, { profile, env, automationId: automationId ?? null }),
       );
-      const { payload, notes, meta } = uipathBuildQueueItemPayload({
+      const { payload, notes, meta } = backendFor(orchestrator).buildQueueItemPayload({
         env,
         queueName: built.queueName,
         orderUid,
@@ -537,7 +546,7 @@ server.registerTool(
 server.registerTool(
   "find_order_queue_items",
   {
-    title: "Find the UiPath queue item(s) a Copilot order flowed through",
+    title: "Find the queue item(s) a Copilot order flowed through",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -545,51 +554,61 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Given a Copilot orderUid, find the UiPath Orchestrator queue item(s) it flowed through " +
-      "and their deduped ExecutorJobKeys — every order flows through a queue item carrying the " +
-      "orderUid + the ExecutorJobKey of the job that ran it, so this reaches faulted/still-running " +
-      "consumer jobs an OutputArguments scan can't. READ-ONLY. The item's full SpecificContent is " +
-      "returned deliberately, in full (member/clinical fields visible) — the point is divergence " +
-      "analysis: comparing what Copilot actually sent to UiPath against the order record from " +
-      "get_order. Only the JWT `token` is redacted (a live credential, opaque, useless for " +
-      "divergence). Feed `jobKeys` straight into get_job's jobKeys batch with " +
-      "includeLogDigest=true to diagnose every run and retry in one call. `count === 0` means the " +
-      "order never reached UiPath; `jobKeys: []` with items present means it is queued but not yet " +
-      "picked up by a robot. Jobs live in a per-env UiPath folder (env='prod' -> 'Authorization', " +
-      "env='pre_prod' -> 'Authorization Dev Clone'); pass env (required) or an explicit folder. " +
-      "`since` narrows the queue-item search (automatically retried unbounded if nothing matches) " +
-      "— pass the order's creationDate from get_order. Returns {orderUid, env, folder, searchMode, " +
-      "scanned, count, jobKeys, items:[{id,reference,status,executorJobKey,processingExceptionType," +
-      "retryNumber,creationTime,specificContent,queueDefinitionId}], notes?, searchError?}.",
+      "Given a Copilot orderUid, find the orchestrator queue item(s) it flowed through and the " +
+      "ids of the jobs that ran them — every order flows through a queue item carrying the " +
+      "orderUid, so this reaches faulted/still-running consumer jobs an OutputArguments scan can't. " +
+      "READ-ONLY. Each item's full specificContent is returned deliberately, in full " +
+      "(member/clinical fields visible) — the point is divergence analysis: comparing what Copilot " +
+      "actually sent to the orchestrator against the order record from get_order. Only the JWT " +
+      "`token` is redacted ('[redacted]': a live credential, opaque, useless for divergence). Feed " +
+      "`jobIds[orchestrator]` straight into get_job's jobIds batch with includeLogDigest=true to " +
+      "diagnose every run and retry in one call. `count === 0` means the order never reached the " +
+      "orchestrator; an empty jobIds list with items present means it is queued but not yet " +
+      "picked up. Pass env (required) or, with it, an explicit folder name override. `since` " +
+      "narrows the search (automatically retried unbounded if nothing matches) — pass the order's " +
+      "creationDate from get_order. Returns {orchestrator, env, orderUid, folder, searchMode, " +
+      "scanned, count, jobIds:{<orchestrator>:[id…]}, items:[{orchestrator,queueId,queueName," +
+      "itemId,reference,orderUid,status,rawStatus,exceptionType,createdAt,endedAt," +
+      "jobs:[{orchestrator,id,state,neverStarted}],specificContent,details}], notes?, searchError?}.",
     inputSchema: {
+      env: envArg,
       orderUid: z.string().min(8).describe("Copilot orderUid to correlate"),
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      folder: z
-        .string()
-        .optional()
-        .describe("Explicit UiPath folder path override (wins over env)"),
+      orchestrator: orchestratorArg,
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
       since: z
         .string()
         .optional()
         .describe(
-          "ISO lower bound on the queue item's CreationTime — pass the order's creationDate " +
+          "ISO lower bound on the queue item's creation time — pass the order's creationDate " +
             "from get_order; retried without the bound if nothing matches",
         ),
       top: z.number().int().min(1).max(500).optional().default(50),
       includeSpecificContent: z.boolean().optional().default(true),
     },
   },
-  async ({ orderUid, env, folder, since, top, includeSpecificContent }, extra) => {
+  async ({ env, orderUid, orchestrator, folder, since, top, includeSpecificContent }, extra) => {
     try {
-      return ok(
-        await withHeartbeat(
-          extra,
-          "Orchestrator",
-          findOrderQueueItems({ orderUid, env, folder, since, top, includeSpecificContent }),
-        ),
+      const result = await withHeartbeat(
+        extra,
+        "Orchestrator",
+        backendFor(orchestrator).findOrderQueueItems({
+          env,
+          orderUid,
+          folder,
+          since,
+          top,
+          includeSpecificContent,
+        }),
       );
+      const jobIds = [...new Set(result.items.flatMap((i) => i.jobs.map((j) => j.id)))];
+      return ok({
+        orchestrator,
+        env,
+        orderUid,
+        ...result,
+        count: result.items.length,
+        jobIds: { [orchestrator]: jobIds },
+      });
     } catch (e) {
       return toolError("find_order_queue_items", e, VERSION);
     }
@@ -720,7 +739,7 @@ server.registerResource(
 server.registerTool(
   "pull_queue_item",
   {
-    title: "Pull a UiPath queue item as a test payload",
+    title: "Pull a queue item as a test payload",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -728,46 +747,54 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch a single UiPath queue item (by Orchestrator URL or transaction id) and return its " +
-      "SpecificContent as a ready-to-run test payload, mapped to its portal. READ-ONLY. " +
-      "IsApproved is ALWAYS forced false so a test run can never submit a real auth. env is " +
-      "derived from the URL's fid when a url is given; pulling by txnId requires env. Returns " +
-      "{item, env, queueName, portal, specificContent, suggestedFilename}.",
+      "Fetch a single orchestrator queue item and return its specificContent as a ready-to-run " +
+      "test payload, mapped to its portal. READ-ONLY. IsApproved is ALWAYS forced false so a test " +
+      "run can never submit a real auth. UiPath: pass `url` (an Orchestrator queue-item URL — env " +
+      "is derived from its fid) or `itemId` + `env` (+ optional `folderId`). Apex: pass `env` + " +
+      "`queueId` + `itemId`. Returns {orchestrator, env, item:QueueItemCore (specificContent " +
+      "present), portal:{matched,key,portalDir,buildArtifact,family}, isApprovedForced, " +
+      "suggestedFilename, queueNameError?}.",
     inputSchema: {
+      orchestrator: orchestratorArg,
+      env: z
+        .enum(["prod", "pre_prod"])
+        .optional()
+        .describe(
+          "Folder/env; UiPath derives it from the URL's fid when a url is given, otherwise required",
+        ),
       url: z
         .string()
         .url()
         .optional()
-        .describe("Orchestrator queue-item URL (copy from the UI; fid + txn id are parsed out)"),
-      txnId: z
-        .number()
-        .int()
-        .positive()
+        .describe(
+          "UiPath only: Orchestrator queue-item URL (copy from the UI; fid + item id are parsed out)",
+        ),
+      queueId: z
+        .string()
+        .min(1)
         .optional()
-        .describe("Transaction/item id (use instead of url)"),
-      env: z
-        .enum(["prod", "pre_prod"])
+        .describe(
+          "Apex: the queue's id (from list_queues); UiPath derives the queue from the item",
+        ),
+      itemId: z
+        .string()
+        .min(1)
         .optional()
-        .describe("Folder/env; derived from the URL fid when a url is given, otherwise required"),
+        .describe("Queue item id (UiPath numeric id as a string | Apex uuid); use instead of url"),
       folderId: z
         .string()
         .optional()
-        .describe("Numeric folder id (OrganizationUnitId) override when no url is given"),
+        .describe("UiPath: numeric folder id (OrganizationUnitId) override when no url is given"),
     },
   },
-  async ({ url, txnId, env, folderId }, extra) => {
+  async ({ orchestrator, env, url, queueId, itemId, folderId }, extra) => {
     try {
-      if (!url && !env)
-        throw new Error("env is required when pulling by txnId (no url to derive it from)");
-      const args = url
-        ? ({ source: "url", url } as const)
-        : ({
-            source: "txn",
-            txnId: txnId ?? 0,
-            env: env as "prod" | "pre_prod",
-            folderId: folderId ?? "",
-          } as const);
-      return ok(await withHeartbeat(extra, "Orchestrator", pullQueueItem(args)));
+      const result = await withHeartbeat(
+        extra,
+        "Orchestrator",
+        backendFor(orchestrator).pullQueueItem({ env, url, queueId, itemId, folderId }),
+      );
+      return ok({ orchestrator, ...result });
     } catch (e) {
       return toolError("pull_queue_item", e, VERSION);
     }
@@ -778,7 +805,7 @@ server.registerTool(
 server.registerTool(
   "list_queue_items",
   {
-    title: "Browse a UiPath queue",
+    title: "Browse a queue",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -786,51 +813,38 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "List items in a portal's UiPath queue for triage, newest first. Resolve by queueName " +
-      "(prod queue ids only — pass queueDefId for dev) or an explicit queueDefId, optionally " +
-      "filtered by status. READ-ONLY, PHI-light projection (id/status/reference/robotName + member " +
-      "id/name). Returns {env, queueName, queueDefinitionId, count, items[]}.",
+      "List items in a portal's queue for triage, newest first. `queue` is a portal key/alias " +
+      "(e.g. 'PMG', 'MOLINA' — resolved to that portal's submit or sync queue) or the " +
+      "orchestrator's own queue id (from list_queues; required for pre_prod UiPath queues, whose " +
+      "ids differ from the static portal registry). Optionally filter by status. READ-ONLY, " +
+      "PHI-light projection (specificContent is null; member id/name live under each item's " +
+      "details). Returns {orchestrator, env, queueId, queueName, count, items:[{orchestrator," +
+      "queueId,queueName,itemId,reference,orderUid,status,rawStatus,exceptionType,createdAt," +
+      "endedAt,jobs,specificContent:null,details}]}.",
     inputSchema: {
-      queueName: z
+      env: envArg,
+      orchestrator: orchestratorArg,
+      queue: z
         .string()
-        .optional()
-        .describe("Portal/queue name, e.g. 'PMG', 'MOLINA' (resolves to its prod queue def id)"),
-      queueDefId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Explicit QueueDefinitionId (required for dev-clone queues)"),
+        .min(1)
+        .describe("Portal key/alias, e.g. 'PMG', or the orchestrator's queue id (see list_queues)"),
       queueKind: z
         .enum(["submit", "sync"])
         .optional()
-        .describe("Which queue for the named portal (default submit)"),
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("Folder/env (queueName ids are prod; use queueDefId for pre_prod) (required)"),
-      status: z
-        .enum(["New", "InProgress", "Failed", "Successful", "Retried", "Abandoned", "Deleted"])
-        .optional()
-        .describe("Optional UiPath queue-item status filter"),
+        .default("submit")
+        .describe("Which queue for a portal key (default submit)"),
+      status: z.enum(QUEUE_ITEM_STATUSES).optional().describe("Optional queue-item status filter"),
       top: z.number().int().min(1).max(200).optional().default(50).describe("Max items to return"),
     },
   },
-  async ({ queueName, queueDefId, queueKind, env, status, top }, extra) => {
+  async ({ env, orchestrator, queue, queueKind, status, top }, extra) => {
     try {
-      return ok(
-        await withHeartbeat(
-          extra,
-          "Orchestrator",
-          listQueue({
-            queueName: queueName ?? "",
-            queueDefId: queueDefId ?? 0,
-            queueKind: queueKind ?? "submit",
-            env,
-            status: status ?? "",
-            top,
-          }),
-        ),
+      const result = await withHeartbeat(
+        extra,
+        "Orchestrator",
+        backendFor(orchestrator).listQueueItems({ env, queue, queueKind, status, top }),
       );
+      return ok({ orchestrator, env, count: result.items.length, ...result });
     } catch (e) {
       return toolError("list_queue_items", e, VERSION);
     }
@@ -841,7 +855,7 @@ server.registerTool(
 server.registerTool(
   "list_jobs",
   {
-    title: "List recent UiPath Orchestrator jobs",
+    title: "List recent orchestrator jobs",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -849,49 +863,39 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "List the most recent Orchestrator jobs in a folder (newest first), without order " +
-      "correlation. READ-ONLY. To diagnose a job from the list, call get_job with " +
-      "includeLogDigest=true (condensed failure digest + fault signature) — get_job also takes a " +
-      "jobKeys array to diagnose several jobs from this list in one call. Returns {env, folder, count, " +
-      "jobDeepLinkBase, jobs:[{id,key,state,processName,processVersion,robotName,creationTime,endTime," +
-      'durationMs}]}. Build a job\'s Orchestrator link by substituting its key for "{key}" in jobDeepLinkBase.',
+      "List the most recent jobs in an env's folder (newest first), without order correlation. " +
+      "READ-ONLY. To diagnose a job from the list, call get_job with includeLogDigest=true " +
+      "(condensed failure digest + fault signature) — get_job also takes a jobIds array to " +
+      "diagnose several jobs from this list in one call. Returns {orchestrator, env, folder, " +
+      "count, jobs:[{orchestrator,id,state (dashboard label),rawState (the backend's own status " +
+      "string),terminal,process:{id,name,version},queueItem:{queueId,itemId,reference}|null," +
+      "createdAt,startedAt,endedAt,durationMs,attempt,retryOfJobId,fault,link (dashboard deep " +
+      "link),details}]}.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
-      since: z.string().optional().describe("ISO date lower bound on CreationTime"),
+      env: envArg,
+      orchestrator: orchestratorArg,
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
+      since: z.string().optional().describe("ISO date lower bound on creation time"),
       top: z.number().int().min(1).max(500).optional().default(50).describe("Max jobs to return"),
       processName: z
         .string()
         .optional()
-        .describe("Substring filter on the process (ReleaseName), e.g. 'OPTUM'"),
+        .describe("Substring filter on the process name, e.g. 'OPTUM'"),
     },
   },
-  async ({ env, folder, since, top, processName }, extra) => {
+  async ({ env, orchestrator, folder, since, top, processName }, extra) => {
     try {
-      const resolved = resolveFolder(env, folder);
-      const jobs = await withHeartbeat(
+      const result = await withHeartbeat(
         extra,
         "Orchestrator",
-        listRecentJobs(since, top, resolved, processName),
+        backendFor(orchestrator).listJobs({ env, folder, since, top, processName }),
       );
       return ok({
+        orchestrator,
         env,
-        folder: resolved,
-        count: jobs.length,
-        jobDeepLinkBase: jobDeepLinkBase(),
-        jobs: jobs.map((j) => ({
-          id: j.Id,
-          key: j.Key,
-          state: j.State,
-          processName: j.ReleaseName,
-          processVersion: j.ProcessVersion ?? "",
-          robotName: j.RobotName ?? "",
-          creationTime: j.CreationTime,
-          endTime: j.EndTime,
-          durationMs: msBetween(j.CreationTime, j.EndTime),
-        })),
+        folder: result.folder,
+        count: result.jobs.length,
+        jobs: result.jobs,
       });
     } catch (e) {
       return toolError("list_jobs", e, VERSION);
@@ -903,7 +907,7 @@ server.registerTool(
 server.registerTool(
   "get_job_logs",
   {
-    title: "Get a UiPath job's robot logs",
+    title: "Get a job's robot logs",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -911,69 +915,61 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch robot execution logs (oldest first, capped 500 per job) for a job by its GUID Key, " +
-      "optionally with the video-recording URL. Pass jobKeys (up to 25) instead of jobKey to fetch " +
-      "logs for several jobs in ONE call — RobotLogs has no server-side way to combine JobKeys " +
-      "(confirmed: OData 'in'/'or' across JobKey silently misbehave), so this still issues one " +
-      "HTTP call per job under bounded concurrency, but collapses the MCP round-trips: use this " +
-      "instead of looping get_job_logs once per job. All row filters are opt-in and apply to every " +
-      "job in the batch — by default the full (capped) log set is returned, but each Message is " +
-      "truncated to 400 chars (pass fullMessages=true for the untruncated text, e.g. to read a " +
-      "complete stack trace). READ-ONLY. " +
-      "A jobKeys batch never fails as a whole on one job's error — that job's entry carries " +
-      "error instead, the rest still return. videoUrl is always best-effort: a failure there " +
-      "surfaces as videoError, never blocks the logs. " +
-      "includeRawFields=true parses each row's RawMessage (Orchestrator's structured JSON behind " +
-      "the free-text Message — benchmarked ~3x the response size on real jobs, off by default) " +
-      "into a `raw` object: transactionId, queueName, processingExceptionType/Reason, " +
-      "transactionExecutionTimeSec, " +
-      "totalExecutionTimeInSeconds, queueItemPriority, queueItemReviewStatus (a snapshot at log time, " +
-      "not live queue-item state), businessOperationId, activityInfo (Debugging-log only, rarely " +
-      "present), and custom (any process-specific field added via Studio's Add Log Fields activity, " +
-      "returned verbatim under its own name) — most fields are null on most rows; the transaction " +
-      "fields only populate on the Transaction Started/Ended rows and totalExecutionTime* only on " +
-      "the final execution-ended row. `raw` is null when a row's RawMessage is absent or unparseable. " +
-      "Returns {jobKey,folder,logs[],returned,totalMatching?,truncated,videoUrl?,videoError?} " +
-      "for a single jobKey, or {env,folder,count,jobs:[{jobKey,logs[],returned,totalMatching?," +
-      "truncated,error?,videoUrl?,videoError?}]} for jobKeys.",
+      "Fetch execution logs (oldest first, capped 500 per job) for a job by its id, optionally " +
+      "with the video recording. Pass jobIds (up to 25) instead of jobId to fetch logs for several " +
+      "jobs in ONE call — use this instead of looping get_job_logs once per job. All row filters " +
+      "are opt-in and apply to every job in the batch — by default the full (capped) log set is " +
+      "returned, but each Message is truncated to 400 chars (pass fullMessages=true for the " +
+      "untruncated text, e.g. to read a complete stack trace). READ-ONLY. A jobIds batch never " +
+      "fails as a whole on one job's error — that job's entry carries error instead, the rest " +
+      "still return. `video` is always best-effort: a failure there surfaces as videoError, never " +
+      "blocks the logs; it is {kind:'url',url} when the orchestrator serves a link, or " +
+      "{kind:'artifact',artifact,sizeBytes,fetchWith:'get_job_artifacts'} when the recording is a " +
+      "job artifact to download. A job whose logs cannot be read carries logsUnavailable " +
+      "{reason: running | never-started | artifact-policy, detail}. includeRawFields=true adds " +
+      "each row's backend-specific structured fields as `raw` (UiPath: the parsed RawMessage — " +
+      "transactionId, queueName, processingExceptionType/Reason, execution timings, any custom " +
+      "Add-Log-Fields data, ~3x the response size on real jobs; Apex: the bot's NDJSON `fields`); " +
+      "`raw` is null when a row has none. Returns {orchestrator, env, folder, jobId, logs:[{Level," +
+      "Message,TimeStamp,raw?}], returned, totalMatching?, truncated, logsUnavailable?, video?, " +
+      "videoError?, error?} for a single jobId, or {orchestrator, env, folder, count, jobs:[{jobId," +
+      "logs,returned,totalMatching?,truncated,logsUnavailable?,error?,video?,videoError?}]} for jobIds.",
     inputSchema: {
-      jobKey: z
+      env: envArg,
+      orchestrator: orchestratorArg,
+      jobId: z
         .string()
         .min(1)
         .optional()
         .describe(
-          "The job's GUID Key (from find_order_queue_items / list_jobs). Provide this OR " +
-            "jobKeys, not both",
+          "The job's id (from find_order_queue_items / list_jobs). Provide this OR jobIds, not both",
         ),
-      jobKeys: z
+      jobIds: z
         .array(z.string().min(1))
         .min(1)
         .max(25)
         .optional()
         .describe(
-          "Batch: fetch logs for several jobs in one call. Provide this OR jobKey, not both",
+          "Batch: fetch logs for several jobs in one call. Provide this OR jobId, not both",
         ),
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
       includeVideo: z
         .boolean()
         .optional()
         .default(false)
-        .describe("Also fetch the job's video-recording URL (extra round-trip)"),
+        .describe("Also fetch the job's video recording (extra round-trip)"),
       minLevel: z
         .enum(["warn", "error"])
         .optional()
         .describe(
           "Only logs at or above this level (warn=Warn/Error/Fatal, error=Error/Fatal). " +
-            "Filtered server-side. Default: all levels",
+            "Default: all levels",
         ),
       contains: z
         .string()
         .min(1)
         .optional()
-        .describe("Only logs whose Message contains this substring (server-side, case-sensitive)"),
+        .describe("Only logs whose Message contains this substring (case-sensitive)"),
       onlyFailures: z
         .boolean()
         .optional()
@@ -1003,17 +999,17 @@ server.registerTool(
         .optional()
         .default(false)
         .describe(
-          "Parse each row's RawMessage into a `raw` object (transactionId, queueName, " +
-            "processingExceptionType/Reason, timing, custom Add-Log-Fields data, …) — see the " +
-            "tool description. Off by default: benchmarked ~3x the response size on real jobs.",
+          "Attach each row's backend-specific structured fields as `raw` — see the tool " +
+            "description. Off by default: UiPath's parsed RawMessage is ~3x the response size.",
         ),
     },
   },
   async (
     {
-      jobKey,
-      jobKeys,
       env,
+      orchestrator,
+      jobId,
+      jobIds,
       folder,
       includeVideo,
       minLevel,
@@ -1026,56 +1022,21 @@ server.registerTool(
     extra,
   ) => {
     try {
-      if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
-      if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
-      const resolved = resolveFolder(env, folder);
-      const filter: JobLogFilter = {
-        onlyFailures,
-        includeRawFields,
-        ...(minLevel !== undefined ? { minLevel } : {}),
-        ...(contains !== undefined ? { contains } : {}),
-        ...(tail !== undefined ? { tail } : {}),
-      };
-      const keys = jobKeys ?? [jobKey ?? ""];
-      const byKey = await fetchJobLogsForKeys(keys, resolved, filter, stepProgress(extra));
-      const jobs = await Promise.all(
-        keys.map(async (key) => {
-          const result: JobLogResult = byKey[key] ?? { logs: [], totalMatching: null };
-          // A single explicit jobKey lookup fails like any other tool error; a
-          // jobKeys batch keeps going and attaches the failure to just this key.
-          if (result.error && !jobKeys) throw result.error;
-          const { logs, totalMatching } = result;
-          const entry: Record<string, unknown> = {
-            jobKey: key,
-            // RawMessage (the raw JSON text) never leaks into the output — only the
-            // parsed `raw` object does, and only when includeRawFields was requested.
-            logs: logs.map((l) => ({
-              Level: l.Level,
-              Message: fullMessages ? l.Message : truncate(l.Message),
-              TimeStamp: l.TimeStamp,
-              ...(includeRawFields ? { raw: parseRawMessage(l) } : {}),
-            })),
-            returned: logs.length,
-            // truncated = the 500-row fetch window didn't cover every matching row
-            // (a requested `tail` shorter than the total is not truncation).
-            truncated: totalMatching !== null && totalMatching > 500,
-          };
-          if (totalMatching !== null) entry["totalMatching"] = totalMatching;
-          if (result.error) entry["error"] = toMessage(result.error);
-          // Video is a secondary attachment, always best-effort — never fails the
-          // primary logs result, single jobKey or batch alike.
-          if (includeVideo) {
-            try {
-              entry["videoUrl"] = await fetchJobVideoUrl(key, resolved);
-            } catch (e) {
-              entry["videoError"] = toMessage(e);
-            }
-          }
-          return entry;
-        }),
+      const { ids, batch } = resolveJobIds(jobId, jobIds);
+      const result = await backendFor(orchestrator).getJobLogs(
+        {
+          env,
+          jobIds: ids,
+          batch,
+          folder,
+          filter: { minLevel, contains, onlyFailures, tail },
+          fullMessages,
+          includeRawFields,
+          includeVideo,
+        },
+        stepProgress(extra),
       );
-      if (jobKeys) return ok({ env, folder: resolved, count: jobs.length, jobs });
-      return ok({ ...jobs[0], folder: resolved }); // single-jobKey call keeps the original flat shape
+      return ok(jobEntriesEnvelope(orchestrator, env, result.folder, batch, result.entries));
     } catch (e) {
       return toolError("get_job_logs", e, VERSION);
     }
@@ -1086,7 +1047,7 @@ server.registerTool(
 server.registerTool(
   "build_faulted_job_issue",
   {
-    title: "Build a GitHub issue payload for a faulted UiPath job",
+    title: "Build a GitHub issue payload for a faulted job",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1094,20 +1055,20 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Read a faulted UiPath job (by its GUID Key) and its robot logs, and BUILD a ready-to-post " +
-      "GitHub issue payload for the RPA repo. READ-ONLY: this does NOT post to GitHub — it returns " +
-      "{repo,title,body,labels,faultSignature,searchQuery,recurrenceComment,found,logsError?}. The " +
-      "logs fetch is best-effort: a failure surfaces as logsError (issue still built from the job " +
-      "alone) instead of failing the whole call. The caller (the report-faulted-uipath-jobs prompt) " +
-      "hands this to the host's GitHub MCP server: search with `searchQuery`, then add " +
-      "`recurrenceComment` to the matching open issue, or create_issue with title/body/labels. " +
-      "`faultSignature` is the normalized error (stable across reruns) used to dedupe.",
+      "Read a faulted job (by its id) and its logs, and BUILD a ready-to-post GitHub issue " +
+      "payload for the RPA repo. READ-ONLY: this does NOT post to GitHub — it returns " +
+      "{orchestrator,env,repo,title,body,labels,faultSignature,searchQuery,recurrenceComment," +
+      "found,logsError?}. The logs fetch is best-effort: a failure surfaces as logsError (issue " +
+      "still built from the job alone) instead of failing the whole call. The caller (the " +
+      "report-faulted-uipath-jobs prompt) hands this to the host's GitHub MCP server: search " +
+      "with `searchQuery`, then add `recurrenceComment` to the matching open issue, or " +
+      "create_issue with title/body/labels. `faultSignature` is the normalized error (stable " +
+      "across reruns) used to dedupe.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      jobKey: z.string().min(1).describe("The faulted job's GUID Key (from list_jobs)"),
-      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+      env: envArg,
+      orchestrator: orchestratorArg,
+      jobId: z.string().min(1).describe("The faulted job's id (from list_jobs)"),
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
       repo: z
         .string()
         .optional()
@@ -1115,9 +1076,16 @@ server.registerTool(
       labels: z.array(z.string()).optional().describe("Issue labels (default uipath-fault, bug)"),
     },
   },
-  async ({ env, jobKey, folder, repo, labels }) => {
+  async ({ env, orchestrator, jobId, folder, repo, labels }) => {
     try {
-      return ok(await buildFaultedJobIssue(env, jobKey, { folder, repo, labels }));
+      const result = await backendFor(orchestrator).buildFaultedJobIssue({
+        env,
+        jobId,
+        folder,
+        repo,
+        labels,
+      });
+      return ok({ orchestrator, env, ...result });
     } catch (e) {
       return toolError("build_faulted_job_issue", e, VERSION);
     }
@@ -1128,7 +1096,7 @@ server.registerTool(
 server.registerTool(
   "list_queues",
   {
-    title: "List UiPath queue definitions in a folder",
+    title: "List queues in a folder",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1136,24 +1104,24 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "List the queue definitions (the queues themselves) in an env's Orchestrator folder, " +
-      "sorted by name. READ-ONLY. Use this to discover a queueDefId for list_queue_items / " +
-      "the exact queue Name for add_queue_item — dev-clone (pre_prod) queue ids differ from " +
-      "the prod ids in the static portal registry. Queue CREATION is deliberately not a tool " +
-      "(rare one-time setup — do it in the Orchestrator UI). Returns " +
-      "{env, count, queues:[{id,name,description,creationTime}]}.",
+      "List the queues (the queues themselves) in an env's folder, sorted by name. READ-ONLY. Use " +
+      "this to discover a queue id for list_queue_items / pull_queue_item and the exact queue " +
+      "name for add_queue_item — pre_prod queue ids differ from the prod ids in the static portal " +
+      "registry. Queue CREATION is deliberately not a tool (rare one-time setup — do it in the " +
+      "orchestrator UI). Returns {orchestrator, env, count, queues:[{orchestrator,id,name," +
+      "processId,active,details}]}.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
+      env: envArg,
+      orchestrator: orchestratorArg,
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
       nameContains: z.string().optional().describe("Substring filter on the queue name"),
       top: z.number().int().min(1).max(200).optional().default(100).describe("Max queues"),
     },
   },
-  async ({ env, nameContains, top }) => {
+  async ({ env, orchestrator, folder, nameContains, top }) => {
     try {
-      const queues = await listQueueDefinitions(scopeForEnv(env), nameContains ?? "", top);
-      return ok({ env, count: queues.length, queues });
+      const queues = await backendFor(orchestrator).listQueues({ env, folder, nameContains, top });
+      return ok({ orchestrator, env, count: queues.length, queues });
     } catch (e) {
       return toolError("list_queues", e, VERSION);
     }
@@ -1164,7 +1132,7 @@ server.registerTool(
 server.registerTool(
   "list_processes",
   {
-    title: "List UiPath releases (processes) in a folder",
+    title: "List processes in a folder",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1172,23 +1140,28 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "List the releases ('processes' in the Orchestrator UI) in an env's folder, sorted by " +
-      "name. READ-ONLY. `key` is the ReleaseKey that start_job takes; `processVersion` is the " +
-      "pinned package version — a job resolves it at START, so verify the pin here right before " +
-      "starting (repinning is manual in the Orchestrator UI; this MCP never repins). Returns " +
-      "{env, count, processes:[{id,key,name,processKey,processVersion,isLatestVersion}]}.",
+      "List the processes (UiPath releases / Apex workflows) in an env's folder, sorted by name. " +
+      "READ-ONLY. `id` is what start_job takes as processId; `version` is the pinned package " +
+      "version — a UiPath job resolves it at START, so verify the pin here right before starting " +
+      "(repinning is manual in the orchestrator UI; this MCP never repins). Returns " +
+      "{orchestrator, env, count, processes:[{orchestrator,id,name,package,version,active,details}]}.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      nameContains: z.string().optional().describe("Substring filter on the release name"),
-      top: z.number().int().min(1).max(200).optional().default(100).describe("Max releases"),
+      env: envArg,
+      orchestrator: orchestratorArg,
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
+      nameContains: z.string().optional().describe("Substring filter on the process name"),
+      top: z.number().int().min(1).max(200).optional().default(100).describe("Max processes"),
     },
   },
-  async ({ env, nameContains, top }) => {
+  async ({ env, orchestrator, folder, nameContains, top }) => {
     try {
-      const processes = await listReleases(scopeForEnv(env), nameContains ?? "", top);
-      return ok({ env, count: processes.length, processes });
+      const processes = await backendFor(orchestrator).listProcesses({
+        env,
+        folder,
+        nameContains,
+        top,
+      });
+      return ok({ orchestrator, env, count: processes.length, processes });
     } catch (e) {
       return toolError("list_processes", e, VERSION);
     }
@@ -1199,7 +1172,7 @@ server.registerTool(
 server.registerTool(
   "list_triggers",
   {
-    title: "List UiPath triggers (queue + time) in a folder",
+    title: "List triggers (queue + time) in a folder",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1207,90 +1180,35 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "List the triggers (ProcessSchedules) in an env's folder. READ-ONLY. Queue triggers carry " +
-      "a queueDefinitionId + the releaseId/releaseName they start — use this to verify a queue's " +
-      "trigger points at YOUR dev release before enqueueing (cross-check releaseId against " +
-      "list_processes). Time triggers have queueDefinitionId 0. Returns {env, count, " +
-      "triggers:[{id,name,enabled,releaseId,releaseKey,releaseName,queueDefinitionId," +
-      "queueDefinitionName,itemsActivationThreshold,maxJobsForActivation}]}.",
+      "List the triggers (queue + time schedules) in an env's folder. READ-ONLY. Queue triggers " +
+      "carry a queueId + the processId they start — use this to verify a queue's trigger points " +
+      "at YOUR pre-prod process before enqueueing (cross-check processId against list_processes). " +
+      "Time triggers have queueId null and a cron. Returns {orchestrator, env, count, " +
+      "triggers:[{orchestrator,id,name,kind:'queue'|'time',processId,queueId,enabled,cron," +
+      "details}]}.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      queueDefinitionId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Only triggers watching this queue"),
+      env: envArg,
+      orchestrator: orchestratorArg,
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
+      queueId: z.string().min(1).optional().describe("Only triggers watching this queue"),
       top: z.number().int().min(1).max(200).optional().default(100).describe("Max triggers"),
     },
   },
-  async ({ env, queueDefinitionId, top }) => {
+  async ({ env, orchestrator, folder, queueId, top }) => {
     try {
-      let triggers = await listTriggers(scopeForEnv(env), top);
-      if (queueDefinitionId) {
-        triggers = triggers.filter((t) => t.queueDefinitionId === queueDefinitionId);
-      }
-      return ok({ env, count: triggers.length, triggers });
+      const triggers = await backendFor(orchestrator).listTriggers({ env, folder, queueId, top });
+      return ok({ orchestrator, env, count: triggers.length, triggers });
     } catch (e) {
       return toolError("list_triggers", e, VERSION);
     }
   },
 );
 
-// get_job's per-key result: `error` is a real lookup failure (job resolution
-// itself threw); `logDigestError` is the includeLogDigest attachment failing —
-// always best-effort, never fatal on its own.
-interface JobKeyResult {
-  key: string;
-  found: boolean;
-  job?: Record<string, unknown>;
-  error?: string;
-  logDigestError?: string;
-}
-
-// Shape one job's detail (output parsed, optional fault + log digest) — shared by
-// get_job's single-jobKey and batched jobKeys paths so they stay in sync.
-function shapeJobDetail(
-  job: UiPathJob,
-  logs: UiPathLogRow[],
-  includeLogDigest: boolean,
-): Record<string, unknown> {
-  let output: unknown = null;
-  if (job.OutputArguments) {
-    try {
-      const parsed = JSON.parse(job.OutputArguments) as Record<string, unknown>;
-      output = Object.fromEntries(normalizeOutput(parsed).fields);
-    } catch {
-      output = job.OutputArguments.slice(0, 500);
-    }
-  }
-  return {
-    id: job.Id,
-    key: job.Key,
-    state: job.State,
-    processName: job.ReleaseName,
-    processVersion: job.ProcessVersion ?? "",
-    robotName: job.RobotName ?? "",
-    creationTime: job.CreationTime,
-    endTime: job.EndTime,
-    durationMs: msBetween(job.CreationTime, job.EndTime),
-    output,
-    ...(includeLogDigest
-      ? {
-          fault: job.State === "Successful" ? null : extractFault(job, logs),
-          logDigest: { ...digestLogs(logs), transactionOutcome: extractTransactionOutcome(logs) },
-        }
-      : {}),
-  };
-}
-
 // ---- get_job ---------------------------------------------------------------
 server.registerTool(
   "get_job",
   {
-    title: "Get a single UiPath job's state by Key",
+    title: "Get a single job's state by id",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1298,120 +1216,63 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Fetch one Orchestrator job by its GUID Key — the light poll target after start_job, and " +
-      "the job-first diagnostic when you have a Key but no orderUid " +
-      "(list_jobs is an unkeyed scan; find_order_queue_items is order-correlated). " +
-      "Pass jobKeys (up to 25) instead of jobKey to diagnose several jobs — e.g. every job list_jobs " +
-      "just returned — in ONE call instead of looping get_job per key. READ-ONLY. `output` is the " +
-      "job's parsed OutputArguments with token/callbackContext stripped. With includeLogDigest=true " +
-      "it also returns a structured fault (headline error, stable signature, exception type) and a " +
-      "condensed failure-focused log digest, including transactionOutcome — the queue transaction's " +
-      "OWN processingExceptionType/Reason and timing, read from the robot's Transaction-Ended log " +
-      "line, more reliable for exception classification than the free-text-derived exceptionType, " +
-      "null when the job never reached one — if the digest is not enough, call get_job_logs " +
-      "(also batchable via jobKeys) for the complete raw logs. A jobKeys batch never fails as a " +
-      "whole on one key's error — that key's entry carries error instead, the rest still return; " +
-      "a single jobKey fails the call normally, like any other error. includeLogDigest is always " +
-      "best-effort: a failure fetching it surfaces as logDigestError, never blocks the job data. " +
-      "Returns {env, folder, found, jobDeepLinkBase, job:{id,key,state,processName,processVersion," +
-      "robotName,creationTime,endTime,durationMs,output,fault?,logDigest?},logDigestError?} for a " +
-      "single jobKey, or {env, folder, count, jobDeepLinkBase, jobs:[{key,found,job?,error?," +
-      "logDigestError?}]} for jobKeys. Build a job's Orchestrator link by substituting its key for " +
-      '"{key}" in jobDeepLinkBase.',
+      "Fetch one job by its id — the light poll target after start_job, and the job-first " +
+      "diagnostic when you have an id but no orderUid (list_jobs is an unkeyed scan; " +
+      "find_order_queue_items is order-correlated). Pass jobIds (up to 25) instead of jobId to " +
+      "diagnose several jobs — e.g. every job list_jobs just returned — in ONE call instead of " +
+      "looping get_job per id. READ-ONLY. `job` is the normalized job (state = dashboard label, " +
+      "rawState = the backend's own status, terminal, process, queueItem, timings, attempt, " +
+      "retryOfJobId, fault, link, details — UiPath details carry the parsed output with " +
+      "token/callbackContext stripped). With includeLogDigest=true it also returns the log digest " +
+      "(failure-focused condensed logs + stalls) and a structured fault (headline error, stable " +
+      "signature, class); UiPath adds transactionOutcome — the queue transaction's OWN " +
+      "processingExceptionType/Reason and timing from the Transaction-Ended log line, more " +
+      "reliable for exception classification than the free-text-derived class, null when the job " +
+      "never reached one; Apex adds run {exitCode, outcome, errorClass, timedOut, cancelled}. " +
+      "When a job has no readable log, logsUnavailable {reason: running | never-started | " +
+      "artifact-policy, detail} says why. If the digest is not enough, call get_job_logs (also " +
+      "batchable via jobIds) for the complete logs. A jobIds batch never fails as a whole on one " +
+      "id's error — that entry carries error instead, the rest still return; a single jobId " +
+      "fails the call normally, like any other error. includeLogDigest is always best-effort: a " +
+      "failure fetching it surfaces as logDigestError, never blocks the job data. Returns " +
+      "{orchestrator, env, folder, id, found, job?, logDigest?, logsUnavailable?, logDigestError?, " +
+      "error?} for a single jobId, or {orchestrator, env, folder, count, jobs:[{id,found,job?," +
+      "logDigest?,logsUnavailable?,logDigestError?,error?}]} for jobIds.",
     inputSchema: {
-      env: z
-        .enum(["prod", "pre_prod"])
-        .describe("prod='Authorization', pre_prod='Authorization Dev Clone' (required)"),
-      jobKey: z
+      env: envArg,
+      orchestrator: orchestratorArg,
+      jobId: z
         .string()
         .min(8)
         .optional()
-        .describe(
-          "The job's GUID Key (from start_job / list_jobs). Provide this OR jobKeys, not both",
-        ),
-      jobKeys: z
+        .describe("The job's id (from start_job / list_jobs). Provide this OR jobIds, not both"),
+      jobIds: z
         .array(z.string().min(8))
         .min(1)
         .max(25)
         .optional()
-        .describe("Batch: diagnose several jobs in one call. Provide this OR jobKey, not both"),
-      folder: z.string().optional().describe("Explicit folder path override (wins over env)"),
+        .describe("Batch: diagnose several jobs in one call. Provide this OR jobId, not both"),
+      folder: z.string().optional().describe("Explicit folder name override (wins over env)"),
       includeLogDigest: z
         .boolean()
         .optional()
         .default(false)
         .describe(
-          "Also fetch each job's robot logs (extra HTTP call per job) and return a condensed " +
-            "failure digest + structured fault (signature, exception type) — " +
-            "use get_job_logs for the complete raw logs",
+          "Also fetch each job's logs (extra call per job) and return a condensed failure " +
+            "digest + structured fault — use get_job_logs for the complete logs",
         ),
     },
   },
-  async ({ env, jobKey, jobKeys, folder, includeLogDigest }, extra) => {
+  async ({ env, orchestrator, jobId, jobIds, folder, includeLogDigest }, extra) => {
     try {
-      if (!jobKey && !jobKeys) throw new Error("provide either jobKey or jobKeys");
-      if (jobKey && jobKeys) throw new Error("provide only one of jobKey or jobKeys");
-      const resolved = resolveFolder(env, folder);
-      const keys = jobKeys ?? [jobKey ?? ""];
-      const byKey = await fetchJobsForKeys(keys, resolved);
-      // With includeLogDigest a 25-key batch is 50 Orchestrator calls — count them off
-      // as each key finishes rather than going quiet for the whole batch.
-      let keysDone = 0;
-      const results = await Promise.all(
-        keys.map(async (key): Promise<JobKeyResult> => {
-          try {
-            const lookup: JobLookup = byKey[key] ?? { job: null };
-            // A single explicit jobKey lookup fails like any other tool error; a
-            // jobKeys batch keeps going and attaches the failure to just this key.
-            if (lookup.error && !jobKeys) throw lookup.error;
-            if (lookup.error) return { key, found: false, error: toMessage(lookup.error) };
-            if (!lookup.job) return { key, found: false };
-            let logs: UiPathLogRow[] = [];
-            let logDigestError: string | undefined;
-            if (includeLogDigest) {
-              try {
-                logs = await fetchJobLogs(key, resolved, { includeRawFields: true });
-              } catch (e) {
-                logDigestError = toMessage(e);
-              }
-            }
-            return {
-              key,
-              found: true,
-              job: shapeJobDetail(lookup.job, logs, includeLogDigest),
-              ...(logDigestError ? { logDigestError } : {}),
-            };
-          } finally {
-            keysDone++;
-            reportProgress(
-              extra,
-              keysDone,
-              keys.length,
-              `diagnosed ${keysDone}/${keys.length} job(s)`,
-            );
-          }
-        }),
+      const { ids, batch } = resolveJobIds(jobId, jobIds);
+      // With includeLogDigest a 25-id batch is 50 orchestrator calls — the backend counts
+      // them off through stepProgress as each id finishes.
+      const result = await backendFor(orchestrator).getJobs(
+        { env, jobIds: ids, batch, folder, includeLogDigest },
+        stepProgress(extra),
       );
-      const base = jobDeepLinkBase();
-      if (jobKeys) {
-        return ok({
-          env,
-          folder: resolved,
-          count: results.length,
-          jobDeepLinkBase: base,
-          jobs: results,
-        });
-      }
-      const only = results[0];
-      if (!only?.found) return ok({ env, folder: resolved, found: false, jobDeepLinkBase: base });
-      return ok({
-        env,
-        folder: resolved,
-        found: true,
-        jobDeepLinkBase: base,
-        job: only.job,
-        ...(only.logDigestError ? { logDigestError: only.logDigestError } : {}),
-      });
+      return ok(jobEntriesEnvelope(orchestrator, env, result.folder, batch, result.entries));
     } catch (e) {
       return toolError("get_job", e, VERSION);
     }
@@ -1422,7 +1283,7 @@ server.registerTool(
 server.registerTool(
   "add_queue_item",
   {
-    title: "Post a queue item to a dev-clone queue",
+    title: "Post a queue item to a pre-prod queue",
     annotations: {
       readOnlyHint: false,
       destructiveHint: false, // additive — creates an item, never overwrites
@@ -1430,24 +1291,23 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "POST one item to a UiPath queue in the DEV-CLONE folder (pre_prod ONLY — the schema " +
-      "rejects prod). Every payload passes the test-safety guard first: IsApproved is forced " +
-      "false; a non-empty serverURL/queueUrl must match the config's pre-prod values; " +
-      "<TO-FILL> placeholders are rejected. To post a build_queue_item result, pass " +
-      "payload.itemData.Name as queueName, payload.itemData.Reference as reference and " +
-      "payload.itemData.SpecificContent as specificContent. When enqueueing many items, pace " +
-      "~1/s. Returns {env, queueName, reference, itemId, status, forced}.",
+      "POST one item to a queue in the PRE-PROD folder (pre_prod ONLY — the schema rejects prod). " +
+      "Every payload passes the test-safety guard first: IsApproved is forced false; a non-empty " +
+      "serverURL/queueUrl must match the config's pre-prod values; <TO-FILL> placeholders are " +
+      "rejected. To post a build_queue_item result, pass payload.itemData.Name as queue, " +
+      "payload.itemData.Reference as reference and payload.itemData.SpecificContent as " +
+      "specificContent. priority applies to UiPath only (Apex uses the queue's default). When " +
+      "enqueueing many items, pace ~1/s. Returns {orchestrator, env, queueId, queueName, " +
+      "reference, itemId, status, forced}.",
     inputSchema: {
-      env: z
-        .literal("pre_prod")
-        .describe(
-          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
-            "'prod' is rejected by the schema (required)",
-        ),
-      queueName: z
+      env: writeEnvArg,
+      orchestrator: orchestratorArg,
+      queue: z
         .string()
         .min(1)
-        .describe("Exact queue Name in the dev-clone folder (see list_queues)"),
+        .describe(
+          "Queue in the pre-prod folder: UiPath exact queue Name; Apex queue name or id (see list_queues)",
+        ),
       reference: z
         .string()
         .min(1)
@@ -1458,16 +1318,23 @@ server.registerTool(
       priority: z.enum(["Low", "Normal", "High"]).optional().default("Normal"),
     },
   },
-  async ({ env, queueName, reference, specificContent, priority }) => {
+  async ({ env, orchestrator, queue, reference, specificContent, priority }) => {
     try {
-      const result = await addQueueItem({ env, queueName, reference, priority, specificContent });
-      // Audit trail: surface every Orchestrator write to the client log.
-      mcpLog(server, "warning", `posted queue item to pre-prod queue '${queueName}'`, {
+      const result = await backendFor(orchestrator).addQueueItem({
+        env,
+        queue,
+        reference,
+        priority,
+        specificContent,
+      });
+      // Audit trail: surface every orchestrator write to the client log.
+      mcpLog(server, "warning", `posted queue item to pre-prod queue '${queue}'`, {
+        orchestrator,
         reference,
         itemId: result.itemId,
         forced: result.forced,
       });
-      return ok(result);
+      return ok({ orchestrator, ...result }); // result carries env
     } catch (e) {
       return toolError("add_queue_item", e, VERSION);
     }
@@ -1478,7 +1345,7 @@ server.registerTool(
 server.registerTool(
   "delete_queue_item",
   {
-    title: "Delete a New queue item from the dev clone",
+    title: "Delete a New queue item from the pre-prod folder",
     annotations: {
       readOnlyHint: false,
       destructiveHint: true, // deletes an item
@@ -1486,27 +1353,33 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Delete one queue item from the DEV-CLONE folder (pre_prod ONLY — the schema rejects " +
-      "prod). Fetch-first: refuses unless the item's current Status is 'New', so InProgress/" +
-      "Successful/Failed history is never destroyed. Use to clear stale test items before " +
-      "re-enqueueing after a re-mint. Returns {env, itemId, deleted, previousStatus, reference}.",
+      "Delete one queue item from the PRE-PROD folder (pre_prod ONLY — the schema rejects prod). " +
+      "UiPath is fetch-first: it refuses unless the item's current Status is 'New', so " +
+      "InProgress/Successful/Failed history is never destroyed. Use to clear stale test items " +
+      "before re-enqueueing after a re-mint. Returns {orchestrator, env, itemId, deleted, " +
+      "previousStatus, reference}.",
     inputSchema: {
-      env: z
-        .literal("pre_prod")
-        .describe(
-          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
-            "'prod' is rejected by the schema (required)",
-        ),
-      itemId: z.number().int().positive().describe("Queue item id (from list_queue_items)"),
+      env: writeEnvArg,
+      orchestrator: orchestratorArg,
+      itemId: z
+        .string()
+        .min(1)
+        .describe("Queue item id (UiPath: a positive integer; from list_queue_items)"),
+      queueId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Queue id (required by Apex; ignored by UiPath)"),
     },
   },
-  async ({ env, itemId }) => {
+  async ({ env, orchestrator, itemId, queueId }) => {
     try {
-      const result = await deleteQueueItem(itemId, env);
+      const result = await backendFor(orchestrator).deleteQueueItem({ env, itemId, queueId });
       mcpLog(server, "warning", `deleted pre-prod queue item ${itemId}`, {
+        orchestrator,
         reference: result.reference,
       });
-      return ok(result);
+      return ok({ orchestrator, ...result }); // result carries env
     } catch (e) {
       return toolError("delete_queue_item", e, VERSION);
     }
@@ -1517,7 +1390,7 @@ server.registerTool(
 server.registerTool(
   "start_job",
   {
-    title: "Start a UiPath job on the dev clone",
+    title: "Start a job on the pre-prod folder",
     annotations: {
       readOnlyHint: false,
       destructiveHint: false, // starts a run; existing state untouched
@@ -1525,37 +1398,44 @@ server.registerTool(
       openWorldHint: true,
     },
     description:
-      "Start job(s) for a release in the DEV-CLONE folder (pre_prod ONLY — the schema rejects " +
-      "prod). Get the releaseKey from list_processes. PIN RACE: a job resolves its package " +
-      "version at START, not creation — if others are publishing, verify the release's " +
-      "processVersion via list_processes right before starting (repinning is manual in the " +
-      "Orchestrator UI; this MCP never repins). Poll the result with get_job. Returns " +
-      "{env, jobDeepLinkBase, jobs:[{id,key,state,releaseName}]}. Build a job's Orchestrator " +
-      'link by substituting its key for "{key}" in jobDeepLinkBase.',
+      "Start job(s) for a process in the PRE-PROD folder (pre_prod ONLY — the schema rejects " +
+      "prod). Get the processId from list_processes. PIN RACE (UiPath): a job resolves its " +
+      "package version at START, not creation — if others are publishing, verify the process's " +
+      "version via list_processes right before starting (repinning is manual in the orchestrator " +
+      "UI; this MCP never repins). Poll the result with get_job. Returns {orchestrator, env, " +
+      "jobs:[{id,state,processName,link}]}.",
     inputSchema: {
-      env: z
-        .literal("pre_prod")
-        .describe(
-          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
-            "'prod' is rejected by the schema (required)",
-        ),
-      releaseKey: z.string().min(8).describe("Release GUID Key (from list_processes)"),
-      inputArguments: z
+      env: writeEnvArg,
+      orchestrator: orchestratorArg,
+      processId: z.string().min(8).describe("Process id (from list_processes)"),
+      input: z
         .record(z.unknown())
         .optional()
         .default({})
         .describe("Job input arguments (omit for none)"),
       jobsCount: z.number().int().min(1).max(5).optional().default(1).describe("Jobs to start"),
+      matchValue: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Apex only: the match value the job is dispatched under (required by Apex)"),
     },
   },
-  async ({ env, releaseKey, inputArguments, jobsCount }) => {
+  async ({ env, orchestrator, processId, input, jobsCount, matchValue }) => {
     try {
-      const result = await startJob({ env, releaseKey, inputArguments, jobsCount });
-      mcpLog(server, "warning", `started ${result.jobs.length} dev-clone job(s)`, {
-        releaseKey,
-        keys: result.jobs.map((j) => j.key),
+      const result = await backendFor(orchestrator).startJob({
+        env,
+        processId,
+        input,
+        jobsCount,
+        matchValue,
       });
-      return ok(result);
+      mcpLog(server, "warning", `started ${result.jobs.length} pre-prod job(s)`, {
+        orchestrator,
+        processId,
+        ids: result.jobs.map((j) => j.id),
+      });
+      return ok({ orchestrator, ...result }); // result carries env
     } catch (e) {
       return toolError("start_job", e, VERSION);
     }
@@ -1566,28 +1446,24 @@ server.registerTool(
 server.registerTool(
   "stop_job",
   {
-    title: "Stop or kill a running UiPath job on the dev clone",
+    title: "Stop or kill a running job on the pre-prod folder",
     annotations: {
       readOnlyHint: false,
       destructiveHint: true, // aborts a run in progress
-      idempotentHint: true, // fetch-first: refuses (no HTTP write) once already terminal
+      idempotentHint: true, // fetch-first: refuses (no write) once already terminal
       openWorldHint: true,
     },
     description:
-      "Stop (SoftStop, graceful) or Kill (immediate) a job in the DEV-CLONE folder (pre_prod " +
-      "ONLY — the schema rejects prod). Takes the job's GUID Key (from start_job / list_jobs / " +
-      "get_job); StopJob addresses Orchestrator jobs by numeric Id internally, so this resolves " +
-      "the Key first, scoped to the pre-prod folder — a prod job's Key resolves to nothing here. " +
-      "Fetch-first: refuses if the job is already Successful/Faulted/Stopped. Use to abort a " +
-      "hung or misbehaving dev-clone run. Returns {env, jobId, jobKey, strategy, stopped}.",
+      "Stop (SoftStop, graceful) or Kill (immediate) a job in the PRE-PROD folder (pre_prod " +
+      "ONLY — the schema rejects prod). Takes the job's id (from start_job / list_jobs / " +
+      "get_job); the id is resolved inside the pre-prod folder first, so a prod job's id " +
+      "resolves to nothing here. Fetch-first: refuses if the job is already in a terminal state. " +
+      "Use to abort a hung or misbehaving pre-prod run. Returns {orchestrator, env, jobId, " +
+      "strategy, stopped}.",
     inputSchema: {
-      env: z
-        .literal("pre_prod")
-        .describe(
-          "UiPath writes are pre_prod-only (folder 434039 'Authorization Dev Clone'); " +
-            "'prod' is rejected by the schema (required)",
-        ),
-      jobKey: z.string().min(8).describe("Job GUID Key (from start_job / list_jobs / get_job)"),
+      env: writeEnvArg,
+      orchestrator: orchestratorArg,
+      jobId: z.string().min(8).describe("Job id (from start_job / list_jobs / get_job)"),
       strategy: z
         .enum(["SoftStop", "Kill"])
         .optional()
@@ -1595,13 +1471,11 @@ server.registerTool(
         .describe("SoftStop = graceful (default), Kill = immediate"),
     },
   },
-  async ({ env, jobKey, strategy }) => {
+  async ({ env, orchestrator, jobId, strategy }) => {
     try {
-      const result = await stopJob({ env, jobKey, strategy });
-      mcpLog(server, "warning", `stopped dev-clone job ${jobKey} (${strategy})`, {
-        jobId: result.jobId,
-      });
-      return ok(result);
+      const result = await backendFor(orchestrator).stopJob({ env, jobId, strategy });
+      mcpLog(server, "warning", `stopped pre-prod job ${jobId} (${strategy})`, { orchestrator });
+      return ok({ orchestrator, ...result }); // result carries env
     } catch (e) {
       return toolError("stop_job", e, VERSION);
     }

@@ -8,7 +8,6 @@ import type { JobLog } from "../orchestrator/types.js";
 import {
   buildFaultedJobIssue,
   DEFAULT_LABELS,
-  extractFault,
   extractTransactionOutcome,
   formatFaultedJobIssue,
 } from "./faults.js";
@@ -26,38 +25,6 @@ const errLog = (msg: string): JobLog => ({
   Level: "Error",
   Message: msg,
   TimeStamp: "2026-06-30T10:00:30Z",
-});
-
-describe("extractFault", () => {
-  const faultJob: UiPathJob = { Key: "k", State: "Faulted" };
-
-  test("parses the exception type and computes a stable signature", () => {
-    const logs = [
-      errLog(
-        "System.NullReferenceException: Object reference not set. Job 7bfea00c-1111-2222-3333-444444444444",
-      ),
-    ];
-    const fault = extractFault(faultJob, logs);
-    expect(fault.exceptionType).toBe("System.NullReferenceException");
-    expect(fault.signature).toContain("<id>");
-    expect(fault.signature).not.toContain("7bfea00c");
-  });
-
-  test("two runs of the same fault share a signature despite different ids", () => {
-    const a = extractFault(faultJob, [
-      errLog("Timeout on order 7bfea00c-1111-2222-3333-444444444444"),
-    ]);
-    const b = extractFault(faultJob, [
-      errLog("Timeout on order 508debf6-9999-aaaa-bbbb-cccccccccccc"),
-    ]);
-    expect(a.signature).toBe(b.signature);
-  });
-
-  test("falls back to a synthetic message when there are no logs", () => {
-    const fault = extractFault(faultJob, []);
-    expect(fault.message).toBe("Job ended in state Faulted");
-    expect(fault.exceptionType).toBeNull();
-  });
 });
 
 describe("extractTransactionOutcome", () => {

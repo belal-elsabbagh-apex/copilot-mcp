@@ -13,7 +13,6 @@ import {
   normalizeError,
   signatureMarker,
 } from "../orchestrator/faults.js";
-import { truncate } from "../orchestrator/log-digest.js";
 import type { JobLog } from "../orchestrator/types.js";
 import { parseRawMessage } from "./raw-message.js";
 import {
@@ -47,12 +46,6 @@ export function topError(job: UiPathJob, logs: JobLog[]): string {
 
 // A dotted .NET-style type ending in Exception/Error, e.g. System.NullReferenceException.
 export const EXCEPTION_TYPE = /\b(?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Exception|Error)\b/;
-
-export interface JobFault {
-  message: string; // headline error (first Error-level log, else last line, else state)
-  signature: string; // normalizeError — same dedupe key as build_faulted_job_issue
-  exceptionType: string | null; // e.g. System.NullReferenceException, parsed from the message
-}
 
 // The Transaction Ended row's structured fields (see raw-message.ts) — the
 // queue's OWN record of how this job's transaction concluded, independent of
@@ -89,15 +82,6 @@ export function extractTransactionOutcome(logs: UiPathLogRow[]): TransactionOutc
     }
   }
   return null;
-}
-
-export function extractFault(job: UiPathJob, logs: JobLog[]): JobFault {
-  const message = topError(job, logs);
-  return {
-    message: truncate(message),
-    signature: normalizeError(message),
-    exceptionType: message.match(EXCEPTION_TYPE)?.[0] ?? null,
-  };
 }
 
 const fmtLog = (l: JobLog): string =>
