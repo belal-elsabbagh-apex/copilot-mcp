@@ -56,8 +56,9 @@ export function apexErrorDetail(body: unknown, status: number): string {
         ? detail.map(pydanticMessage).join("; ")
         : typeof body === "string"
           ? body
-          : JSON.stringify(body);
-  const capped = text.length > DETAIL_CAP ? `${text.slice(0, DETAIL_CAP)}…` : text;
+          : (JSON.stringify(body) ?? "");
+  const raw = text || `HTTP ${status}`;
+  const capped = raw.length > DETAIL_CAP ? `${raw.slice(0, DETAIL_CAP)}…` : raw;
   return status === 403 ? `${capped}${FORBIDDEN_HINT}` : capped;
 }
 

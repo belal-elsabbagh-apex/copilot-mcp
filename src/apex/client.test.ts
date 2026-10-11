@@ -407,3 +407,21 @@ describe("apexDashboardLink when unconfigured", () => {
     expect(apexDashboardLink("/jobs/j1")).toBe("");
   });
 });
+
+describe("bodyless error responses", () => {
+  const apex = useApexStub();
+  test("a bodyless 502 still surfaces as an ApexApiError with its status", async () => {
+    apex.route("GET", "/jobs/", () => new Response(null, { status: 502 }));
+    const err = await caught(apexRequest("prod", "GET", "/jobs/"));
+    expect(err).toBeInstanceOf(ApexApiError);
+    expect((err as ApexApiError).status).toBe(502);
+    expect((err as ApexApiError).message).toContain("HTTP 502");
+  });
+  test("a bodyless 403 keeps the permission hint", async () => {
+    apex.route("GET", "/jobs/", () => new Response(null, { status: 403 }));
+    const err = await caught(apexRequest("prod", "GET", "/jobs/"));
+    expect(err).toBeInstanceOf(ApexApiError);
+    expect((err as ApexApiError).status).toBe(403);
+    expect((err as ApexApiError).message).toContain("the Apex account lacks the role");
+  });
+});
