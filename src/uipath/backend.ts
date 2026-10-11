@@ -14,6 +14,10 @@ import {
   resolvePortalByDefId,
 } from "../mcp/reference.js";
 import type {
+  AddQueueItemArgs,
+  AddQueueItemResult,
+  DeleteQueueItemArgs,
+  DeleteQueueItemResult,
   FaultedJobIssueResult,
   FaultIssueArgs,
   FindOrderArgs,
@@ -32,9 +36,14 @@ import type {
   ListQueuesArgs,
   ListTriggersArgs,
   LogRow,
+  OrchestratorBackend,
   PullQueueItemArgs,
   PullQueueItemResult,
   QueueKind,
+  StartJobArgs,
+  StartJobResult,
+  StopJobArgs,
+  StopJobResult,
 } from "../orchestrator/backend.js";
 import { truncate } from "../orchestrator/log-digest.js";
 import { memberFilename, toPortalRef } from "../orchestrator/portal.js";
@@ -42,6 +51,7 @@ import { guardQueueItemSafety } from "../orchestrator/safety.js";
 import type { ProcessCore, QueueCore, TriggerCore } from "../orchestrator/types.js";
 import { ExpectedError } from "../shared/expected-error.js";
 import type { StepProgress } from "../shared/util.js";
+import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./actions.js";
 import { buildFaultedJobIssue } from "./faults.js";
 import {
   toJobCore,
@@ -53,6 +63,7 @@ import {
   toUiPathLogDigest,
   uipathFault,
 } from "./map.js";
+import { uipathBuildQueueItemPayload } from "./payload.js";
 import { parseQueueItemUrl } from "./queue.js";
 import { parseRawMessage } from "./raw-message.js";
 import {
@@ -369,3 +380,86 @@ export function uipathBuildFaultedJobIssue(args: FaultIssueArgs): Promise<Faulte
     labels: args.labels,
   });
 }
+
+// ---- writes (Task 4): translate the neutral args onto actions.ts, pre_prod-only there ----
+
+export async function uipathAddQueueItem(args: AddQueueItemArgs): Promise<AddQueueItemResult> {
+  const r = await addQueueItem({
+    env: args.env,
+    queueName: args.queue,
+    reference: args.reference,
+    priority: args.priority,
+    specificContent: args.specificContent,
+  });
+  return {
+    env: r.env,
+    queueId: r.queueDefinitionId ? String(r.queueDefinitionId) : "",
+    queueName: r.queueName,
+    reference: r.reference,
+    itemId: String(r.itemId),
+    status: r.status,
+    forced: r.forced,
+  };
+}
+
+// UiPath queue-item ids are positive integers; the neutral arg is a string (Apex ids are uuids).
+function parseItemId(itemId: string): number {
+  if (!/^[1-9]\d*$/.test(itemId) || !Number.isSafeInteger(Number(itemId)))
+    throw new ExpectedError(`UiPath queue item ids are positive integers, got '${itemId}'`);
+  return Number(itemId);
+}
+
+export async function uipathDeleteQueueItem(
+  args: DeleteQueueItemArgs,
+): Promise<DeleteQueueItemResult> {
+  const r = await deleteQueueItem(parseItemId(args.itemId), args.env);
+  return {
+    env: r.env,
+    itemId: String(r.itemId),
+    deleted: true,
+    previousStatus: r.previousStatus,
+    reference: r.reference,
+  };
+}
+
+export async function uipathStartJob(args: StartJobArgs): Promise<StartJobResult> {
+  const r = await startJob({
+    env: args.env,
+    releaseKey: args.processId,
+    inputArguments: args.input,
+    jobsCount: args.jobsCount,
+  });
+  return {
+    env: r.env,
+    jobs: r.jobs.map((j) => ({
+      id: j.key,
+      state: j.state,
+      processName: j.releaseName,
+      link: jobDeepLink(j.key),
+    })),
+  };
+}
+
+export async function uipathStopJob(args: StopJobArgs): Promise<StopJobResult> {
+  const r = await stopJob({ env: args.env, jobKey: args.jobId, strategy: args.strategy });
+  return { env: r.env, jobId: r.jobKey, strategy: r.strategy, stopped: true };
+}
+
+export const uipathBackend: OrchestratorBackend = {
+  name: "uipath",
+  listJobs: uipathListJobs,
+  getJobs: uipathGetJobs,
+  getJobLogs: uipathGetJobLogs,
+  listQueues: uipathListQueues,
+  listQueueItems: uipathListQueueItems,
+  findOrderQueueItems: uipathFindOrderQueueItems,
+  pullQueueItem: uipathPullQueueItem,
+  listProcesses: uipathListProcesses,
+  listTriggers: uipathListTriggers,
+  buildFaultedJobIssue: uipathBuildFaultedJobIssue,
+  buildQueueItemPayload: uipathBuildQueueItemPayload,
+  addQueueItem: uipathAddQueueItem,
+  deleteQueueItem: uipathDeleteQueueItem,
+  startJob: uipathStartJob,
+  stopJob: uipathStopJob,
+};

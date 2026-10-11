@@ -186,7 +186,7 @@ describe("addQueueItem", () => {
   });
 
   test("POSTs the guarded payload to the default AddQueueItem path with auth + folder headers", async () => {
-    responses.push(json({ Id: 42, Status: "New" }));
+    responses.push(json({ Id: 42, Status: "New", QueueDefinitionId: 79926 }));
     const out = await addQueueItem(args);
     expect(calls.length).toBe(1);
     const call = calls[0];
@@ -204,6 +204,7 @@ describe("addQueueItem", () => {
       queueName: "Scratch queue",
       reference: "REF-1",
       itemId: 42,
+      queueDefinitionId: 79926,
       status: "New",
       forced: ["IsApproved"],
     });
@@ -273,9 +274,6 @@ describe("startJob", () => {
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe(
       `${UIPATH.orchestratorUrl}/odata/Jobs/UiPath.Server.Configuration.OData.StartJobs`,
-    );
-    expect(out.jobDeepLinkBase).toBe(
-      "https://cloud.uipath.com/myorg/mytenant/orchestrator_/jobs(sidepanel:sidepanel/jobs/{key}/details)",
     );
     expect(out.jobs).toEqual([
       { id: 5, key: "job-key-1", state: "Pending", releaseName: "Proc.Dev" },

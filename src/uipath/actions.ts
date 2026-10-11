@@ -14,7 +14,6 @@ import { UIPATH_TERMINAL_STATES } from "./map.js";
 import {
   fetchJobByKey,
   getQueueItem,
-  jobDeepLinkBase,
   type QueueItem,
   resolveFolder,
   scopeForEnv,
@@ -59,6 +58,7 @@ export interface AddQueueItemResult {
   queueName: string;
   reference: string;
   itemId: number; // id of the created item (0 if the response omitted it)
+  queueDefinitionId: number; // the queue it landed in (0 if the response omitted it)
   status: string; // "New" on success
   forced: string[]; // fields the safety guard overrode, e.g. ["IsApproved"]
 }
@@ -101,6 +101,7 @@ export async function addQueueItem(args: AddQueueItemArgs): Promise<AddQueueItem
     queueName: args.queueName,
     reference: args.reference,
     itemId: item.id,
+    queueDefinitionId: item.queueDefinitionId,
     status: item.status,
     forced: guarded.forced,
   };
@@ -155,7 +156,6 @@ export interface StartedJob {
 
 export interface StartJobResult {
   env: Env;
-  jobDeepLinkBase: string;
   jobs: StartedJob[];
 }
 
@@ -190,7 +190,7 @@ export async function startJob(args: StartJobArgs): Promise<StartJobResult> {
       releaseName: typeof r["ReleaseName"] === "string" ? r["ReleaseName"] : "",
     };
   });
-  return { env: args.env, jobDeepLinkBase: jobDeepLinkBase(), jobs };
+  return { env: args.env, jobs };
 }
 
 // ---- stop_job ---------------------------------------------------------------

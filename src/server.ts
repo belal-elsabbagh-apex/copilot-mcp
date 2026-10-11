@@ -86,11 +86,12 @@ import {
   UIPATH_FOLDERS,
 } from "./mcp/reference.js";
 import { digestLogs, truncate } from "./orchestrator/log-digest.js";
+import { buildQueueItemContent } from "./orchestrator/queue-item.js";
 import { msBetween, stringProp } from "./shared/util.js";
 import { addQueueItem, deleteQueueItem, startJob, stopJob } from "./uipath/actions.js";
 import { buildFaultedJobIssue, extractFault, extractTransactionOutcome } from "./uipath/faults.js";
+import { uipathBuildQueueItemPayload } from "./uipath/payload.js";
 import { findOrderQueueItems, listQueue, pullQueueItem } from "./uipath/queue.js";
-import { buildQueueItem } from "./uipath/queue-item.js";
 import { parseRawMessage } from "./uipath/raw-message.js";
 import {
   fetchJobLogs,
@@ -513,16 +514,19 @@ server.registerTool(
   },
   async ({ orderUid, env, profile, automationId }, extra) => {
     try {
-      const out = await withHeartbeat(
+      const built = await withHeartbeat(
         extra,
         "building queue item",
-        buildQueueItem(orderUid, {
-          profile: profile ?? null,
-          env,
-          automationId: automationId ?? null,
-        }),
+        buildQueueItemContent(orderUid, { profile, env, automationId: automationId ?? null }),
       );
-      return ok(out);
+      const { payload, notes, meta } = uipathBuildQueueItemPayload({
+        env,
+        queueName: built.queueName,
+        orderUid,
+        content: built.content,
+        beBase: built.beBase,
+      });
+      return ok({ payload, notes: [...built.notes, ...notes], meta: { ...built.meta, ...meta } });
     } catch (e) {
       return toolError("build_queue_item", e, VERSION);
     }

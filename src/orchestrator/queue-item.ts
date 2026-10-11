@@ -1,17 +1,15 @@
-// Build a UiPath AddQueueItem request from an EHR Copilot order (prod or pre-prod).
-// Ported natively from `.planning/build_queue_item.mjs` (logic unchanged; config + types only).
-// Fetch the order via /orders/filter, log in to capture the BE callback JWT + physicianId,
-// map order details -> SpecificContent, return { payload, notes, meta }. The caller submits it
-// themselves with their own bearer token — this module never embeds a live credential in output.
-// BUILD ONLY — never POSTs. IsApproved is ALWAYS false (see repo CLAUDE.md rule).
+// Canonical Copilot-order -> queue-item content, shared by every orchestrator backend.
+// Fetches the order and logs in to capture the BE callback JWT + physicianId, then maps the
+// order onto SpecificContent in NATIVE types (arrays stay arrays, callbackContext is an
+// object) and WITHOUT serverURL/queueUrl — each backend's serializer fills those from its
+// own config and shapes the wire format. BUILD ONLY — never POSTs. IsApproved is ALWAYS
+// false (see repo CLAUDE.md rule); backends re-assert it through guardQueueItemSafety.
 
 import { randomUUID } from "node:crypto";
-import type { Env, UipathConfig } from "../config/config.js";
-import { getUipath } from "../config/config.js";
+import type { Env } from "../config/config.js";
 import { type BeOrder, fetchOrder, toMDY as toMDYStrict } from "../copilot/copilot-client.js";
 import { clinicOwnerEmail, connect } from "../copilot/session.js";
 import { ACCOUNT_AUTOMATION_IDS } from "../mcp/reference.js";
-import { guardQueueItemSafety } from "../orchestrator/safety.js";
 import { prop } from "../shared/util.js";
 
 // Non-throwing MM/DD/YYYY normalizer (queue payloads prefer "" over an error) — the
@@ -60,31 +58,20 @@ export function resolveAutomationId(
   return explicit?.trim() || ACCOUNT_AUTOMATION_IDS[(profile ?? "").toUpperCase()];
 }
 
-// Require the queue-build-specific UiPath fields (only needed by this tool).
-function requireQueueFields(
-  u: UipathConfig,
-): asserts u is UipathConfig &
-  Required<Pick<UipathConfig, "queueUrl" | "addQueueItemPath" | "folderPath">> {
-  const missing = (["queueUrl", "addQueueItemPath", "folderPath"] as const).filter((k) => !u[k]);
-  if (missing.length)
-    throw new Error(
-      `uipath config is missing fields required for build_queue_item: ${missing.join(", ")}. ` +
-        "Add them to your COPILOT_MCP_CONFIG uipath block (see copilot-mcp.config.example.json).",
-    );
-}
-
-export interface QueueItemResult {
-  payload: unknown;
+export interface QueueItemContent {
+  content: Record<string, unknown>; // native-typed SpecificContent, no serverURL/queueUrl
+  queueName: string;
   notes: string[];
   meta: Record<string, unknown>;
 }
 
-export type QueueUipath = Pick<
-  UipathConfig,
-  "orchestratorUrl" | "queueUrl" | "addQueueItemPath" | "folderPath"
-> & { serverUrl: string | undefined }; // serverUrl = uipath.serverUrlByEnv[env]
+// `beBase` is the Copilot BE the order was read from: the serverURL fallback for backends
+// whose config pins no server URL for this env.
+export interface BuiltQueueItem extends QueueItemContent {
+  beBase: string;
+}
 
-// Everything buildQueueItem reads from the outside world, so assembleQueueItem stays pure.
+// Everything buildQueueItemContent reads from the outside world, so assembly stays pure.
 export interface AssembleInput {
   order: BeOrder;
   orderUid: string;
@@ -95,46 +82,12 @@ export interface AssembleInput {
   physicianId: string | number | null;
   supportMode: boolean;
   providerMail: string;
-  beBase: string; // the BE the order was read from (serverURL fallback)
-  uipath: QueueUipath;
-  nowSec: number;
 }
 
-export async function buildQueueItem(
-  orderUid: string,
-  opts: { profile?: string | null; env: Env; automationId?: string | null }, // env is required — never defaulted (repo invariant)
-): Promise<QueueItemResult> {
-  const profile = opts.profile ?? null;
-  const env: Env = opts.env;
-  const automationId = resolveAutomationId(opts.automationId, profile);
-  const uipath = getUipath();
-  requireQueueFields(uipath);
+const s = (v: unknown): string => (v == null ? "" : String(v));
 
-  const session = await connect(env, profile);
-  const { client, token } = session;
-  const providerMail =
-    session.mode === "support"
-      ? ((await clinicOwnerEmail(env, session.clinicUid as string)) ?? "")
-      : session.email;
-
-  return assembleQueueItem({
-    order: await fetchOrder(client, orderUid),
-    orderUid,
-    profile,
-    env,
-    automationId,
-    token,
-    physicianId: decodeJwtId(token),
-    supportMode: session.mode === "support",
-    providerMail,
-    beBase: client.base,
-    uipath: { ...uipath, serverUrl: uipath.serverUrlByEnv?.[env] },
-    nowSec: Math.floor(Date.now() / 1000),
-  });
-}
-
-export function assembleQueueItem(input: AssembleInput): QueueItemResult {
-  const { order: o, orderUid, profile, env, automationId, token, physicianId, uipath } = input;
+export function assembleQueueItemContent(input: AssembleInput): QueueItemContent {
+  const { order: o, orderUid, profile, env, automationId, token, physicianId } = input;
   const notes: string[] = [];
 
   const form: NonNullable<BeOrder["referralFormJSON"]> = o.referralFormJSON ?? {};
@@ -163,20 +116,20 @@ export function assembleQueueItem(input: AssembleInput): QueueItemResult {
     notes.push(
       `WARNING: no automationId was supplied and none is known for account '${profile ?? "(none)"}' ` +
         "— SpecificContent.automationId is a placeholder random UUID, not the account's real " +
-        "UiPath automation id. Pass the correct value via the automationId argument before submitting.",
+        "automation id. Pass the correct value via the automationId argument before submitting.",
     );
   if (input.supportMode)
     notes.push(
       `physicianId ${physicianId} is the support account's user id — under support-account auth the JWT 'id' claim is the support user in both pre- and post-switch tokens; callbackContext carries it as-is.`,
     );
 
-  const s = (v: unknown): string => (v == null ? "" : String(v));
   const fromName = s(from["name"]);
-  const built = {
+  const queueName = `${insuranceName} auth submit queue`;
+  const content = {
     ClinicNPI: s(from["NPI"]),
     DOS: dos,
-    DescriptionOfService: JSON.stringify(cpts.map((c) => c.description ?? "")),
-    Diagnoses: JSON.stringify(icds.map((i) => i.code)),
+    DescriptionOfService: cpts.map((c) => c.description ?? ""),
+    Diagnoses: icds.map((i) => i.code),
     Facility: fac.name || s(to["name"]),
     IsApproved: false, // HARD RULE — never true
     IsRetro: !!o.retro,
@@ -221,53 +174,52 @@ export function assembleQueueItem(input: AssembleInput): QueueItemResult {
     ReferredToPhone: s(to["phoneNumber"]) || fac.phone || "",
     ReferredToProviderID: "",
     ReferredToType: fac.type || "provider",
-    ServiceCode: JSON.stringify(cpts.map((c) => c.code)),
+    ServiceCode: cpts.map((c) => c.code),
     Specialty: o.speciality?.name || s(to["speciality"]),
-    Treatments: JSON.stringify(cpts.flatMap((c) => c.treatments ?? [])),
-    Units: JSON.stringify(cpts.map((c) => String(c.units ?? ""))),
+    Treatments: cpts.flatMap((c) => c.treatments ?? []),
+    Units: cpts.map((c) => String(c.units ?? "")),
     addManualFacility: false,
     appointmentDate: toMDY(o.appointmentDate),
     automationId: automationId || randomUUID(),
-    callbackContext: JSON.stringify({ physicianId, orderUid }),
+    callbackContext: { physicianId, orderUid },
     eligibilityOtherPatientName: null,
     isSpeciality: !!(fac.isSpeciality ?? false),
     orderUid,
     placeOfService: o.placeOfService || fac.placeOfService || "",
-    queueUrl: uipath.queueUrl,
     retryCount: 0,
-    serverURL: uipath.serverUrl ?? input.beBase,
     token: token ?? "",
   };
-  // Single enforcement point for the IsApproved=false rule (the literal above documents it).
-  const specific = guardQueueItemSafety(built, "force").specificContent;
-
-  const payload = {
-    itemData: {
-      Name: `${insuranceName} auth submit queue`,
-      Priority: "Normal",
-      Reference: `${orderUid}-${input.nowSec}`,
-      SpecificContent: specific,
-    },
-  };
-
-  const postUrl = uipath.orchestratorUrl.replace(/\/$/, "") + uipath.addQueueItemPath;
-  notes.push(
-    "To submit: POST payload.itemData as JSON to meta.postUrl with headers " +
-      "'Authorization: Bearer <your uipath.bearer>' and " +
-      `'X-UIPATH-FolderPath: ${uipath.folderPath}'. Never done automatically by this tool.`,
-  );
 
   return {
-    payload,
+    content,
+    queueName,
     notes,
-    meta: {
-      profile: profile ?? "(default)",
-      env,
-      physicianId,
-      queueName: payload.itemData.Name,
-      orderStatus: o.status,
-      postUrl,
-      folderPath: uipath.folderPath,
-    },
+    meta: { profile: profile ?? "(default)", env, physicianId, queueName, orderStatus: o.status },
   };
+}
+
+export async function buildQueueItemContent(
+  orderUid: string,
+  opts: { profile?: string | null; env: Env; automationId?: string | null }, // env is required — never defaulted (repo invariant)
+): Promise<BuiltQueueItem> {
+  const profile = opts.profile ?? null;
+  const session = await connect(opts.env, profile);
+  const { client, token } = session;
+  const providerMail =
+    session.mode === "support"
+      ? ((await clinicOwnerEmail(opts.env, session.clinicUid as string)) ?? "")
+      : session.email;
+
+  const built = assembleQueueItemContent({
+    order: await fetchOrder(client, orderUid),
+    orderUid,
+    profile,
+    env: opts.env,
+    automationId: resolveAutomationId(opts.automationId, profile),
+    token,
+    physicianId: decodeJwtId(token),
+    supportMode: session.mode === "support",
+    providerMail,
+  });
+  return { ...built, beBase: client.base };
 }
