@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-29
+
+### Fixed
+
+- **Release assets:** the raw per-platform binaries are uploaded as `copilot-mcp-linux-amd64`,
+  `copilot-mcp-darwin-arm64` and `copilot-mcp-windows-amd64.exe`. The v3.0.0 release run failed because all three
+  were uploaded under the same `copilot-mcp` filename, so **v3.0.0 has a tag but no release**. Use v3.0.1, which
+  ships the code listed under 3.0.0 below.
+
 ## [3.0.0] - 2026-10-29
 
 The server is rewritten from TypeScript/Bun to **Go**, with the same MCP surface (tool,
