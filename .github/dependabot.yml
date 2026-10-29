@@ -1,0 +1,18 @@
+# Grouped, not per-dependency: ungrouped updates open one PR per module per week, which is how
+# dependabot ends up ignored. One PR per ecosystem is reviewable.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

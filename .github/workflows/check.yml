@@ -1,0 +1,36 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # workflow_call: release.yml gates its build on this same workflow via `needs`, so one
+  # definition serves both the PR gate and the release gate.
+  workflow_call:
+
+# cancel-in-progress is conditional on purpose: this workflow is also called by release.yml, and
+# cancelling unconditionally would let a second push kill the gate of an in-flight release.
+# Superseded PR runs are waste; a superseded release gate is a broken release.
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Patch-pinned: a floating "1.27" can move to a patch whose export data the pinned
+          # golangci-lint cannot read (v2.13.1 broke exactly that way on 1.27.2). 1.27.3 is the
+          # patch the Makefile's GOLANGCI pin was verified against; move them together.
+          go-version: "1.27.3"
+      # `make check` rather than the steps restated here: the Makefile is the single definition of
+      # the gate, so a clean local `make check` means a green CI run. It includes the package
+      # smoke, which runs the launcher under the runner's preinstalled node.
+      - name: make check
+        run: make check

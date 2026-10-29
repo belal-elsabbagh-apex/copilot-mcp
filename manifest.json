@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "copilot-mcp",
   "display_name": "Copilot MCP",
-  "version": "2.0.0",
+  "version": "0.0.0-dev",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath + Apex Orchestrator execution analysis",
-  "long_description": "Exposes EHR Copilot order operations and UiPath + Apex Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting queue items against the pre-prod UiPath dev clone or Apex Authorization Test folder, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath and/or Apex Orchestrator credentials \u2014 point the \"Config file\" option below at your copy of it.",
+  "long_description": "Exposes EHR Copilot order operations and UiPath + Apex Orchestrator execution analysis as MCP tools and prompts. Covers reading and cloning Copilot orders (prod -> pre-prod only, never mutating prod), building/posting queue items against the pre-prod UiPath dev clone or Apex Authorization Test folder, diagnosing job runs and stuck orders, and an additive prod -> pre-prod settings sync.\n\nRequires a config file (see `copilot-mcp.config.example.json` bundled alongside this manifest) with Copilot BE credentials per profile and UiPath and/or Apex Orchestrator credentials — point the \"Config file\" option below at your copy of it.",
   "author": {
     "name": "Belal Elsabbagh"
   },
@@ -27,11 +27,11 @@
   ],
   "server": {
     "type": "node",
-    "entry_point": "dist/server.js",
+    "entry_point": "bin/copilot-mcp.js",
     "mcp_config": {
       "command": "node",
       "args": [
-        "${__dirname}/dist/server.js"
+        "${__dirname}/bin/copilot-mcp.js"
       ],
       "env": {
         "COPILOT_MCP_CONFIG": "${user_config.config_path}"
@@ -45,7 +45,7 @@
       "linux"
     ],
     "runtimes": {
-      "node": ">=24.0.0"
+      "node": ">=20.0.0"
     }
   },
   "user_config": {
@@ -95,11 +95,11 @@
     },
     {
       "name": "get_job_logs",
-      "description": "Get a job's robot logs (UiPath or Apex)"
+      "description": "Get a job's robot logs (UiPath or Apex); refresh=true bypasses the persistent cache"
     },
     {
       "name": "build_faulted_job_issue",
-      "description": "Build a GitHub issue payload for a faulted job (UiPath or Apex)"
+      "description": "Build a GitHub issue payload for a faulted job (UiPath or Apex); refresh=true bypasses the persistent cache"
     },
     {
       "name": "find_stuck_orders",
@@ -142,6 +142,10 @@
       "description": "Get a Copilot BE login token"
     },
     {
+      "name": "list_clinics",
+      "description": "List the clinics the support account can switch into, with the mapped config profile"
+    },
+    {
       "name": "doctor",
       "description": "Check the server's external API connections"
     },
@@ -159,11 +163,11 @@
     },
     {
       "name": "get_job",
-      "description": "Get job(s) by id (UiPath or Apex)"
+      "description": "Get job(s) by id (UiPath or Apex); refresh=true bypasses the persistent cache"
     },
     {
       "name": "get_job_artifacts",
-      "description": "List and download an Apex job's artifacts (job.log, trace.zip, recording)"
+      "description": "List and download an Apex job's artifacts (job.log, trace.zip, recording); refresh=true re-downloads"
     },
     {
       "name": "add_queue_item",

@@ -1,0 +1,9 @@
+version: "2"
+linters:
+  exclusions:
+    rules:
+      # Test-only writes to httptest.ResponseWriter/json.Encoder never fail in practice and
+      # checking them everywhere would be pure noise.
+      - path: _test\.go
+        linters:
+          - errcheck

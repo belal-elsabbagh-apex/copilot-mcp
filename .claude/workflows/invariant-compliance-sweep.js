@@ -1,6 +1,6 @@
 export const meta = {
   name: 'invariant-compliance-sweep',
-  description: 'Check pending changes (or the full src tree) against every hard invariant in .claude/rules/, with adversarial verification of each finding',
+  description: 'Check pending changes (or the full Go source tree) against every hard invariant in .claude/rules/, with adversarial verification of each finding',
   whenToUse: 'Before a release, after a feature branch touches a write path (order minting, settings sync, UiPath actions), or any time you want a second opinion on whether a change broke a documented safety invariant.',
   phases: [
     { title: 'Scan', detail: 'one finder agent per invariant rule in .claude/rules/' },
@@ -49,7 +49,7 @@ const VERDICT_SCHEMA = {
 }
 
 const scope = args && args.mode === 'full'
-  ? 'the entire src/ tree'
+  ? 'the entire Go source (cmd/ and internal/, plus bin/copilot-mcp.js; ignore _test.go except where a rule names a test)'
   : 'the pending diff (run `git status` and `git diff main...HEAD` — include both staged/unstaged changes and committed-but-unmerged commits — to find it)'
 
 function finderPrompt(rule) {

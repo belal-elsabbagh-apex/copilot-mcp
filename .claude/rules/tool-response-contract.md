@@ -1,19 +1,22 @@
 ---
 id: tool-response-contract
-files: src/server.ts, src/shared/util.ts, src/server.test.ts
+files: internal/server/tool.go, internal/server/tools_*.go, internal/server/registry_test.go
 ---
 
-Every registered tool returns via the `ok()` / `err()` helpers, and every `registerTool` call
-declares all four annotation hints: `readOnlyHint`, `destructiveHint`, `idempotentHint`,
-`openWorldHint`. `server.test.ts` enforces this wiring — it should fail if a tool is missing
-either.
+Every tool is registered through `addTool` (`internal/server/tool.go`), which renders the handler's result as
+one indented-JSON text block and turns every returned error or recovered panic into the `{error, reportIssue?}`
+error body (`toolError`). Every `mcp.Tool` declares a title, a description and all four annotation hints
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) — via `readOnlyHints(openWorld)` for reads
+and `writeHints(destructive, idempotent)` for writes. `registry_test.go` enforces this wiring
+(`TestEveryToolDeclaresTitleDescriptionAndAllFourAnnotationHints`,
+`TestReadOnlyToolsAreNonDestructiveAndIdempotent`) and `TestRegistersExactlyTheExpectedTools` pins the tool list.
 
 **Why:** MCP hosts use the annotation hints to decide how much autonomy/confirmation to grant
 a tool call (e.g. surfacing destructive, non-idempotent tools differently). A tool that's
 mistagged as read-only when it writes state, or missing hints entirely, defeats that.
 
-**Violation signature:** a `server.registerTool(...)` call missing one of the four annotation
-keys; a handler that returns a raw object/string instead of going through `ok()`/`err()`; a
-write tool (anything touching `copilot-client.ts`'s `req` with a mutating verb, or
-`uipath/actions.ts` or `apex/actions.ts`) tagged `readOnlyHint: true` or `destructiveHint: false` when it isn't
-actually safe to retry/no-op.
+**Violation signature:** an `mcp.AddTool`/`s.Server.AddTool` call that bypasses `addTool`; a tool with
+`Annotations` nil or built by hand with a missing hint; a handler that builds its own `mcp.CallToolResult`
+instead of returning a value/error; a write tool (anything that reaches `copilot.Client.Req` with a mutating
+verb, `internal/uipath/actions.go`, or `internal/apex/actions.go`) registered with `readOnlyHints(...)`, or one
+whose name is missing from `writeTools` in `registry_test.go`.

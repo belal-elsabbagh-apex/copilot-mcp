@@ -1,49 +1,73 @@
-name: Release on tag
+name: release
 
-# Push a tag like v1.2.0 -> create a GitHub Release with auto-generated notes.
-# The publish workflow keys off the SAME tag push (a GITHUB_TOKEN-created release
-# does NOT trigger other workflows), so publishing happens in parallel.
+# Push a tag like v2.1.0 (via `make release VERSION=2.1.0`) -> gate, build every platform binary,
+# pack the npm tarball and create the GitHub release (users install from the release asset URL).
+# Keyed off the tag push rather than `release: published`, because a GITHUB_TOKEN-created release
+# does not trigger workflows.
+#
+# package.json and manifest.json stay at 0.0.0-dev in git; the version is stamped from the tag
+# here, so there is no version string to forget to bump.
 on:
   push:
-    tags:
-      - "v*"
-
-permissions:
-  contents: write
+    tags: ["v*"]
 
 jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
   release:
+    needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A '-' in the tag (v2.1.0-rc.1) is a prerelease.
+      PRERELEASE: ${{ contains(github.ref_name, '-') && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      # fetch-depth 0: `git describe` stamps the binaries' version from the tag.
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4"
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # Build the self-contained minified bundle and pack a tarball. The stable
-      # `copilot-mcp.tgz` name backs the `releases/latest/download/…` URL; the
-      # version-stamped tarball npm pack emits stays attached for pinning.
-      - name: Build and pack
+      # A hand-pushed tag bypasses scripts/release.sh's guards: refuse one that is not on main.
+      - name: Require the tag to be on main
         run: |
-          bun run build
-          npm pack
-          cp "$(ls *.tgz)" copilot-mcp.tgz
-
-      # MCP Bundle (.mcpb) — single-file install for MCPB-supporting hosts
-      # (e.g. Claude Desktop). Reuses the dist/server.js built above.
-      - name: Pack MCP Bundle
-        run: bun run mcpb:pack
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main \
+            || { echo "::error::${GITHUB_REF_NAME} is not on origin/main; refusing to release."; exit 1; }
+      - uses: actions/setup-go@v7
         with:
-          generate_release_notes: true
-          files: |
-            *.tgz
-            copilot-mcp.mcpb
+          # Floats to the newest 1.27.x on purpose: shipped binaries should carry the latest
+          # stdlib security patches; the lint-compatibility reason for patch-pinning in check.yml
+          # does not apply to a plain build.
+          go-version: "1.27"
+
+      # VERSION is passed explicitly: the stamp below dirties the tree, so the Makefile's
+      # `git describe --dirty` default would report vX.Y.Z-dirty.
+      - name: Stamp the tag's version, build and pack
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          npm pkg set "version=${version}"
+          jq --arg v "${version}" '.version = $v' manifest.json > manifest.json.new
+          mv manifest.json.new manifest.json
+          make dist VERSION="${version}"
+          npm pack
+          # npm pack names it belal-elsabbagh-apex-copilot-mcp-X.Y.Z.tgz (kept for pinning); the
+          # stable copy backs releases/latest/download/copilot-mcp.tgz.
+          cp ./belal-elsabbagh-apex-copilot-mcp-*.tgz copilot-mcp.tgz
+          make mcpb VERSION="${version}"
+
+      - name: Create the GitHub release
+        run: |
+          # Re-running a tag's workflow must not fail on an existing release, but it must not
+          # swallow a real gh failure either -- so check for the release rather than || true.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; leaving it as is."
+            exit 0
+          fi
+          # The stable copilot-mcp.tgz / copilot-mcp.mcpb names back releases/latest/download/... URLs.
+          gh release create "${GITHUB_REF_NAME}" --generate-notes --prerelease="${PRERELEASE}" \
+            copilot-mcp.tgz "belal-elsabbagh-apex-copilot-mcp-${GITHUB_REF_NAME#v}.tgz" copilot-mcp.mcpb \
+            dist/linux-amd64/copilot-mcp#copilot-mcp-linux-amd64 \
+            dist/darwin-arm64/copilot-mcp#copilot-mcp-darwin-arm64 \
+            dist/windows-amd64/copilot-mcp.exe#copilot-mcp-windows-amd64.exe

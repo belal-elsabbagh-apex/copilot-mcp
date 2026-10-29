@@ -1,0 +1,77 @@
+{
+  "description": "Base SpecificContent fields shared across all portal auth-submit queue items. Portal-specific schemas extend this. IsApproved is forced false on every test pull.",
+  "groups": {
+    "member": [
+      "MemberID*",
+      "MemberFirstName",
+      "MemberLastName",
+      "MemberFullName",
+      "MemberDOB",
+      "MemberPhone",
+      "MemberFax",
+      "MemberZipCode"
+    ],
+    "provider": [
+      "ProviderFirstName",
+      "ProviderLastName",
+      "ProviderFullName",
+      "ProviderNPI*",
+      "ClinicNPI",
+      "ProviderPhone",
+      "ProviderFax",
+      "ProviderMail",
+      "ProviderID",
+      "ProviderTaxID"
+    ],
+    "referredTo": [
+      "ReferredToNPI*",
+      "ReferredToPhone",
+      "ReferredToAddress"
+    ],
+    "linked": [
+      "LinkedFacility",
+      "LinkedFacilityNPI",
+      "LinkedFacilityAddress",
+      "LinkedFacilityOtherName",
+      "LinkedFacilityType (annotation)",
+      "LinkedSpecialty",
+      "LinkedProviderFullName",
+      "LinkedProviderID",
+      "LinkedProviderNPI",
+      "LinkedProviderType (annotation)",
+      "LinkedPlaceOfService"
+    ],
+    "service": [
+      "Specialty*",
+      "Facility",
+      "Location",
+      "Diagnoses* (JSON array string)",
+      "ServiceCode* (JSON array string)",
+      "DescriptionOfService (JSON array string)",
+      "Units (JSON array string)"
+    ],
+    "flags": [
+      "addManualFacility (boolean, opt-in manual provider entry)",
+      "IsApproved (boolean, always false in tests)",
+      "IsUrgent (boolean)"
+    ],
+    "metadata": [
+      "orderUid",
+      "placeOfService",
+      "appointmentDate",
+      "OfficeComments",
+      "NoteBucketPath",
+      "clinicalDocPath",
+      "retryCount"
+    ],
+    "uipath": [
+      "callbackContext",
+      "token",
+      "serverURL",
+      "queueUrl",
+      "automationId",
+      "account"
+    ]
+  },
+  "notes": "* = required. Diagnoses/ServiceCode/DescriptionOfService/Units are JSON-array strings (e.g. '[\"I77.9\"]'). Any Linked* identity key that names a party (LinkedFacility, LinkedFacilityNPI, LinkedFacilityOtherName, LinkedProviderFullName, LinkedProviderID, LinkedProviderNPI) makes the order dual-auth: the Linked group is then the rendering party and Facility/ReferredTo* the facility. Linked*Type fields are annotations only."
+}

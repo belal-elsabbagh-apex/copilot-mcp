@@ -1,0 +1,14 @@
+{
+  "statuses": {
+    "drafted": "fresh empty draft (POST /api/v1/orders)",
+    "new": "draft with some fields set",
+    "incomplete": "missing facility/type/orderNames — stuck; not cloneable",
+    "pending": "pre-forReview working state",
+    "forReview": "ready-to-submit milestone (after /process + note upload)",
+    "inProgress": "submitted (POST /submit) — picked up for orchestration"
+  },
+  "errorCodes": {
+    "E6001": "status must be in drafted/new/incomplete/pending — i.e. already at forReview (treated as success by the mirror)"
+  },
+  "notes": "A prod order clones to forReview only if it has referredFacility + orderType + orderNames; otherwise it sticks at 'incomplete'."
+}
