@@ -56,6 +56,11 @@ jobs:
           # stable copy backs releases/latest/download/copilot-mcp.tgz.
           cp ./belal-elsabbagh-apex-copilot-mcp-*.tgz copilot-mcp.tgz
           make mcpb VERSION="${version}"
+          # Raw binaries need distinct basenames: gh uploads by basename (`file#text` only sets the
+          # label), so three `copilot-mcp` files collided and failed the v3.0.0 run (40918229437).
+          cp dist/linux-amd64/copilot-mcp copilot-mcp-linux-amd64
+          cp dist/darwin-arm64/copilot-mcp copilot-mcp-darwin-arm64
+          cp dist/windows-amd64/copilot-mcp.exe copilot-mcp-windows-amd64.exe
 
       - name: Create the GitHub release
         run: |
@@ -68,6 +73,4 @@ jobs:
           # The stable copilot-mcp.tgz / copilot-mcp.mcpb names back releases/latest/download/... URLs.
           gh release create "${GITHUB_REF_NAME}" --generate-notes --prerelease="${PRERELEASE}" \
             copilot-mcp.tgz "belal-elsabbagh-apex-copilot-mcp-${GITHUB_REF_NAME#v}.tgz" copilot-mcp.mcpb \
-            dist/linux-amd64/copilot-mcp#copilot-mcp-linux-amd64 \
-            dist/darwin-arm64/copilot-mcp#copilot-mcp-darwin-arm64 \
-            dist/windows-amd64/copilot-mcp.exe#copilot-mcp-windows-amd64.exe
+            copilot-mcp-linux-amd64 copilot-mcp-darwin-arm64 copilot-mcp-windows-amd64.exe
