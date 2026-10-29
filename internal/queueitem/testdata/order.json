@@ -1,0 +1,74 @@
+{
+  "orderUid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "status": "inProgress",
+  "patient": {
+    "patientName": "Doe, Jane Q",
+    "patientBirthDate": "1980-03-04",
+    "patientPhoneNumber": "555-0100"
+  },
+  "insurance": {
+    "name": "Acme Health",
+    "memberId": "M123456"
+  },
+  "speciality": {
+    "name": "Cardiology"
+  },
+  "referredFacility": {
+    "name": "Example Heart Clinic",
+    "NPI": "1111111111",
+    "address": "1 Example Way",
+    "faxNumber": "555-0102",
+    "phone": "555-0103",
+    "placeOfService": "11",
+    "isSpeciality": true,
+    "type": "facility"
+  },
+  "ICDCodes": [
+    {
+      "code": "I77.9"
+    },
+    {
+      "code": "M54.5"
+    }
+  ],
+  "CPTCodes": [
+    {
+      "code": "99213",
+      "description": "Office visit: established patient",
+      "units": 1,
+      "treatments": [
+        "ECG"
+      ]
+    },
+    {
+      "code": "93000",
+      "description": "ECG",
+      "units": "2",
+      "treatments": null
+    }
+  ],
+  "location": "Main Clinic",
+  "retro": true,
+  "urgency": "Urgent",
+  "comments": "Please expedite",
+  "appointmentDate": "5/6/2026",
+  "orderDate": "2026-05-01",
+  "placeOfService": "22",
+  "referralFormJSON": {
+    "from": {
+      "name": "Smith, Alan B",
+      "NPI": "2222222222",
+      "address": "9 Provider Rd",
+      "faxNumber": "555-0104",
+      "phoneNumber": "555-0105"
+    },
+    "to": {
+      "name": "Example Heart Clinic",
+      "NPI": "1111111111",
+      "speciality": "Cardiology"
+    },
+    "patient": {
+      "phoneNumber": "555-0199"
+    }
+  }
+}

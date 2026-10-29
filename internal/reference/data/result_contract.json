@@ -1,0 +1,35 @@
+{
+  "description": "Output contract every portal automation writes (result.json), read by the orchestrator (UiPath, or the Apex adapter) to decide retry / business-exception / success. Written once via writeResult(); crash-guarded so a FAILURE result exists even on a hard crash. Invalid data is always FAILURE + hasInvalidData (NOT_SUBMITTED routes to the success path and BE never sees hasInvalidData).",
+  "result": [
+    "SUBMITTED",
+    "NOT_SUBMITTED",
+    "FAILURE"
+  ],
+  "fields": {
+    "result": "REQUIRED — SUBMITTED | NOT_SUBMITTED | FAILURE",
+    "screenshotPath": "REQUIRED — path to final screenshot",
+    "hasInvalidData": "OPTIONAL — true only for data-validation failures",
+    "reason": "OPTIONAL — e.g. 'MemberId', 'Facility' (with hasInvalidData)",
+    "description": "OPTIONAL — human-readable failure detail; what the orchestrator logs / the Apex job row shows. NOT an invalid-data signal (only hasInvalidData is) and never sent to BE",
+    "invalidCodes": "OPTIONAL — bad ICD/CPT codes, or [] for member/facility",
+    "referenceNumber": "OPTIONAL — portal auth number (SUBMITTED only)",
+    "authScreenshots": "OPTIONAL — section screenshot paths for PDF generation",
+    "postSubmit": "OPTIONAL — post-submit page diagnostics (see postSubmit shape)",
+    "receipt": "OPTIONAL — what the PORTAL acknowledged (submissionDate, status, decisionDate, notes), verbatim; a SIBLING of postSubmit, never nested. Absent = nothing acknowledged; {} = acknowledged, no fields",
+    "error": "OPTIONAL — only on FAILURE; cleared if a fallback upgrades to SUBMITTED. Stripped into debug.json (not result.json) except OtpRequested and a failed facility-send, so put anything a human must see in description too",
+    "tracePath": "OPTIONAL — Playwright trace.zip path, patched onto result.json by closeBrowser after the fact (not part of the writeResult call)"
+  },
+  "postSubmit": {
+    "url": "post-submit page URL",
+    "title": "page title",
+    "visibleTextPrefix": "leading visible text",
+    "htmlPath": "saved HTML path",
+    "screenshotPath": "saved screenshot path",
+    "evidencePdfPath": "OPTIONAL — chart-grade evidence PDF; rides confirmSubmit as evidencePath when APPROVED",
+    "approval": "OPTIONAL — APPROVED | PENDING | UNKNOWN",
+    "approvalSource": "OPTIONAL — url | text",
+    "approvalEvidence": "OPTIONAL — matched evidence string",
+    "status": "OPTIONAL — BE instant-notification enum (approved, ...)",
+    "expirationDate": "OPTIONAL — the auth's expiry, portal-rendered, verbatim"
+  }
+}

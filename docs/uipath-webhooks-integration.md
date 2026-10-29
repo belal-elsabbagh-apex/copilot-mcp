@@ -49,9 +49,8 @@ Sources: UiPath Orchestrator docs — *About Webhooks*, *Webhooks Requests* (API
 
 ## 2. The core architectural tension
 
-This MCP server is **stdio-only**: `src/server.ts` opens a single
-`StdioServerTransport` and nothing else (see `isEntrypoint()` at the bottom of the
-file). It has no listening port, and the host process spawns/kills it per client
+This MCP server is **stdio-only**: `cmd/copilot-mcp/main.go` runs `server.New(version).Run(ctx,
+&mcp.StdioTransport{})` and nothing else. It has no listening port, and the host process spawns/kills it per client
 session — there is no guarantee of uptime independent of a connected client.
 
 Webhooks need the opposite: an **always-reachable HTTP endpoint** with uptime
@@ -62,7 +61,7 @@ must not be conflated:
 1. **Managing the subscription** — create/list/enable/delete webhook definitions in
    Orchestrator, choose events/folders. This fits naturally as ordinary MCP tools
    (same shape as the existing `list_queues`/`list_triggers`/`add_queue_item`
-   read+write pairs in `src/uipath/`).
+   read+write pairs in `internal/uipath/`).
 2. **Receiving deliveries** — this cannot live inside the stdio process in any
    reliable way; it needs a component with independent uptime.
 
@@ -70,14 +69,14 @@ must not be conflated:
 
 ### A. Decoupled receiver + durable store + query tools — recommended foundation
 
-A small standalone HTTP listener (e.g. `Bun.serve`, run persistently via `hub start`,
-**not** part of `server.ts`'s stdio path) verifies `X-UiPath-Signature` and appends
+A small standalone HTTP listener (e.g. a Go `net/http` listener, run persistently via `hub start`,
+**not** part of the stdio server in `cmd/copilot-mcp`) verifies `X-UiPath-Signature` and appends
 validated events to a local SQLite file (e.g. `webhook-events.sqlite`). New read-only
 MCP tools — `list_webhook_events`, `get_webhook_event` — query that store, mirroring
 the existing pull-oriented tool style (`list_jobs`, `get_job`). New management tools —
 `list_webhooks`, `create_webhook`, `delete_webhook`, `test_webhook` (Orchestrator
 exposes a ping/test-send action) — wrap the `odata/Webhooks` API the way
-`src/uipath/actions.ts` already wraps queue/job mutations.
+`internal/uipath/actions.go` already wraps queue/job mutations.
 
 This turns push into "pull the buffered history," the only pattern that survives the
 stdio process's ephemeral lifetime: an agent session that starts an hour after a
@@ -101,7 +100,7 @@ HTTPS instead of local SQLite.
 
 ### C. Embedded listener inside the stdio server process
 
-Have `server.ts` optionally `Bun.serve()` a port when a config flag
+Have the server optionally `http.ListenAndServe` a port when a config flag
 (e.g. `uipath.webhook.listen`) is set.
 
 - **Pro:** zero extra moving parts for local testing.
@@ -112,7 +111,7 @@ Have `server.ts` optionally `Bun.serve()` a port when a config flag
 ### D. Push into a live MCP session (resource-update / logging notifications)
 
 If a client happens to be connected when an event lands, `mcpLog`
-(`src/mcp/notify.ts`) or a resource-update notification could surface it live.
+(`s.mcpLog` in `internal/server/logging.go`) or a resource-update notification could surface it live.
 
 - **Pro:** near-real-time UX when a session is open.
 - **Con:** cannot be the delivery guarantee — most events arrive with nobody
@@ -123,9 +122,9 @@ If a client happens to be connected when an event lands, `mcpLog`
 
 For high-value events (`Job.faulted`, `QueueItem.transactionFailed`), have the receiver
 call the existing pure formatter directly —
-`formatFaultedJobIssue`/`normalizeError` in `src/uipath/faults.ts` — and file/update the
+`uipath.FormatFaultedJobIssue` / `orchestrator.NormalizeError` (`internal/uipath/faults.go`, `internal/orchestrator/faults.go`) — and file/update the
 GitHub issue itself, with no agent in the loop. MCP tools stay read-only for
-inspection/history/subscription management. This extends the pattern `faults.ts`
+inspection/history/subscription management. This extends the pattern `faults.go`
 already documents (today a **prompt** hands the built payload to the host's GitHub MCP
 server); this option automates that hand-off instead of requiring a human to notice a
 fault and ask.
@@ -149,11 +148,11 @@ happens to be connected.
 ## 5. Open questions before implementation
 
 - **Config shape.** New `uipath.webhook` section in `copilot-mcp.config.json`
-  (`UipathSchema` in `src/config/config.ts`) — needs `receiverUrl` (what Orchestrator
+  (`config.UipathConfig` in `internal/config/types.go`, validated in `validate.go`) — needs `receiverUrl` (what Orchestrator
   should call), `secret`, and receiver-side listen settings (port, SQLite path).
 - **Receiver process lifecycle.** Run via `hub start` (persist across omp sessions) —
-  confirm it should be a separate `bin`/script bundled by `bun build`, not folded into
-  `dist/server.js`.
+  confirm it should be a separate `cmd/` binary shipped alongside, not folded into
+  the `copilot-mcp` stdio binary.
 - **Event retention.** How long to keep rows in `webhook-events.sqlite` before pruning;
   whether prod vs pre-prod events need separate scoping (mirroring the
   prod/pre-prod isolation invariant already enforced elsewhere in this server).

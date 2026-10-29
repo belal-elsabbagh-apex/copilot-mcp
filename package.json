@@ -1,55 +1,25 @@
 {
   "name": "@belal-elsabbagh-apex/copilot-mcp",
-  "version": "2.0.0",
-  "type": "module",
+  "version": "0.0.0-dev",
   "description": "MCP server exposing EHR Copilot tools: prod->pre-prod order clone, queue-item build, and UiPath + Apex Orchestrator execution analysis",
   "author": "Belal Elsabbagh",
   "license": "UNLICENSED",
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/belal-elsabbagh-apex/copilot-mcp.git"
   },
-  "main": "dist/server.js",
   "bin": {
-    "copilot-mcp": "dist/server.js"
+    "copilot-mcp": "bin/copilot-mcp.js"
   },
   "files": [
-    "dist",
+    "bin/copilot-mcp.js",
+    "dist/*/copilot-mcp",
+    "dist/*/copilot-mcp.exe",
     "copilot-mcp.config.example.json",
     "README.md"
   ],
   "engines": {
-    "node": ">=24",
-    "bun": ">=1.4.0"
-  },
-  "scripts": {
-    "build": "bun build src/server.ts --target node --format esm --minify --outfile dist/server.js && chmod +x dist/server.js",
-    "start": "bun run src/server.ts",
-    "dev": "bun --watch src/server.ts",
-    "test": "bun test",
-    "test:watch": "bun test --watch",
-    "typecheck": "tsc --noEmit",
-    "lint": "biome check src",
-    "format": "biome format --write src",
-    "inspect": "bunx @modelcontextprotocol/inspector bun run src/server.ts",
-    "mcpb:pack": "bun run build && rm -rf .mcpb-stage copilot-mcp.mcpb && mkdir -p .mcpb-stage/dist && cp manifest.json copilot-mcp.config.example.json .mcpb-stage/ && cp dist/server.js .mcpb-stage/dist/server.js && bunx mcpb pack .mcpb-stage copilot-mcp.mcpb && rm -rf .mcpb-stage",
-    "prepare": "lefthook install || true; bun run build",
-    "prepack": "bun run build",
-    "prepublishOnly": "bun run typecheck && bun run build"
-  },
-  "dependencies": {},
-  "devDependencies": {
-    "@anthropic-ai/mcpb": "^2.1.2",
-    "@biomejs/biome": "^2.5.1",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@types/bun": "^1.4.0",
-    "@types/node": "^26.2.0",
-    "lefthook": "^2.1.9",
-    "typescript": "^7.0.2",
-    "zod": "^3.25.76"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "node": ">=20"
   }
 }

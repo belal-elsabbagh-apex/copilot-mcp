@@ -1,8 +1,55 @@
 # @belal-elsabbagh-apex/copilot-mcp
 
-MCP server exposing EHR Copilot operations over stdio. Built with [Bun](https://bun.sh)
-(`bun build` bundles `src/` → a node-runnable `dist/server.js`), so it runs under either
-`bunx` **or** `npx`. Published on GitHub Packages.
+MCP server exposing EHR Copilot operations over stdio. It is a Go program, **served through `npx`**: the
+release tarball's `bin/copilot-mcp.js` is a tiny Node launcher that execs the bundled static Go binary for your
+platform (`dist/<goos>-<goarch>/copilot-mcp[.exe]`).
+
+**Platforms:** linux/amd64, darwin/arm64 (Apple Silicon) and windows/amd64 — nothing else ships (Intel Macs and
+linux/arm64 are unsupported; the launcher exits with a message listing the three). **Requirements:** Node >= 20 to
+run it (the launcher only); nothing else — the binary is self-contained. Go 1.27 is needed only to *develop* it.
+
+## Install and run
+
+**There is no npm registry.** The package is `private`, is not published to npmjs or GitHub Packages, and needs no
+`.npmrc` or token. Every GitHub release attaches `copilot-mcp.tgz` and the repo is public, so `npx` runs it straight
+from the download URL. `releases/latest/download/copilot-mcp.tgz` always points at the newest release; swap in
+`releases/download/vX.Y.Z/copilot-mcp.tgz` to pin a version.
+
+```json
+{
+  "mcpServers": {
+    "copilot": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest/download/copilot-mcp.tgz"
+      ],
+      "env": {
+        "COPILOT_MCP_CONFIG": "/abs/path/to/copilot-mcp.config.json"
+      }
+    }
+  }
+}
+```
+
+Pinned form: `npx -y https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/download/vX.Y.Z/copilot-mcp.tgz`
+(a release also carries the same tarball as `belal-elsabbagh-apex-copilot-mcp-X.Y.Z.tgz`).
+Use `COPILOT_MCP_LOCAL_DIR` instead of `COPILOT_MCP_CONFIG` for the split legacy files.
+
+The tarball is about 13 MB (v2.0.0's JS tarball was 174 KB): each Go binary carries its own runtime. `npx` caches
+the package once per version, so a pinned URL downloads once.
+A release also attaches the raw binaries (`copilot-mcp-linux-amd64`, `copilot-mcp-darwin-arm64`,
+`copilot-mcp-windows-amd64.exe`) if you would rather run one directly with no Node at all.
+
+### As an MCP Bundle (`.mcpb`)
+
+Every release also attaches `copilot-mcp.mcpb` — a self-contained [MCP Bundle](https://github.com/anthropics/mcpb)
+(launcher + the three platform binaries + `manifest.json` + `copilot-mcp.config.example.json`) for one-click install in
+MCPB-supporting hosts (e.g. Claude for macOS/Windows). Download it from the
+[latest release](https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest), open it with the host, and
+when prompted for the **Config file** option point it at your own `copilot-mcp.config.json` (see
+[`copilot-mcp.config.example.json`](./copilot-mcp.config.example.json)). The host runs `node bin/copilot-mcp.js`
+with `COPILOT_MCP_CONFIG` set to that path.
 
 ## Tools
 
@@ -29,6 +76,8 @@ All read tools here are READ-ONLY. Writes (`delete_preprod_order`, `create_prepr
 | `submit_preprod_order` | `profile` | Submit a PRE-PROD order sitting at forReview, advancing it to inProgress. A real, deliberate write — requires explicit user authorization before calling. |
 | `delete_preprod_order` | `profile` | Delete one or more orders from PRE-PROD (`DELETE /api/v1/orders/{uid}`). Never targets prod. |
 | `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
+| `search_orders` | `env`, `profile` | Filter an account's orders by location, insurance, referred-to, order type, auth/upload status, MRN, free text or any of 5 date ranges (`POST /orders/filter`). Returns slim, non-PHI rows (`referredTo.npi` is always a string, even when the BE sends a number); defaults to type `Outbound Referral`, `pageSize` 100, `pageNumber` 1. |
+| `get_order_category_stats` | `env`, `profile` | Cheap per-folder order counts (For Review, PCP Notes, Processing, Archived, with sub-buckets) for a filter, same dimensions as `search_orders`, no pagination. |
 | `find_stuck_orders` | `env`, `profile`, `orchestrator?` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheck` correlates each to its queue item(s) and job(s) on UiPath and/or Apex (`orchestrator` omitted = both) for a coarse verdict using the latest attempt; adds `job-never-started` for an Apex job that failed before any worker claimed it. Each stuck order carries `orchestrator: { backend, verdict, … }`. |
 | `build_queue_item` | `env`, `profile`, `orchestrator` | Fetch an order and BUILD the queue-item request payload for the chosen orchestrator — never POSTs. `IsApproved` is always `false`. UiPath stringifies array/object fields as before; Apex keeps native types. Pair with `add_queue_item` to actually post it. |
 | `get_login_token` | `env`, `profile` | Log into the Copilot BE (reusing a cached session) and return the session JWT (the same token UiPath callbacks use as `SpecificContent.token`), plus `mode` (`support`/`direct`), `clinicUid`, and `activeClinicId`. Authenticates only — reads/writes no order data. |
@@ -41,16 +90,16 @@ All READ-ONLY. Every tool takes `env` and `orchestrator` (`uipath` | `apex`); re
 | Tool | Args | What it does |
 |------|------|--------------|
 | `list_jobs` | `env`, `orchestrator` | List the most recent jobs in a folder, newest first, no order correlation (`since`, `processName`, `top`, `folder`). Apex rows are thin (`fault.class` = `error_class`); use `get_job` for detail. |
-| `get_job` | `env`, `orchestrator` | Fetch one (`jobId`) or up to 25 (`jobIds`) jobs — the light poll target after `start_job`. `includeLogDigest:true` adds a structured fault + condensed log digest; on Apex a missing log yields `logsUnavailable.reason` = `running` \| `never-started` \| `artifact-policy` instead of a digest. |
-| `get_job_logs` | `env`, `orchestrator` | Fetch a job's logs (oldest first, capped 500), batchable via `jobIds` (up to 25) and filterable (`minLevel`, `contains`, `onlyFailures`, `tail`); messages truncate to 400 chars unless `fullMessages:true`; `includeRawFields` adds each row's structured fields; `includeVideo` adds a `video` reference. |
-| `get_job_artifacts` | `env` (**no `orchestrator`: Apex-only**) | List a job's artifacts (`filename`, `type`, `sizeBytes`) and optionally `download` named files (or `"all"`) to `~/.cache/copilot-mcp/artifacts/<jobId>/` (mode `0700`) — `job.log`, `trace.zip`, screenshots, recording. PHI: never commit or paste them. |
+| `get_job` | `env`, `orchestrator` | Fetch one (`jobId`) or up to 25 (`jobIds`) jobs — the light poll target after `start_job`. `includeLogDigest:true` adds a structured fault + condensed log digest; on Apex a missing log yields `logsUnavailable.reason` = `running` \| `never-started` \| `artifact-policy` instead of a digest. Optional `refresh: true` bypasses the persistent cache (see Caching). |
+| `get_job_logs` | `env`, `orchestrator` | Fetch a job's logs (oldest first, capped 500), batchable via `jobIds` (up to 25) and filterable (`minLevel`, `contains`, `onlyFailures`, `tail`); messages truncate to 400 chars unless `fullMessages:true`; `includeRawFields` adds each row's structured fields; `includeVideo` adds a `video` reference. Optional `refresh: true` bypasses the persistent cache (see Caching). |
+| `get_job_artifacts` | `env` (**no `orchestrator`: Apex-only**) | List a job's artifacts (`filename`, `type`, `sizeBytes`) and optionally `download` named files (or `"all"`) to `~/.cache/copilot-mcp/artifacts/<jobId>/` (mode `0700`) — `job.log`, `trace.zip`, screenshots, recording. PHI: never commit or paste them. Optional `refresh: true` bypasses the persistent cache (see Caching). |
 | `find_order_queue_items` | `env`, `orchestrator?` | Find the queue item(s) an order flowed through and their job ids. `orchestrator` omitted = search every registered backend (each fails independently into `searchErrors`); `folder` is only accepted with an explicit `orchestrator`. Output `jobIds: { uipath?: […], apex?: […] }` feeds straight into `get_job`'s `jobIds`. |
 | `list_queue_items` | `env`, `orchestrator` | Browse a portal's queue for triage — `queue` is a portal key/alias or a queue id, optionally filtered by `status`. |
 | `list_queues` | `env`, `orchestrator` | List queues in a folder — use to discover a queue id (pre-prod ids differ from the prod portal registry) or the exact queue name for `add_queue_item`. |
 | `list_processes` | `env`, `orchestrator` | List processes (UiPath releases / Apex workflows) — `id` is the `processId` `start_job` takes; check `version` (UiPath: `isLatestVersion`) and, on Apex, `details.artifactPolicy`. |
 | `list_triggers` | `env`, `orchestrator` | List triggers (queue + time). Apex has no triggers API, so queue triggers are synthesized from queues (`enabled` = active and auto-drain) and time triggers come from schedules. |
 | `pull_queue_item` | `orchestrator`, `env` (optional if `url` given) | Fetch one queue item (UiPath: Orchestrator `url` or `itemId`; Apex: `queueId` + `itemId`) and return its content as a ready-to-run test payload. `IsApproved` is always forced `false`. |
-| `build_faulted_job_issue` | `env`, `orchestrator` | Read a faulted job + its logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`). Posts nothing — the caller hands the payload to a GitHub MCP server. |
+| `build_faulted_job_issue` | `env`, `orchestrator` | Read a faulted job + its logs and BUILD a ready-to-post GitHub issue payload (`title`/`body`/`labels`/`faultSignature`/`searchQuery`/`recurrenceComment`). Posts nothing — the caller hands the payload to a GitHub MCP server. Optional `refresh: true` bypasses the persistent cache (see Caching). |
 
 ### Orchestrator (UiPath + Apex) — writes (pre-prod only)
 
@@ -71,9 +120,9 @@ only settings tool that writes, and it's additive-only against pre-prod (never o
 
 | Tool | Args | What it does |
 |------|------|--------------|
-| `diff_settings` | `profile` | Diff an account's settings between prod and pre-prod (UID/timestamp/dummy-email noise stripped, list items matched by name not UID). Scope with `groups` (top-level, e.g. `['orders']`) and/or `sections` (exact keys). |
+| `diff_settings` | `profile` | Diff an account's settings between prod and pre-prod (UID/timestamp/dummy-email noise stripped, list items matched by name not UID). Scope with `tags` (e.g. `['orders']`) and/or `sections` (exact keys). |
 | `get_settings` | `env`, `profile` | Fetch an account's settings sections from ONE env — the single-env counterpart to `diff_settings`. Normalized (noise-stripped) by default; `normalized:false` for raw payloads with real UIDs. |
-| `list_setting_sections` | — | List every section `diff_settings`/`get_settings`/`plan_settings_sync` can scope to (key, label, group, kind, whether it's "derived"/crawled, and its `matchKey`). Pure static-catalog read, no network. |
+| `list_setting_sections` | — | List every section `diff_settings`/`get_settings`/`plan_settings_sync` can scope to (key, label, `tags`, kind, whether it's "derived"/crawled, and its `matchKey`), plus the list of all tags; narrow with `tag` / `sections`. Pure static-catalog read, no network. |
 | `plan_settings_sync` | `profile` | Compute — WITHOUT writing — the additive actions that would copy prod-only settings into pre-prod. Covers the **specialties** domain (`specialties`/`referred-providers`/`referred-facilities`) and the **orders** domain (create-only). Each action gets a stable id (`section:op:typeName:itemName`); refs with no pre-prod match by name are dropped with a warning. Sections with no verified write endpoint land in `skippedSections`. |
 | `apply_settings_sync` | `profile` | Execute a reviewed selection of `plan_settings_sync` actions against pre-prod. Never accepts request bodies — it **re-plans server-side** (same scoping args) and executes only `actionIds` or an explicit `all:true` (exactly one required). Stale ids land in `unmatchedIds` instead of executing. Every write is audit-logged to the client. |
 
@@ -88,7 +137,7 @@ only settings tool that writes, and it's additive-only against pre-prod (never o
 
 User-invokable workflow prompts chain the tools above for common ops tasks:
 `diagnose-order`, `reconcile-settings`, `inspect-settings`, `clone-and-verify-order`,
-`triage-stuck-orders`, and `report-faulted-jobs`.
+`triage-stuck-orders`, `report-faulted-jobs`, and `send-mcp-feedback`.
 
 `reconcile-settings` walks the full settings workflow: `list_setting_sections` →
 `diff_settings` → `plan_settings_sync` → review the planned action ids with the user →
@@ -111,6 +160,9 @@ and commenting on the existing issue when the same fault recurs. Apex fault sign
 GitHub credentials**: the prompt drives a **GitHub MCP server connected in the host** to do
 the actual search/create/comment, so that server must be connected with write access to the
 repo.
+
+`send-mcp-feedback` (`summary`, optional `kind` = `bug` | `feedback`) turns a report about this server itself into a
+GitHub issue via `build_mcp_issue` and the host's GitHub tooling.
 
 ## Configuration
 
@@ -143,7 +195,7 @@ Authenticated sessions (cookies + JWT) are cached in memory and, by default, on 
 `~/.cache/copilot-mcp/sessions.json` (mode `0600`; `$XDG_CACHE_HOME` is honored when set to an
 absolute path; `COPILOT_MCP_CACHE` overrides the path outright) so a server restart doesn't
 burn a login. Set `"copilot.sessionCache": false` to disable disk persistence (memory-only for
-the process lifetime). This is what keeps the support account's 10-logins-per-15-minutes budget
+the process lifetime; this also disables the job caches and token persistence, see Caching). This is what keeps the support account's 10-logins-per-15-minutes budget
 from being exhausted by routine restarts — never commit or echo that cache file, it holds live
 tokens.
 
@@ -172,7 +224,7 @@ Add an `apex` block to enable `orchestrator: "apex"`:
 - `serverUrlByEnv` / `queueUrl` pin what a posted queue item may carry (the write guard fails closed when they are unset).
 - Any of `apiUrl` / `username` / `password` the file leaves out is read from `APEX_API_URL` /
   `APEX_USER_NAME` / `APEX_PASSWORD`. This needs a host that passes its environment through (CLI
-  hosts and `bunx` do); **MCPB installs only pass `COPILOT_MCP_CONFIG`, so they must use the file.**
+  hosts and `npx` do); **MCPB installs only pass `COPILOT_MCP_CONFIG`, so they must use the file.**
 - With neither source configured, every `orchestrator: "apex"` call fails with "Apex is not
   configured"; UiPath and Copilot tools are unaffected. `doctor` reports which source was used.
 
@@ -185,13 +237,38 @@ it's what an agent reads to set this server up from scratch.
 
 When a tool fails for a reason that looks like a bug in this server (an unexpected
 exception — not a bad profile, missing/invalid config, not-found, auth, or any HTTP error
-the upstream system returned), the error response includes a `reportIssue` block with a
+the upstream system returned; a transport failure such as a refused/reset connection, a DNS error or a
+timeout *is* flagged), the error response includes a `reportIssue` block with a
 prefilled GitHub new-issue URL. This is on by default; the optional `feedback` block turns
 it off or repoints it:
 
 ```json
 "feedback": { "enabled": false, "repositoryUrl": "https://github.com/your-org/your-fork" }
 ```
+
+## Caching
+
+Settled jobs never change, so reads of them are cached **persistently** (memory + disk) and survive restarts:
+Apex artifact listings and parsed `job.log`, UiPath RobotLogs and terminal job details, plus the Apex JWT and UiPath
+OAuth token (so a restart doesn't burn a login). An entry is stored only when a live read shows the job
+terminal **and** settled (ended 5+ minutes ago; 15 for Apex `cancelled`/`lost`/`timed_out`); errors, not-found
+and running jobs are never cached, and write tools never read through a cache. The two backends differ on a
+*hit*: Apex always reads the job live first (so a hit is served only after that read confirms the job is still
+settled), while UiPath serves a hit with **no upstream call at all** (terminal states are absorbing, and a
+per-hit read would spend the tenant's 100 req/min `Jobs` budget); UiPath makes its extra light `Jobs` read only on a miss.
+
+- **Job logs and outputs are PHI and now persist on disk** under the cache directory (`~/.cache/copilot-mcp/`;
+  `$XDG_CACHE_HOME` and `COPILOT_MCP_CACHE` are honored, same rules as the session cache): `cache/<namespace>/` and
+  `tokens/`, directories `0700`, files `0600`, filenames are hashes. Same protection as the artifacts directory —
+  never commit or paste them. Bounded to 512 MiB per namespace and 30 days.
+- **Force a refresh:** pass `refresh: true` to `get_job`, `get_job_logs` or `build_faulted_job_issue`. It skips the
+  cache read and stores the fresh result. `get_job_artifacts` also accepts it, but that tool never reads a cache
+  (it always lists live); there `refresh` only re-downloads files whose local copy already matches.
+- **Turn it off:** `"copilot.sessionCache": false` disables *all* disk persistence (sessions, tokens, job caches);
+  they then live in memory for the process only. Or delete the cache directory at any time.
+- `LOG_LEVEL=debug` logs cache events (`hit-disk`, `hit-memory`, `stored`, `refresh-bypass`) with hashed keys only.
+
+Details, keys and bounds: [`docs/concurrency-and-caching.md`](./docs/concurrency-and-caching.md).
 
 ## Migrating from v1.x (v2.0.0 breaking changes)
 
@@ -223,93 +300,53 @@ the raw value is always in `rawState`.
 
 ## Local development
 
+Needs Go 1.27 (and Node >= 20, `jq`, `curl` and `python3` for the package smoke). **`make check` is the single
+gate** — vet, gofmt, golangci-lint (pinned), actionlint, `go test -race`, a package smoke (cross-builds the three
+platforms, runs the launcher through `initialize`, checks the tarball contents, then cold-installs the tarball over
+local HTTP with `npx -y http://127.0.0.1:<port>/copilot-mcp.tgz` — the shipped install path) and the release-script
+self-test — and CI runs exactly it.
+
 ```bash
-bun install          # also installs the lefthook pre-commit hook (via `prepare`)
-bun run typecheck
-bun run lint         # biome check
-bun test             # bun's built-in test runner (src/*.test.ts)
-bun run build        # bundle src -> dist/server.js (node-runnable, what npx/bunx execute)
-bun run start        # run from source via bun (no build needed)
-bun run dev          # watch mode
+make build         # ./copilot-mcp (version from `git describe`, leading v stripped)
+make test          # go test -race ./...
+make check         # the whole gate
+make hooks         # opt in: pre-push hook runs `make check`
+go test -race ./internal/copilot/settings/ -run TestName   # one package / test
+go run ./cmd/copilot-mcp                                   # run from source (needs COPILOT_MCP_CONFIG)
 ```
 
 ### Exercising the tools
 
-`bun run inspect` launches the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-against the server from source — a UI to list and call the tools without a host. Point it
-at a config first (e.g. `COPILOT_MCP_CONFIG=… bun run inspect`).
-
-Logging is silent by default so it never corrupts the stdio JSON-RPC stream. Set
-`LOG_LEVEL=debug` (or `COPILOT_MCP_DEBUG=1`) to route progress logs to **stderr**.
-
-A `pre-commit` hook (lefthook) runs `biome check` + `typecheck` on commit; CI
-(`.github/workflows/ci.yml`) runs typecheck/lint/build/test on every PR and push to `main`.
-
-## Installing — run directly from the release asset
-
-Every release attaches a self-contained tarball as a GitHub Release asset, and the repo is
-public, so `npx`/`bunx` can run it straight from the download URL — **no registry, no
-`.npmrc`, no auth token**. The `releases/latest/download/copilot-mcp.tgz` URL always points
-at the newest release; swap in a `download/vX.Y.Z/…` URL to pin a version.
-
-### Wire into `.mcp.json`
-
-```json
-{
-  "mcpServers": {
-    "copilot": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest/download/copilot-mcp.tgz"
-      ],
-      "env": {
-        "COPILOT_MCP_CONFIG": "/abs/path/to/copilot-mcp.config.json"
-      }
-    }
-  }
-}
-```
-
-`npx` and `bunx` are interchangeable here (the published bin, `dist/server.js`, is a plain
-node ESM entry). To pin a specific version, use the version-stamped asset instead of
-`latest`, e.g. `.../releases/download/v1.14.0/belal-elsabbagh-apex-copilot-mcp-1.14.0.tgz`.
-Use `COPILOT_MCP_LOCAL_DIR` instead of `COPILOT_MCP_CONFIG` for the split legacy files.
-
-The package is also published to this repo's GitHub Packages registry (see below), but that
-path needs a `read:packages` token; the release-asset URL above is the zero-auth default.
-
-## Installing — as an MCP Bundle (`.mcpb`)
-
-Every release also attaches a `copilot-mcp.mcpb` — a self-contained
-[MCP Bundle](https://github.com/anthropics/mcpb) (`dist/server.js` + `manifest.json` +
-`copilot-mcp.config.example.json`) for one-click install in MCPB-supporting hosts (e.g. Claude
-for macOS/Windows). Download `copilot-mcp.mcpb` from the
-[latest release](https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest), open it
-with the host, and when prompted for the **Config file** option point it at your own
-`copilot-mcp.config.json` (see [`copilot-mcp.config.example.json`](./copilot-mcp.config.example.json)
-for the shape) — the host launches `node dist/server.js` with `COPILOT_MCP_CONFIG` set to that
-path. Rebuild it locally with `bun run mcpb:pack` (stages `manifest.json` + the built `dist/`
-into `.mcpb-stage/` and packs it via `@anthropic-ai/mcpb`); `bunx mcpb validate manifest.json` /
-`bunx mcpb info copilot-mcp.mcpb` are useful for checking it without a host.
-
-## Publishing
-
-Publishing is tag-driven. Bump `version` in `package.json`, commit, then push a matching
-`vX.Y.Z` tag:
+Build, then launch the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) against the binary —
+a UI to list and call the tools without a host:
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+make build
+COPILOT_MCP_CONFIG=/abs/path/to/copilot-mcp.config.json npx @modelcontextprotocol/inspector ./copilot-mcp
 ```
 
-That one tag push fans out to two workflows (both keyed off the tag, because a
-`GITHUB_TOKEN`-created release does not trigger other workflows):
+Logging is silent below warn by default so it never corrupts the stdio JSON-RPC stream. Set `LOG_LEVEL=debug`
+(or `COPILOT_MCP_DEBUG=1`) to route logs to **stderr**.
 
-- **Release on tag** (`release.yml`) — builds the bundle, `npm pack`s it, and creates a GitHub
-  Release with auto-generated notes. It attaches two tarball assets: the version-stamped
-  `belal-elsabbagh-apex-copilot-mcp-X.Y.Z.tgz` (for pinning) and a stable-named
-  `copilot-mcp.tgz` that backs the `releases/latest/download/copilot-mcp.tgz` URL used above.
-- **Publish** (`publish.yml`) — typechecks, builds, and runs `bun publish` to GitHub
-  Packages using the repo's `GITHUB_TOKEN` (`packages: write`); the package inherits the
-  repository's public visibility. Also runnable manually via **workflow_dispatch**.
+Conventions, invariants and the package map: [`CLAUDE.md`](./CLAUDE.md); Go style:
+[`.claude/skills/go-style/`](./.claude/skills/go-style/SKILL.md); concurrency and caching:
+[`docs/concurrency-and-caching.md`](./docs/concurrency-and-caching.md).
+
+## Releasing
+
+Tag-driven; the version is the git tag, so there is **nothing to bump by hand** (`package.json` and
+`manifest.json` stay at `0.0.0-dev`; the workflow stamps them). Add a `## [X.Y.Z] - date` entry to
+`CHANGELOG.md`, merge to `main`, then:
+
+```bash
+make release VERSION=X.Y.Z DRY_RUN=1   # print the plan
+make release VERSION=X.Y.Z             # tag origin/main and push only that tag
+```
+
+`scripts/release.sh` refuses an existing tag, a missing changelog entry, a dirty tree, or a HEAD that isn't
+`origin/main`. The pushed tag triggers `.github/workflows/release.yml`: it refuses a tag that is not on
+`origin/main`, runs the gate (`check.yml`), stamps the tag's version into `package.json` and `manifest.json`, then
+`make dist` (the three binaries, `serverInfo.version` = the bare version, e.g. `2.1.0`), `npm pack` and `make mcpb`,
+and creates the GitHub release. Nothing is published to a registry. The release attaches `copilot-mcp.tgz`,
+`belal-elsabbagh-apex-copilot-mcp-X.Y.Z.tgz`, `copilot-mcp.mcpb` and the raw binaries. A `-` in the version
+(`2.1.0-rc.1`) creates a GitHub prerelease (`releases/latest` skips it).

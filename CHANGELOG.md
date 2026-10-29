@@ -4,6 +4,123 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.0.0] - 2026-10-29
+
+The server is rewritten from TypeScript/Bun to **Go**, with the same MCP surface (tool,
+prompt and resource names, input schemas, result shapes, invariants) and still served through `npx`. Nothing to
+migrate for tool callers apart from the behaviour differences listed below.
+
+### Changed
+
+- **Runtime:** a static Go binary (`go 1.27`, `modelcontextprotocol/go-sdk` v1.8.0 over stdio) replaces the Bun
+  bundle (`dist/server.js`). The npm package's `bin/copilot-mcp.js` is now a Node-builtins-only launcher that execs
+  the bundled binary from `dist/<goos>-<goarch>/`. **Only three platforms ship: linux/amd64, darwin/arm64 (Apple
+  Silicon) and windows/amd64** (the launcher exits with a message on anything else, e.g. Intel Macs). Node >= 20 is
+  only needed to run the launcher; Go 1.27 only to develop. The tarball is ~13 MB (v2.0.0's JS tarball was 174 KB):
+  each Go binary carries its own runtime, and `npx` caches it once per version. The install paths are unchanged:
+  `npx -y https://github.com/belal-elsabbagh-apex/copilot-mcp/releases/latest/download/copilot-mcp.tgz` (or
+  `…/releases/download/vX.Y.Z/copilot-mcp.tgz`) and the `.mcpb`; releases additionally attach the raw binaries.
+- **No registry.** The package is not published to any npm registry: `package.json` is `"private": true`, the
+  repo's `.npmrc` and the GitHub Packages publish step are gone, and `npx` runs the release-asset URL directly
+  (no token needed). v2.0.0's GitHub Packages install path no longer exists.
+- **Tooling follows referral-router:** `make check` is the single gate (vet, gofmt, golangci-lint v2.15.0,
+  actionlint, `go test -race`, package smoke incl. a cold `npx -y` install of the tarball over local HTTP,
+  release-script self-test), run by CI (`check.yml`) and by an opt-in
+  `make hooks` pre-push hook. Biome, tsconfig, Bun and lefthook are gone.
+- **Releases are tag-driven with no version bump:** `make release VERSION=X.Y.Z` (guards in `scripts/release.sh`,
+  including a required `CHANGELOG.md` entry) pushes the tag; `release.yml` gates, cross-builds, stamps the tag's
+  version into `package.json`/`manifest.json`, builds the three binaries and creates the GitHub release with
+  `copilot-mcp.tgz`, the version-stamped tarball, `copilot-mcp.mcpb` and the raw binaries (it refuses a tag that is
+  not on `origin/main`; a `-` in the version makes a GitHub prerelease). The server version
+  (`serverInfo.version`) is the git tag without the leading `v` (`-X main.version`, e.g. `2.1.0`), passed
+  explicitly in the release build.
+- `manifest.json` now launches `bin/copilot-mcp.js` and lists `list_clinics`, so its tool list matches the 33 tools
+  the server registers.
+- Project guidance is rewritten for Go: `CLAUDE.md`, `.claude/rules/*`, a new `.claude/skills/go-style/` skill and
+  `docs/concurrency-and-caching.md`.
+
+### Added
+
+- **Persistent terminal-job caches.** Reads of settled jobs are cached in memory **and on disk**, so they survive
+  restarts: Apex artifact listing + parsed `job.log`, UiPath RobotLogs, and (new) UiPath terminal job detail. An
+  entry is stored only when a live read in the same call shows the job terminal and settled (ended 5+ minutes ago;
+  15 for Apex `cancelled`/`lost`/`timed_out`); errors, not-found and non-terminal jobs are never stored; keys include
+  the upstream URL and resolved folder id; write paths and fetch-first guards never read through a cache.
+  **Job logs and outputs are PHI and now persist on disk** under the user cache dir (`~/.cache/copilot-mcp/`, or
+  `$XDG_CACHE_HOME` / the directory of `COPILOT_MCP_CACHE`): `cache/{apex,uipath-logs,uipath-jobs}/` — directories
+  `0700`, files `0600`, filenames are key hashes; the same protection as the artifacts directory, bounded to
+  512 MiB per namespace and 30 days. `"copilot.sessionCache": false` disables all disk persistence.
+- **`refresh: boolean`** on `get_job`, `get_job_logs`, `build_faulted_job_issue` and `get_job_artifacts`: on the first
+  three it bypasses the cache read and re-stores the fresh result. `get_job_artifacts` never reads a cache (it
+  always lists live), so there `refresh` only re-downloads files even when the sidecar matches. Use it when a cached
+  terminal job looks stale; a cached UiPath job detail reports `ProcessVersion` / `RobotName` as of the moment it
+  was cached.
+- **Persisted credentials:** the Apex JWT and UiPath OAuth token are stored like the Copilot session cache
+  (`tokens/`, `0600`, keyed by a hash of the account identity, never the secret), so a restart reuses them instead of
+  logging in again; a 401 drops them from disk.
+- **Per-sweep Apex queue memo:** `find_stuck_orders` lists an Apex folder's queues once per sweep instead of once per
+  order.
+- **Bounded concurrency:** UiPath per-job fan-outs use a worker pool of 8 (no chunk barriers); Apex data GETs are
+  capped at 8 in flight; settings crawls at 8 per client; `find_stuck_orders` cross-checks 4 orders at a time and
+  prefetches 4 pages; Apex paging fetches pages 2..N in a window of 4; `find_clone_candidates` prefetches 2 pages.
+  Independent calls now run together (`get_order` order ‖ documents, `build_queue_item` order ‖ owner email,
+  `plan_settings_sync` payer maps ‖ crawls, Apex `list_triggers`, the UiPath faults builder). Results keep input
+  order and one item's failure stays isolated. Writes, the mint sequence and `apply_settings_sync` stay sequential
+  and are never retried.
+- **Single-flight logins and tokens:** concurrent cold calls share one Copilot BE login (every scope, including the
+  clinic-less support login shared with `list_clinics` — protecting the 10 logins / 15 min budget), one Apex login,
+  one UiPath OAuth token request.
+- **Shared 429 pause:** a UiPath 429 pauses all UiPath traffic until `Retry-After` instead of each request
+  sleeping independently; shared per-host HTTP transports with raised idle-connection limits.
+- **Artifact skip-if-present:** `get_job_artifacts` `download` skips a file already on disk when a hidden sidecar
+  `.<name>.meta.json` matches the freshly listed artifact id and size; downloads stream to disk via a temp file, so a
+  failed download never leaves a partial file under the real name.
+
+### Behaviour differences
+
+Only what a caller of the server can observe; the tool/prompt/resource names, schemas and result keys are unchanged.
+
+- **Unknown tool arguments are rejected** (`additionalProperties: false`); the TS server silently stripped them.
+- **Validation error wording differs.** Invalid tool input still returns an `isError` text result, but reads
+  `validating "arguments": …` instead of zod's text; prompt argument errors keep the `-32602` code with simpler
+  wording; `pull_queue_item`'s `url` is validated in the handler (`Invalid arguments for tool pull_queue_item: url:
+  Invalid url`), and an explicit empty-string `url` is treated as absent. Prompt arguments no longer list
+  `required: false`.
+- **Config validation messages** keep zod's wording but "not valid JSON" now quotes Go's parser text; unknown config
+  keys are ignored.
+- **Profile names are sorted** in the "available:" list of the unknown-profile error (the TS used file order).
+- **`resources/list` is sorted by URI**, and lists one static resource per portal in addition to the template. The
+  set and contents are identical.
+- **Portal resource URIs are percent-decoded:** `copilot://reference/portal/OPTUM%20CARE%20NETWORK` now resolves
+  (the TS returned `unknown portal`).
+- **Legacy split config files** are looked up in `<cwd>/.local` when `COPILOT_MCP_LOCAL_DIR` is unset (the TS looked
+  next to the package source); `COPILOT_MCP_LOCAL_DIR` is read per call.
+- **JSON object key order:** where the TS order was incidental, keys now come out sorted — `build_queue_item`
+  `meta`, queue-item `specificContent`, a log row's `raw.custom`, query-string order. Order that was wire-visible is
+  preserved (log digest level counts, `details.output` fields, orchestrators resource, `callbackContext`).
+- **`list_clinics`** orders by lower-cased byte order, not locale collation (accented names may order differently).
+- **NPI values are always strings** in output (`search_orders` `referredTo.npi`, settings NPI fields): a numeric BE
+  NPI is converted to its exact decimal string, where the TS passed the number through. Intentional.
+- **Dates:** order dates are parsed with a fixed set of common layouts (ISO, `M/D/YYYY`, `M-D-YYYY`, `M/D/YY` with
+  V8's two-digit-year rule 00–49 → 20xx / 50–99 → 19xx, and common month-name forms) rather than V8's legacy
+  `Date` parser, so an exotic string V8 would accept can be rejected with `unrecognized date …`; empty input yields
+  `""` (not `null`). `list_jobs` with an unparseable `since` returns an expected error instead of a `RangeError`.
+- **Settings:** dropped-payer warnings and all sorts are byte-wise/sorted (not insertion/UTF-16 order); a non-object
+  row in a crawl envelope is dropped rather than kept with an empty name.
+- **Apex:** a page fetched past an empty page can fail the whole call; `stop_job` validates the strategy before the
+  fetch-first read; the fault log tail cap (4000) counts runes, not UTF-16 units.
+  `DashboardLink`-based `link` fields are empty when Apex config cannot be resolved.
+- **UiPath `get_job_logs`** makes one extra light `Jobs` read per id **on a cache miss only** (to obtain the live
+  "settled" verdict for the store decision; it runs alongside the logs fetch). A hit makes no upstream call, so it
+  also skips that read; in the faults builder a failed job read is reported only after the logs fetch has finished.
+- **`find_stuck_orders`** progress ticks per order rather than per batch of 10.
+- **New failure modes from explicit timeouts:** Copilot BE requests have a 5-minute ceiling and Apex requests a
+  300 s response-header timeout (the TS ran under undici's equivalent default); a failed session-cache disk write is logged and no longer fails
+  `Connect`.
+- **Artifacts directory** now also holds the hidden `.<name>.meta.json` sidecars described above.
+
 ## [2.0.0] - 2026-10-12
 
 One orchestrator tool surface backed by UiPath **and** Apex (the orchestrator replacing UiPath portal
