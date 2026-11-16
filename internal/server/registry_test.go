@@ -15,7 +15,7 @@ var expectedTools = []string{
 	"build_queue_item", "find_order_queue_items", "pull_queue_item", "list_queue_items", "list_jobs",
 	"get_job_logs", "build_faulted_job_issue", "find_stuck_orders", "diff_settings", "list_setting_sections",
 	"get_settings", "plan_settings_sync", "apply_settings_sync", "get_order", "search_orders",
-	"get_order_category_stats", "get_login_token", "list_clinics", "doctor", "list_queues", "list_processes",
+	"get_order_category_stats", "get_order_audit", "get_login_token", "list_clinics", "doctor", "list_queues", "list_processes",
 	"list_triggers", "get_job", "get_job_artifacts", "add_queue_item", "delete_queue_item", "start_job",
 	"stop_job", "build_mcp_issue",
 }

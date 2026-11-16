@@ -78,6 +78,34 @@ func getOrder(ctx context.Context, _ *mcp.CallToolRequest, in getOrderArgs) (any
 	return getOrderResult{OrderUID: in.OrderUID, Env: in.Env, OrderVerify: copilot.NormalizeOrder(order), Documents: docs}, nil
 }
 
+// ---- get_order_audit -------------------------------------------------------
+
+type getOrderAuditArgs struct {
+	OrderUID string     `json:"orderUid" jsonschema:"Order UID whose audit trail to fetch"`
+	Env      config.Env `json:"env" jsonschema:"Which env the order lives in (required)"`
+	Profile  string     `json:"profile" jsonschema:"Credential profile / account name from config (required)"`
+	Limit    int        `json:"limit,omitempty" jsonschema:"Entries per page (BE default 20; 1000 returned a whole 34-entry order)"`
+	Order    string     `json:"order,omitempty" jsonschema:"'asc' (oldest first) or 'desc' (newest first, the BE default)"`
+	Cursor   string     `json:"cursor,omitempty" jsonschema:"nextCursor from the previous page"`
+}
+
+type getOrderAuditResult struct {
+	Env config.Env `json:"env"`
+	copilot.AuditPage
+}
+
+func getOrderAudit(ctx context.Context, _ *mcp.CallToolRequest, in getOrderAuditArgs) (any, error) {
+	sess, err := copilot.Connect(ctx, in.Env, in.Profile)
+	if err != nil {
+		return nil, err
+	}
+	page, err := copilot.OrderAudit(ctx, sess.Client, in.OrderUID, copilot.AuditQuery{Limit: in.Limit, Order: in.Order, Cursor: in.Cursor})
+	if err != nil {
+		return nil, err
+	}
+	return getOrderAuditResult{Env: in.Env, AuditPage: page}, nil
+}
+
 // ---- search_orders / get_order_category_stats ------------------------------
 
 // orderFilterArgs is the filter-dimension half of the search_orders / get_order_category_stats
@@ -184,6 +212,27 @@ func registerOrderReadTools(s *Server) {
 		MinLen("orderUid", 8),
 		Enum("env", config.Envs...),
 		MinLen("profile", 1),
+	)
+
+	addTool(s, &mcp.Tool{
+		Name:  "get_order_audit",
+		Title: "Get a Copilot order's audit trail",
+		Description: "Fetch an order's activity trail (GET /orders/{uid}/audit, the UI's audit log): who did what " +
+			"and when — the only BE record naming the ACTOR behind a field edit or submit. Each item has " +
+			"timestamp, source (http|portal|sqs|scheduler|automation|system), actionGroup/action (e.g. " +
+			"ORDER_FIELDS_EDITED, ORDER_SUBMITTED, ORDER_TAB_CHANGED), actor {staffUserId, displayName, isSystem}, " +
+			"text, and details (transition / changes keyed by UI label / attachments). Paged: pass nextCursor " +
+			"back as cursor until it is null. GOTCHAS: a bot's /selected-facility write is logged as source " +
+			"'http' under the user owning the queue item's token, not a system actor (only its failure " +
+			"callbacks use system:portal); an in-network check is logged as ORDER_SUBMITTED. PHI: 'Referral " +
+			"Form *' changes carry patient name/DOB/member id/address — keep output local. READ-ONLY.",
+		Annotations: readOnlyHints(true),
+	}, getOrderAudit,
+		MinLen("orderUid", 8),
+		Enum("env", config.Envs...),
+		MinLen("profile", 1),
+		Range("limit", 1, 1000),
+		Enum("order", "asc", "desc"),
 	)
 
 	addTool(s, &mcp.Tool{

@@ -53,7 +53,7 @@ with `COPILOT_MCP_CONFIG` set to that path.
 
 ## Tools
 
-33 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
+34 tools, grouped below by domain. **Args** lists only the arguments relevant to auth/scope
 (`env`, `profile`, `orchestrator`) — see each tool's own schema for the rest. Every Copilot tool requires an
 explicit `profile`; most also require an explicit `env` (`prod` | `pre_prod`) — neither is ever
 defaulted. The one exception is `list_clinics`, which takes `env` but no `profile`: it's the
@@ -76,6 +76,7 @@ All read tools here are READ-ONLY. Writes (`delete_preprod_order`, `create_prepr
 | `submit_preprod_order` | `profile` | Submit a PRE-PROD order sitting at forReview, advancing it to inProgress. A real, deliberate write — requires explicit user authorization before calling. |
 | `delete_preprod_order` | `profile` | Delete one or more orders from PRE-PROD (`DELETE /api/v1/orders/{uid}`). Never targets prod. |
 | `get_order` | `env`, `profile` | Fetch one order's normalized detail (status, insurance, ICD/CPT, facility, POS, note presence) plus `documents` — clickable CDN links for the auth-screenshot/authorization-summary PDFs when they exist (CloudFront signed-cookie protected; never fetched server-side). |
+| `get_order_audit` | `env`, `profile` | One page of an order's audit trail (`GET /orders/{uid}/audit`): who did what and when — actor, source, action, UI text and field-level `changes`. Page with `cursor` = the previous `nextCursor`; `limit` 1–1000, `order` `asc`/`desc`. Bot `/selected-facility` writes appear under the token owner's name, not a system actor. PHI in `Referral Form *` diffs. |
 | `search_orders` | `env`, `profile` | Filter an account's orders by location, insurance, referred-to, order type, auth/upload status, MRN, free text or any of 5 date ranges (`POST /orders/filter`). Returns slim, non-PHI rows (`referredTo.npi` is always a string, even when the BE sends a number); defaults to type `Outbound Referral`, `pageSize` 100, `pageNumber` 1. |
 | `get_order_category_stats` | `env`, `profile` | Cheap per-folder order counts (For Review, PCP Notes, Processing, Archived, with sub-buckets) for a filter, same dimensions as `search_orders`, no pagination. |
 | `find_stuck_orders` | `env`, `profile`, `orchestrator?` | Scan recent orders in an env and flag ones sitting in a non-terminal status (default `inProgress`/`incomplete`/`pending`). Optional `crossCheck` correlates each to its queue item(s) and job(s) on UiPath and/or Apex (`orchestrator` omitted = both) for a coarse verdict using the latest attempt; adds `job-never-started` for an Apex job that failed before any worker claimed it. Each stuck order carries `orchestrator: { backend, verdict, … }`. |
