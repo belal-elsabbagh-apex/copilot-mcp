@@ -130,6 +130,10 @@
       "description": "Get a Copilot order's normalized detail"
     },
     {
+      "name": "get_order_audit",
+      "description": "Get a Copilot order's audit trail"
+    },
+    {
       "name": "search_orders",
       "description": "Search Copilot orders by dimension"
     },

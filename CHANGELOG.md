@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-16
+
+### Added
+
+- **`get_order_audit`** (`env`, `profile`): one page of an order's activity trail from
+  `GET /api/v1/orders/{uid}/audit`, the UI's audit log and the only BE record of who edited or submitted an
+  order. Optional `limit` (1-1000), `order` (`asc`/`desc`) and `cursor` (the previous page's `nextCursor`).
+  Read-only; `Referral Form *` diffs carry PHI. Contract: `docs/copilot-order-audit-endpoint.md`.
+
 ## [3.0.1] - 2026-10-29
 
 ### Fixed
