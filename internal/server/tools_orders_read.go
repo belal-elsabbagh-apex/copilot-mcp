@@ -112,9 +112,10 @@ func getOrderAudit(ctx context.Context, _ *mcp.CallToolRequest, in getOrderAudit
 // input (TS orderFilterDimensionsSchema).
 type orderFilterArgs struct {
 	Type                 string   `json:"type,omitempty" jsonschema:"Order category, e.g. 'Outbound Referral' (default) or 'PCP Notes'"`
-	Locations            []string `json:"locations,omitempty" jsonschema:"Clinic location names to filter to"`
-	Insurances           []string `json:"insurances,omitempty" jsonschema:"Insurance/payer names to filter to"`
-	ReferredTo           []string `json:"referredTo,omitempty" jsonschema:"referredFacilityUid/referredProviderUid values to filter to"`
+	Locations            []string `json:"locations,omitempty" jsonschema:"Location names (get_order_filter_options). Resolved against the account's location list: a case-insensitive exact name wins, else the one name containing the value; no match or several is an error listing the candidates. Several values are a union. Orders with no location match any location filter (BE behaviour)"`
+	Insurances           []string `json:"insurances,omitempty" jsonschema:"Insurance/payer names. Resolved against the account's insurance list (get_order_filter_options): a case-insensitive exact name wins, else the one name containing the value; no match or several is an error listing the candidates"`
+	Specialities         []string `json:"specialities,omitempty" jsonschema:"Speciality names, resolved like insurances; each expands to every referred facility under it (the BE has no speciality filter, it filters on those facilities). With referredTo, only facilities in both are kept"`
+	ReferredTo           []string `json:"referredTo,omitempty" jsonschema:"Referred facilities: a full referredFacilityUid/referredProviderUid (8-4-4-4-12 UUID) passes through; any other value matches every facility whose name contains it (case-insensitive). Several values are a union"`
 	OrderType            []string `json:"orderType,omitempty" jsonschema:"Order type names, e.g. 'Consultation Referral', 'Follow-up Visit', 'Imaging', 'Injections', 'Medical Supplies', 'Other', 'PCP Notes'"`
 	AuthRequired         []string `json:"authRequired,omitempty" jsonschema:"Authorization Required filter (UI strings)"`
 	AuthStatus           []string `json:"authStatus,omitempty" jsonschema:"Authorization Status filter"`
@@ -140,7 +141,7 @@ type orderFilterArgs struct {
 // dimensions maps the tool args onto the domain's filter input (sort is search-only).
 func (a orderFilterArgs) dimensions(sort string) copilot.OrderFilterDimensions {
 	return copilot.OrderFilterDimensions{
-		Type: a.Type, Locations: a.Locations, Insurances: a.Insurances, ReferredTo: a.ReferredTo,
+		Type: a.Type, Locations: a.Locations, Insurances: a.Insurances, Specialities: a.Specialities, ReferredTo: a.ReferredTo,
 		OrderType: a.OrderType, AuthRequired: a.AuthRequired, AuthStatus: a.AuthStatus,
 		UploadStatusAuth: a.UploadStatusAuth, UploadStatusFax: a.UploadStatusFax,
 		HasAuthScreenshot: a.HasAuthScreenshot, SendFax: a.SendFax, MissingNotes: a.MissingNotes,
@@ -179,6 +180,17 @@ func getOrderCategoryStats(ctx context.Context, _ *mcp.CallToolRequest, in categ
 	return copilot.GetOrderCategoryStats(ctx, copilot.CategoryStatsArgs{
 		Env: in.Env, Profile: in.Profile, OrderFilterDimensions: in.dimensions(""),
 	})
+}
+
+// ---- get_order_filter_options ----------------------------------------------
+
+type filterOptionsArgs struct {
+	Env     config.Env `json:"env" jsonschema:"Which env to read the options from (required)"`
+	Profile string     `json:"profile" jsonschema:"Credential profile / account name from config (required)"`
+}
+
+func getOrderFilterOptions(ctx context.Context, _ *mcp.CallToolRequest, in filterOptionsArgs) (any, error) {
+	return copilot.GetOrderFilterOptions(ctx, in.Env, in.Profile)
 }
 
 // filterPatches are the schema rules of the filter dimensions (TS orderFilterDimensionsSchema).
@@ -238,14 +250,18 @@ func registerOrderReadTools(s *Server) {
 	addTool(s, &mcp.Tool{
 		Name:  "search_orders",
 		Title: "Search Copilot orders by dimension",
-		Description: "Filter an account's Copilot orders by any combination of location, insurance, referred-to, " +
+		Description: "Filter an account's Copilot orders by any combination of location, insurance, speciality, " +
+			"referred-to, " +
 			"order type, auth/upload status, MRN, free-text search, or any of 5 date ranges, via " +
 			"POST /orders/filter. READ-ONLY. Returns slim, non-PHI rows (orderUid, status, dates, insurance, " +
 			"speciality, referredTo{name,npi,external}, auth/upload status — no patient data). insurance/" +
 			"orderType are omitted from a row when the request already filtered to exactly one value for " +
 			"that dimension (it would just repeat the filter back). Defaults to type='Outbound Referral', " +
-			"pageSize=100, pageNumber=1 (1-based). Use get_order for a single order's full detail including " +
-			"patient info.",
+			"pageSize=100, pageNumber=1 (1-based; page N is sent to the BE as N-1). Use get_order for a single order's full detail including " +
+			"patient info. insurances / specialities / referredTo take friendly names and are resolved the way " +
+			"the Copilot UI does (see get_order_filter_options for the values); `resolved` lists, per input " +
+			"value, what was actually sent. A name that matches nothing, or several things, is an error " +
+			"listing the candidates.",
 		Annotations: readOnlyHints(true),
 	}, searchOrders, append([]Patch{
 		Enum("env", config.Envs...),
@@ -262,10 +278,26 @@ func registerOrderReadTools(s *Server) {
 		Title: "Get Copilot order counts per category folder",
 		Description: "Cheap per-folder order counts (For Review, PCP Notes, Processing, Archived, with their " +
 			"sub-buckets) for a given filter, via POST /orders/category/stats — same filter dimensions as " +
-			"search_orders, no pagination. READ-ONLY. Response shape is passed through as returned by the BE.",
+			"search_orders (incl. name resolution of insurances / specialities / referredTo), no pagination. " +
+			"READ-ONLY. Response shape is passed through as returned by the BE; when names were resolved, a " +
+			"top-level `resolved` array of notes is added.",
 		Annotations: readOnlyHints(true),
 	}, getOrderCategoryStats, append([]Patch{
 		Enum("env", config.Envs...),
 		MinLen("profile", 1),
 	}, filterPatches()...)...)
+
+	addTool(s, &mcp.Tool{
+		Name:  "get_order_filter_options",
+		Title: "List the values Copilot order filters resolve against",
+		Description: "The account's filter option lists: `locations` (the names), `insurances` (the names the BE matches) and `specialities` " +
+			"[{name, specialityUid, orderType, facilities:[{name, referredFacilityUid}]}] (the FE's " +
+			"speciality -> facility tree). These are the values search_orders / get_order_category_stats " +
+			"locations, insurances, specialities and referredTo filters resolve against; a speciality filter is the set " +
+			"of its facility uids. READ-ONLY. Returns {env, profile, insurances, specialities}.",
+		Annotations: readOnlyHints(true),
+	}, getOrderFilterOptions,
+		Enum("env", config.Envs...),
+		MinLen("profile", 1),
+	)
 }

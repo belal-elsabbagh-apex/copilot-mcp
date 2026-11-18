@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-18
+
+### Added
+
+- **`get_order_filter_options`** (`env`, `profile`): the location and insurance names and the speciality -> facility tree the
+  Copilot UI offers, i.e. the values the `search_orders` / `get_order_category_stats` filters resolve against.
+- **`specialities` filter** on `search_orders` and `get_order_category_stats`: a speciality expands to every
+  referred facility under it (the BE has no speciality param; the UI filters on those facilities too).
+- **Name resolution** for `locations`, `insurances`, `specialities` and `referredTo`: a case-insensitive exact name wins, else
+  the one name containing the value; no match or several is an error listing the candidates. A non-UUID
+  `referredTo` value matches every facility whose name contains it; a full UUID passes through. `specialities` +
+  `referredTo` intersect. `search_orders` returns `resolved` (and `get_order_category_stats` adds a top-level
+  `resolved` key) saying what was sent.
+  Orders with no location match every `locations` filter (BE behaviour).
+
+### Fixed
+
+- **`search_orders` skipped the BE's first page:** `/orders/filter` pages from 0 but the tool documents a 1-based
+  `pageNumber`, so every call jumped a page ahead (rows `[]` with a non-zero total). The 1-based number is now
+  converted before it is sent.
+
 ## [3.1.0] - 2026-11-16
 
 ### Added
