@@ -19,11 +19,13 @@ import (
 // Omitting a dimension means "no filter" — matches the FE's own omission semantics (no filter, or
 // "everything selected", both send no param), so an empty array is treated the same as omitted
 // rather than "match nothing". Unset scalars are "" (and omitted); unset bools are nil — an
-// explicit false is sent.
+// explicit false is sent. Insurances, Specialities and ReferredTo are friendly names until
+// ResolveOrderFilters rewrites them; Specialities has no BE param and never reaches the wire.
 type OrderFilterDimensions struct {
 	Type                 string   `json:"type,omitempty"`
 	Locations            []string `json:"locations,omitempty"`
 	Insurances           []string `json:"insurances,omitempty"`
+	Specialities         []string `json:"specialities,omitempty"`
 	ReferredTo           []string `json:"referredTo,omitempty"`
 	OrderType            []string `json:"orderType,omitempty"`
 	AuthRequired         []string `json:"authRequired,omitempty"`
@@ -49,7 +51,7 @@ type OrderFilterDimensions struct {
 }
 
 // SearchOrdersArgs are SearchOrders' inputs. Profile "" = no profile; nil paging = defaults
-// (pageSize 100, pageNumber 1).
+// (pageSize 100, pageNumber 1; pageNumber is 1-based here and converted to the BE's 0-based).
 type SearchOrdersArgs struct {
 	Env        config.Env
 	Profile    string
@@ -121,10 +123,11 @@ func intOr(p *int, def int) int {
 }
 
 // BuildFilterBody builds a full /orders/filter request body (dimensions + paging). Pure.
+// pageNumber is the caller's 1-based number; the BE pages from 0.
 func BuildFilterBody(a OrderFilterDimensions, pageSize, pageNumber *int) OrderFilterBody {
 	return OrderFilterBody{
 		PageSize:         intOr(pageSize, 100),
-		PageNumber:       intOr(pageNumber, 1),
+		PageNumber:       intOr(pageNumber, 1) - 1,
 		FilterDimensions: BuildFilterDimensions(a),
 	}
 }
@@ -193,7 +196,8 @@ func StripFilterEchoedFields(row SlimOrderRow, a OrderFilterDimensions) SlimOrde
 	return row
 }
 
-// SearchOrdersResult is the search_orders result.
+// SearchOrdersResult is the search_orders result. Resolved lists how each insurance / speciality /
+// referredTo name was resolved (omitted when nothing needed resolving).
 type SearchOrdersResult struct {
 	Env                   config.Env     `json:"env"`
 	Profile               string         `json:"profile"`
@@ -202,15 +206,21 @@ type SearchOrdersResult struct {
 	TotalNumberOfElements *int           `json:"totalNumberOfElements,omitempty"`
 	Count                 int            `json:"count"`
 	Rows                  []SlimOrderRow `json:"rows"`
+	Resolved              []string       `json:"resolved,omitempty"`
 }
 
-// SearchOrders logs in, POSTs /orders/filter with the built body, and maps the rows.
+// SearchOrders logs in, resolves filter names, POSTs /orders/filter with the built body, and maps
+// the rows.
 func SearchOrders(ctx context.Context, a SearchOrdersArgs) (SearchOrdersResult, error) {
 	s, err := Connect(ctx, a.Env, a.Profile)
 	if err != nil {
 		return SearchOrdersResult{}, err
 	}
-	body := BuildFilterBody(a.OrderFilterDimensions, a.PageSize, a.PageNumber)
+	dims, resolved, err := ResolveOrderFilters(ctx, s.Client, a.OrderFilterDimensions)
+	if err != nil {
+		return SearchOrdersResult{}, err
+	}
+	body := BuildFilterBody(dims, a.PageSize, a.PageNumber)
 	page, err := FilterOrders(ctx, s.Client, body)
 	if err != nil {
 		return SearchOrdersResult{}, err
@@ -221,19 +231,32 @@ func SearchOrders(ctx context.Context, a SearchOrdersArgs) (SearchOrdersResult, 
 	}
 	rows := make([]SlimOrderRow, len(page.Rows))
 	for i, o := range page.Rows {
-		rows[i] = StripFilterEchoedFields(SlimOrder(o), a.OrderFilterDimensions)
+		rows[i] = StripFilterEchoedFields(SlimOrder(o), dims)
 	}
 	return SearchOrdersResult{
-		Env: a.Env, Profile: profile, PageSize: body.PageSize, PageNumber: body.PageNumber,
-		TotalNumberOfElements: page.Total, Count: len(rows), Rows: rows,
+		Env: a.Env, Profile: profile, PageSize: body.PageSize, PageNumber: body.PageNumber + 1,
+		TotalNumberOfElements: page.Total, Count: len(rows), Rows: rows, Resolved: resolved,
 	}, nil
 }
 
-// GetOrderCategoryStats logs in and POSTs /orders/category/stats (no paging fields).
+// GetOrderCategoryStats logs in, resolves filter names, and POSTs /orders/category/stats (no
+// paging fields). The BE response is passed through; when names were resolved, a top-level
+// `resolved` key carries the notes (absent otherwise).
 func GetOrderCategoryStats(ctx context.Context, a CategoryStatsArgs) (map[string]any, error) {
 	s, err := Connect(ctx, a.Env, a.Profile)
 	if err != nil {
 		return nil, err
 	}
-	return CategoryStats(ctx, s.Client, BuildFilterDimensions(a.OrderFilterDimensions))
+	dims, resolved, err := ResolveOrderFilters(ctx, s.Client, a.OrderFilterDimensions)
+	if err != nil {
+		return nil, err
+	}
+	stats, err := CategoryStats(ctx, s.Client, BuildFilterDimensions(dims))
+	if err != nil {
+		return nil, err
+	}
+	if len(resolved) > 0 {
+		stats["resolved"] = resolved
+	}
+	return stats, nil
 }

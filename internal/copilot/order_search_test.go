@@ -55,16 +55,16 @@ func TestBuildFilterDimensionsSendsExplicitFalseButOmitsUnsetBools(t *testing.T)
 	}
 }
 
-func TestBuildFilterBodyPagingDefaultsAndOverrides(t *testing.T) {
+func TestBuildFilterBodyPagingIsOneBasedForTheCallerAndZeroBasedForTheBE(t *testing.T) {
 	b := BuildFilterBody(OrderFilterDimensions{}, nil, nil)
-	if b.PageSize != 100 || b.PageNumber != 1 {
-		t.Errorf("defaults = %d/%d", b.PageSize, b.PageNumber)
+	if b.PageSize != 100 || b.PageNumber != 0 {
+		t.Errorf("defaults = %d/%d, want the BE's first page (0) for the caller's default page 1", b.PageSize, b.PageNumber)
 	}
-	size, num := 50, 0
-	if b = BuildFilterBody(OrderFilterDimensions{}, &size, &num); b.PageSize != 50 || b.PageNumber != 0 {
-		t.Errorf("explicit page 0 must survive: %d/%d", b.PageSize, b.PageNumber)
+	size, num := 50, 3
+	if b = BuildFilterBody(OrderFilterDimensions{}, &size, &num); b.PageSize != 50 || b.PageNumber != 2 {
+		t.Errorf("page 3 must be sent as BE page 2: %d/%d", b.PageSize, b.PageNumber)
 	}
-	if got := asJSON(t, b); !strings.HasPrefix(got, `{"pageSize":50,"pageNumber":0,"type"`) {
+	if got := asJSON(t, b); !strings.HasPrefix(got, `{"pageSize":50,"pageNumber":2,"type"`) {
 		t.Errorf("body = %s", got)
 	}
 }
@@ -118,28 +118,58 @@ func TestStripFilterEchoedFields(t *testing.T) {
 	}
 }
 
-func TestSearchOrdersLogsInPostsTheBuiltBodyAndMapsRows(t *testing.T) {
+func TestSearchOrdersLogsInResolvesNamesPostsTheBuiltBodyAndMapsRows(t *testing.T) {
 	be := setup(t, map[string]any{"sessionCache": false})
 	be.handler = func(w http.ResponseWriter, p string) {
-		if p == "/api/v1/orders/filter" {
+		switch p {
+		case "/api/v1/orders/authorizationInsuranceNames":
+			w.Write([]byte(`{"data":[{"name":"OPTUM CARE NETWORK"},{"name":"CenCal"}]}`))
+		case "/api/v1/orders/filter":
 			w.Write([]byte(`{"data":[{"orderUid":"u1","status":"forReview","insurance":{"name":"OPTUM CARE NETWORK"},"referredFacility":{"name":"Regal","NPI":"111"}}],"totalNumberOfElements":1}`))
-			return
+		default:
+			defaultHandler(w, p)
 		}
-		defaultHandler(w, p)
 	}
-	out, err := SearchOrders(t.Context(), SearchOrdersArgs{Env: config.PreProd, Profile: "ossm", OrderFilterDimensions: OrderFilterDimensions{Insurances: []string{"OPTUM CARE NETWORK"}}})
+	out, err := SearchOrders(t.Context(), SearchOrdersArgs{Env: config.PreProd, Profile: "ossm", OrderFilterDimensions: OrderFilterDimensions{Insurances: []string{"optum care network"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(be.paths(), []string{loginPath, "/api/v1/orders/filter"}) {
+	if !slices.Equal(be.paths(), []string{loginPath, "/api/v1/orders/authorizationInsuranceNames", "/api/v1/orders/filter"}) {
 		t.Fatalf("paths = %v", be.paths())
 	}
-	if be.bodies[1]["insurances"] != `["OPTUM CARE NETWORK"]` || be.bodies[1]["type"] != "Outbound Referral" {
-		t.Errorf("body = %v", be.bodies[1])
+	if be.bodies[2]["insurances"] != `["OPTUM CARE NETWORK"]` || be.bodies[2]["type"] != "Outbound Referral" {
+		t.Errorf("body = %v", be.bodies[2])
 	}
-	want := `{"env":"pre_prod","profile":"ossm","pageSize":100,"pageNumber":1,"totalNumberOfElements":1,"count":1,"rows":[{"orderUid":"u1","status":"forReview","referredTo":{"name":"Regal","npi":"111"}}]}`
+	if n, _ := be.bodies[2]["pageNumber"].(float64); n != 0 {
+		t.Errorf("default call sent BE pageNumber %v, want 0 (the BE's first page)", be.bodies[2]["pageNumber"])
+	}
+	want := `{"env":"pre_prod","profile":"ossm","pageSize":100,"pageNumber":1,"totalNumberOfElements":1,"count":1,"rows":[{"orderUid":"u1","status":"forReview","referredTo":{"name":"Regal","npi":"111"}}],"resolved":["insurances: optum care network → OPTUM CARE NETWORK"]}`
 	if got := asJSON(t, out); got != want {
 		t.Errorf("got  %s\nwant %s (insurance is echoed by the filter, so stripped)", got, want)
+	}
+}
+
+func TestGetOrderCategoryStatsAddsResolvedOnlyWhenNamesWereResolved(t *testing.T) {
+	be := setup(t, map[string]any{"sessionCache": false})
+	be.handler = func(w http.ResponseWriter, p string) {
+		switch p {
+		case "/api/v1/orders/authorizationInsuranceNames":
+			w.Write([]byte(`{"data":[{"name":"CenCal"}]}`))
+		case "/api/v1/orders/category/stats":
+			w.Write([]byte(`{"For Review":{"new":2}}`))
+		default:
+			defaultHandler(w, p)
+		}
+	}
+	out, err := GetOrderCategoryStats(t.Context(), CategoryStatsArgs{Env: config.PreProd, Profile: "ossm", OrderFilterDimensions: OrderFilterDimensions{Insurances: []string{"cencal"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if be.bodies[2]["insurances"] != `["CenCal"]` {
+		t.Errorf("body = %v", be.bodies[2])
+	}
+	if !reflect.DeepEqual(out["resolved"], []string{"insurances: cencal → CenCal"}) {
+		t.Errorf("resolved = %v", out["resolved"])
 	}
 }
 

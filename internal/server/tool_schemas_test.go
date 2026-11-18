@@ -83,8 +83,9 @@ var schemaCases = map[string]struct{ valid, invalid m }{
 	// The actionIds-XOR-all rule is enforced at runtime (Expected error), not in the schema.
 	"apply_settings_sync":      {m{"profile": "ossm", "actionIds": []string{"specialties:create:MRI:Cardiology"}}, m{"actionIds": []string{"specialties:create:MRI:Cardiology"}}},
 	"get_order":                {m{"orderUid": "abcdefgh", "env": "prod", "profile": "ossm"}, m{"orderUid": "abcdefgh", "env": "prod"}},
-	"search_orders":            {m{"env": "prod", "profile": "ossm", "insurances": []string{"OPTUM CARE NETWORK"}}, m{"profile": "ossm"}},
-	"get_order_category_stats": {m{"env": "prod", "profile": "ossm"}, m{"profile": "ossm"}},
+	"search_orders":            {m{"env": "prod", "profile": "ossm", "insurances": []string{"OPTUM CARE NETWORK"}, "specialities": []string{"Cardiology"}}, m{"profile": "ossm"}},
+	"get_order_category_stats": {m{"env": "prod", "profile": "ossm", "specialities": []string{"Cardiology"}}, m{"profile": "ossm"}},
+	"get_order_filter_options": {m{"env": "prod", "profile": "ossm"}, m{"profile": "ossm"}},
 	"get_order_audit":          {m{"orderUid": "abcdefgh", "env": "prod", "profile": "ossm", "limit": 1000, "order": "asc"}, m{"orderUid": "abcdefgh", "env": "prod", "profile": "ossm", "order": "newest"}},
 	"get_login_token":          {m{"env": "prod", "profile": "ossm"}, m{"profile": "ossm"}},
 	"list_clinics":             {m{"env": "prod"}, m{}},

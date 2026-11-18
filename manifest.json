@@ -142,6 +142,10 @@
       "description": "Get Copilot order counts per category folder"
     },
     {
+      "name": "get_order_filter_options",
+      "description": "List the values Copilot order filters resolve against"
+    },
+    {
       "name": "get_login_token",
       "description": "Get a Copilot BE login token"
     },
