@@ -45,6 +45,7 @@ type beServer struct {
 	mu      sync.Mutex
 	reqs    []string
 	bodies  []map[string]any
+	auths   []string // Authorization header per request
 	handler func(w http.ResponseWriter, path string)
 }
 
@@ -67,7 +68,7 @@ func (b *beServer) paths() []string {
 
 func (b *beServer) reset() {
 	b.mu.Lock()
-	b.reqs, b.bodies = nil, nil
+	b.reqs, b.bodies, b.auths = nil, nil, nil
 	b.mu.Unlock()
 }
 
@@ -82,6 +83,7 @@ func setup(t *testing.T, extraCopilot map[string]any) *beServer {
 		b.mu.Lock()
 		b.reqs = append(b.reqs, r.URL.Path)
 		b.bodies = append(b.bodies, body)
+		b.auths = append(b.auths, r.Header.Get("Authorization"))
 		h := b.handler
 		b.mu.Unlock()
 		h(w, r.URL.Path)
@@ -91,7 +93,7 @@ func setup(t *testing.T, extraCopilot map[string]any) *beServer {
 		return map[string]any{"be": b.URL, "email": email, "password": "pw"}
 	}
 	cp := map[string]any{
-		"support": map[string]any{"prod": creds("support@example.com")},
+		"support": map[string]any{"prod": withTOTP(creds("support@example.com"))},
 		"profiles": map[string]any{
 			"ossm":  map[string]any{"prod": map[string]any{"clinicUid": clinicUID}, "pre_prod": creds("ossm-preprod@example.com")},
 			"kafri": map[string]any{"prod": map[string]any{"clinicUid": clinicUID2}},
@@ -112,6 +114,14 @@ func setup(t *testing.T, extraCopilot map[string]any) *beServer {
 	ResetSessionCacheForTest()
 	t.Cleanup(func() { config.ResetForTest(); ResetSessionCacheForTest() })
 	return b
+}
+
+// testTOTPSecret is base32 of the RFC 6238 ASCII key "12345678901234567890" — a public test vector.
+const testTOTPSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+func withTOTP(m map[string]any) map[string]any {
+	m["totpSecret"] = testTOTPSecret
+	return m
 }
 
 const (

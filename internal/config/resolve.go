@@ -195,7 +195,7 @@ func ResolveAuth(profile string, env Env) (EnvAuth, error) {
 	if be == "" {
 		be = support.BE
 	}
-	return EnvAuth{Mode: ModeSupport, BE: be, Email: support.Email, Password: support.Password, ClinicUID: e.ClinicUID}, nil
+	return EnvAuth{Mode: ModeSupport, BE: be, Email: support.Email, Password: support.Password, ClinicUID: e.ClinicUID, TOTPSecret: support.TOTPSecret}, nil
 }
 
 // SessionCacheEnabled reports whether sessions persist to disk (default true).

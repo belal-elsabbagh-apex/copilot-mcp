@@ -193,6 +193,12 @@ to the support-account model one env at a time without deleting its old credenti
 prod ships as support-account (`copilot.support.prod` required) and pre-prod stays on direct
 login, but nothing hard-codes that split — it's whatever each profile's env entries say.
 
+**Support-account MFA.** When an env's support account has TOTP MFA on (pre-prod does), add the
+authenticator's base32 secret as `copilot.support.<env>.totpSecret` (optional; RFC 6238 defaults:
+SHA-1, 6 digits, 30 s). The server answers the login's `SUPPORT_MFA_REQUIRED` challenge with a
+code from it. It never auto-enrolls (an unenrolled account must enroll once in the web app) and
+never retries a rejected code, because wrong codes count toward lockout. Direct accounts are unaffected.
+
 Authenticated sessions (cookies + JWT) are cached in memory and, by default, on disk at
 `~/.cache/copilot-mcp/sessions.json` (mode `0600`; `$XDG_CACHE_HOME` is honored when set to an
 absolute path; `COPILOT_MCP_CACHE` overrides the path outright) so a server restart doesn't
