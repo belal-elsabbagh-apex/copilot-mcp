@@ -18,6 +18,9 @@ type EnvCreds struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	FE       string `json:"fe,omitempty"`
+	// TOTPSecret is the support account's base32 authenticator secret (copilot.support.<env>.totpSecret),
+	// used only when the BE demands MFA at login. Not read for direct accounts.
+	TOTPSecret string `json:"totpSecret,omitempty"`
 }
 
 // ProfileEnv is one env of one profile: EITHER a clinic pointer (support-account auth) OR a
@@ -131,6 +134,8 @@ type EnvAuth struct {
 	Email     string
 	Password  string
 	ClinicUID string
+	// TOTPSecret is set only for ModeSupport.
+	TOTPSecret string
 }
 
 // FeedbackConfig is the on-failure feedback setting. RepositoryURL is "" unless configured

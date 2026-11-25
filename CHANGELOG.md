@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-25
+
+### Added
+
+- **Support-account TOTP MFA.** Pre-prod now answers a support account's login with 403 `SUPPORT_MFA_REQUIRED`. With
+  `copilot.support.<env>.totpSecret` (base32, optional) set, the login computes the code (RFC 6238, `crypto/hmac`) and
+  completes `POST /support/mfa/verify`. Enroll mode, a missing secret and any verify 4xx are refused with a clear
+  error and are never retried. The contract is read from the pre-prod web app bundle and has not been exercised
+  against a live support login.
+
 ## [3.2.0] - 2026-11-18
 
 ### Added

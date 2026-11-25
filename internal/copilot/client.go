@@ -47,6 +47,8 @@ type FilePart struct {
 type ReqBody struct {
 	JSON any
 	Form *FilePart
+	// Header is extra request headers (the MFA verify's Bearer token); nil = none.
+	Header map[string]string
 }
 
 // Client is a BE HTTP client for one tenant. It is an interface because the write engines and the
@@ -151,6 +153,9 @@ func (c *httpClient) Req(ctx context.Context, method, path string, body ReqBody)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range body.Header {
+		req.Header.Set(k, v)
 	}
 	if h := c.cookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)

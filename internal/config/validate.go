@@ -176,6 +176,9 @@ func (c *checker) copilot(root map[string]any) {
 	if sup, ok := c.obj(p, o, "support", false); ok {
 		for _, env := range Envs {
 			c.creds(sub(p, "support"), sup, string(env), false)
+			if envObj, ok := sup[string(env)].(map[string]any); ok { // shape already reported by creds
+				c.str(sub(sub(p, "support"), string(env)), envObj, "totpSecret", strRule{min1: true})
+			}
 		}
 	}
 	c.creds(p, o, "prod", false)

@@ -106,7 +106,9 @@ type loginResult struct {
 	token  string
 }
 
-func doLogin(ctx context.Context, be string, env config.Env, email, password string) (loginResult, error) {
+// totpSecret is the support account's base32 TOTP secret ("" = none); it is only used when the BE
+// answers 403 SUPPORT_MFA_REQUIRED (totp.go).
+func doLogin(ctx context.Context, be string, env config.Env, email, password, totpSecret string) (loginResult, error) {
 	client := newHTTPClient(be, env, nil)
 	r, err := client.Req(ctx, "POST", "/api/v1/copilot/physician/login", ReqBody{JSON: map[string]any{"email": email, "password": password}})
 	if err != nil {
@@ -118,6 +120,9 @@ func doLogin(ctx context.Context, be string, env config.Env, email, password str
 			reset = "?"
 		}
 		return loginResult{}, fmt.Errorf("login failed 429: support login rate-limited (10 logins per 15 minutes) — retry after %ss; do not rotate to another account", reset)
+	}
+	if _, _, mfa := mfaChallenge(r.Data); mfa && r.Status == 403 {
+		return completeMFA(ctx, client, env, r.Data, totpSecret)
 	}
 	if r.Status >= 400 {
 		return loginResult{}, fmt.Errorf("login failed %d: %s", r.Status, shared.SliceUTF16(r.Text, 300))
@@ -180,7 +185,7 @@ func connectDirect(ctx context.Context, auth config.EnvAuth, env config.Env) (Se
 	if cached, ok := cacheGet(key); ok {
 		return sessionFromEntry(cached, env, auth.BE, config.ModeDirect, auth.Email, ""), nil
 	}
-	lr, err := doLogin(ctx, auth.BE, env, auth.Email, auth.Password)
+	lr, err := doLogin(ctx, auth.BE, env, auth.Email, auth.Password, "")
 	if err != nil {
 		return Session{}, err
 	}
@@ -192,13 +197,13 @@ func connectDirect(ctx context.Context, auth config.EnvAuth, env config.Env) (Se
 // supportCookies is the clinic-less support session's cookies (cached under its own scope — it
 // survives every switch and is the cheap way to re-list clinics). Cold logins are single-flighted
 // on the support key so concurrent connects/ListClinics share ONE login.
-func supportCookies(ctx context.Context, env config.Env, be, email, password string) (map[string]string, error) {
+func supportCookies(ctx context.Context, env config.Env, be, email, password, totpSecret string) (map[string]string, error) {
 	key := SessionKey(env, be, email, "support")
 	cookies, err := shared.SingleFlight(ctx, &flights, key, func(ctx context.Context) (map[string]string, error) {
 		if cached, ok := cacheGet(key); ok {
 			return cached.Cookies, nil
 		}
-		lr, err := doLogin(ctx, be, env, email, password)
+		lr, err := doLogin(ctx, be, env, email, password, totpSecret)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +222,7 @@ func connectSupport(ctx context.Context, auth config.EnvAuth, env config.Env) (S
 	if cached, ok := cacheGet(key); ok && cached.Scope == scope && sameClinicID(TokenClinicID(cached.Token), cached.ActiveClinicID) {
 		return sessionFromEntry(cached, env, auth.BE, config.ModeSupport, auth.Email, auth.ClinicUID), nil
 	}
-	cookies, err := supportCookies(ctx, env, auth.BE, auth.Email, auth.Password)
+	cookies, err := supportCookies(ctx, env, auth.BE, auth.Email, auth.Password, auth.TOTPSecret)
 	if err != nil {
 		return Session{}, err
 	}
@@ -264,7 +269,7 @@ func ListClinics(ctx context.Context, env config.Env) ([]Clinic, error) {
 	if err != nil {
 		return nil, err
 	}
-	cookies, err := supportCookies(ctx, env, support.BE, support.Email, support.Password)
+	cookies, err := supportCookies(ctx, env, support.BE, support.Email, support.Password, support.TOTPSecret)
 	if err != nil {
 		return nil, err
 	}
